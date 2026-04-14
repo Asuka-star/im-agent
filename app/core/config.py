@@ -15,6 +15,8 @@ class Settings(BaseSettings):
     feishu_app_secret: str = Field(default="", alias="FEISHU_APP_SECRET")
     feishu_verification_token: str = Field(default="", alias="FEISHU_VERIFICATION_TOKEN")
     feishu_encrypt_key: str = Field(default="", alias="FEISHU_ENCRYPT_KEY")
+    feishu_api_base_url: str = Field(default="https://open.feishu.cn", alias="FEISHU_API_BASE_URL")
+    feishu_reply_enabled: bool = Field(default=False, alias="FEISHU_REPLY_ENABLED")
 
     llm_api_key: str = Field(default="", alias="LLM_API_KEY")
     llm_base_url: str = Field(default="", alias="LLM_BASE_URL")

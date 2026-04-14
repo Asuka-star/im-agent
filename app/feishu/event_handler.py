@@ -1,5 +1,6 @@
 import json
 
+from app.core.config import settings
 from app.schemas.feishu_event import (
     FeishuEventEnvelope,
     FeishuEventType,
@@ -15,6 +16,16 @@ class FeishuEventHandler:
 
     def is_url_verification(self, envelope: FeishuEventEnvelope) -> bool:
         return envelope.type == FeishuEventType.URL_VERIFICATION
+
+    def verify_token(self, envelope: FeishuEventEnvelope) -> bool:
+        if not settings.feishu_verification_token:
+            return True
+
+        candidates = [
+            envelope.token,
+            envelope.header.token if envelope.header else None,
+        ]
+        return settings.feishu_verification_token in candidates
 
     def extract_message_context(self, envelope: FeishuEventEnvelope) -> FeishuMessageContext | None:
         event_type = envelope.header.event_type if envelope.header else None

@@ -29,7 +29,7 @@ uvicorn app.main:app --reload
 
 ## Current status
 
-This is the initial backend scaffold. Feishu event handling and LLM workflow are stubbed and will be implemented next.
+This is an early backend scaffold with a working Feishu event entrypoint, token validation support, and a reply-preview flow. Real model integration and persistent chat memory are still placeholders.
 
 ## Available endpoints
 
@@ -42,3 +42,5 @@ The Feishu event endpoint currently supports:
 - url verification challenge response
 - parsing `im.message.receive_v1` text messages
 - generating a reply preview from the internal workflow
+- optional verification token checks
+- optional real message replies when `FEISHU_REPLY_ENABLED=true`

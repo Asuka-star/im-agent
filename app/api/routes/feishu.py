@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 
 from app.feishu.event_handler import FeishuEventHandler
 from app.services.feishu_workflow import FeishuWorkflowService
@@ -17,6 +17,9 @@ async def receive_events(request: Request) -> dict:
     if event_handler.is_url_verification(envelope):
         return {"challenge": envelope.challenge}
 
+    if not event_handler.verify_token(envelope):
+        raise HTTPException(status_code=403, detail="Invalid Feishu verification token")
+
     message_context = event_handler.extract_message_context(envelope)
     if message_context is None:
         return {"code": 0, "msg": "ignored"}
@@ -28,6 +31,8 @@ async def receive_events(request: Request) -> dict:
         "data": {
             "session_id": result["session_id"],
             "reply_preview": result["reply_preview"],
+            "reply_sent": result["reply_sent"],
+            "reply_error": result["reply_error"],
             "task_count": len(result["analysis"].tasks),
         },
     }
