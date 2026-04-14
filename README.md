@@ -30,3 +30,15 @@ uvicorn app.main:app --reload
 ## Current status
 
 This is the initial backend scaffold. Feishu event handling and LLM workflow are stubbed and will be implemented next.
+
+## Available endpoints
+
+- `GET /api/health`
+- `POST /api/workflow/analyze`
+- `POST /api/feishu/events`
+
+The Feishu event endpoint currently supports:
+
+- url verification challenge response
+- parsing `im.message.receive_v1` text messages
+- generating a reply preview from the internal workflow
