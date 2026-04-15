@@ -47,6 +47,7 @@ class InteractionService:
         "演示稿",
         "汇报稿",
         "路演稿",
+        "演讲稿",
         "ppt",
         "PPT",
         "幻灯片",

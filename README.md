@@ -73,6 +73,14 @@ In the current interaction design, ordinary discussion messages are only stored.
 - `@机器人 现在还有哪些任务没负责人？`
 - `@机器人 生成演示稿大纲`
 
+For slide drafting, the current MVP outputs a presentation package with:
+
+- theme
+- applicable scenario
+- 5 to 7 slide pages
+- emphasis points for speaking
+- suggested supporting materials
+
 ## Available endpoints
 
 - `GET /api/health`

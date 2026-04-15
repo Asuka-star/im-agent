@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 
 class LLMService:
-    """OpenAI-compatible LLM client for collaboration extraction and drafting."""
+    """OpenAI-compatible client for collaboration extraction and slide drafting."""
 
     def __init__(self) -> None:
         self.api_key = settings.llm_api_key or settings.anthropic_auth_token
@@ -21,8 +21,7 @@ class LLMService:
         return bool(self.api_key and self.base_url and self.model)
 
     def extract_collaboration(self, raw_text: str) -> dict[str, Any]:
-        if not self.is_configured():
-            raise RuntimeError("LLM config is incomplete.")
+        self._ensure_configured()
 
         payload = {
             "model": self.model,
@@ -40,24 +39,29 @@ class LLMService:
         logger.info("LLM extraction succeeded with %s task(s)", len(result.get("tasks", [])))
         return result
 
-    def generate_presentation_outline(self, workspace_context: str, instruction: str) -> str:
-        if not self.is_configured():
-            raise RuntimeError("LLM config is incomplete.")
+    def generate_presentation_package(self, workspace_context: str, instruction: str) -> dict[str, Any]:
+        self._ensure_configured()
 
         payload = {
             "model": self.model,
             "temperature": 0.4,
+            "response_format": {"type": "json_object"},
             "messages": [
                 {"role": "system", "content": self._presentation_prompt()},
                 {
                     "role": "user",
-                    "content": f"{workspace_context}\n\n[本次请求]\n{instruction}",
+                    "content": f"{workspace_context}\n\n[Current request]\n{instruction}",
                 },
             ],
         }
 
         data = self._post_chat_completion(payload)
-        return self._extract_text(data).strip()
+        text = self._extract_text(data)
+        return self._parse_json(text)
+
+    def _ensure_configured(self) -> None:
+        if not self.is_configured():
+            raise RuntimeError("LLM config is incomplete.")
 
     def _post_chat_completion(self, payload: dict[str, Any]) -> dict[str, Any]:
         headers = {
@@ -66,7 +70,11 @@ class LLMService:
         }
 
         with httpx.Client(timeout=60.0) as client:
-            response = client.post(f"{self.base_url}/chat/completions", json=payload, headers=headers)
+            response = client.post(
+                f"{self.base_url}/chat/completions",
+                json=payload,
+                headers=headers,
+            )
             response.raise_for_status()
             return response.json()
 
@@ -97,44 +105,59 @@ class LLMService:
 
     def _extraction_prompt(self) -> str:
         return """
-你是飞书办公协作助手，负责把多人群聊讨论整理成结构化协作结果。
-你必须只输出合法 JSON，不要输出 markdown，不要输出解释。
+You are a Feishu collaboration assistant.
+Convert a multi-person chat discussion into structured collaboration output.
+Return valid JSON only. No markdown, no explanation.
 
-输出格式：
+Schema:
 {
-  "summary": "中文摘要",
+  "summary": "Simplified Chinese summary",
   "tasks": [
     {
-      "title": "任务标题",
-      "owner": "负责人；不明确则填 TBD",
+      "title": "task title",
+      "owner": "owner or TBD",
       "priority": "high|medium|low",
-      "due_date": "截止时间；不明确则填 TBD",
+      "due_date": "deadline or TBD",
       "status": "draft",
-      "notes": "支撑该任务的原始讨论片段"
+      "notes": "supporting discussion snippet"
     }
   ],
-  "risks": ["中文风险点"],
-  "next_actions": ["中文下一步建议"]
+  "risks": ["risk in Simplified Chinese"],
+  "next_actions": ["next action in Simplified Chinese"]
 }
 
-规则：
-- 只提取当前讨论中真正明确的任务和行动项。
-- 如果内容主要是闲聊或未形成动作，请返回空 tasks 数组。
-- 如果没有明确负责人，填写 TBD。
-- 如果没有明确截止时间，填写 TBD。
-- 所有输出都使用简体中文。
+Rules:
+- Extract only explicit actions and commitments.
+- If the message is mostly discussion without clear actions, return an empty tasks array.
+- If owner is unclear, use TBD.
+- If due date is unclear, use TBD.
+- All output must be Simplified Chinese.
 """.strip()
 
     def _presentation_prompt(self) -> str:
         return """
-你是办公协作助手，负责把飞书群聊讨论整理成可执行的演示稿大纲。
-请输出简体中文，格式清晰，适合直接复制到文档或 PPT 中。
+You are a workplace collaboration assistant.
+Turn Feishu group discussion, tasks, risks, and conclusions into a presentation draft package.
+Return valid JSON only. No markdown, no explanation.
+All output must be Simplified Chinese.
 
-输出要求：
-- 先给一个演示主题
-- 再给“适用场景”
-- 然后按 5 到 7 页输出每页标题和要点
-- 最后补一段“演示时重点强调”
+Schema:
+{
+  "theme": "presentation theme",
+  "audience": "target audience or applicable scenario",
+  "slides": [
+    {
+      "title": "slide title",
+      "bullets": ["bullet 1", "bullet 2", "bullet 3"]
+    }
+  ],
+  "emphasis": ["important speaking point 1", "important speaking point 2"],
+  "assets": ["supporting material 1", "supporting material 2"]
+}
 
-你需要尽量利用已有的任务、风险、结论和待办信息，不要编造不存在的业务事实。
+Rules:
+- Produce 5 to 7 slides.
+- Each slide should have 2 to 4 concise bullets.
+- Use only information supported by the workspace context.
+- Prioritize actionability: goals, decisions, task split, timeline, risks, next steps.
 """.strip()
