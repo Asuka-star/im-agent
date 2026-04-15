@@ -1,22 +1,18 @@
 from app.schemas.analyze import AgentTrace
 from app.schemas.task import TaskItem
+from app.services.text_analysis import normalize_tasks
 
 
 class CoordinatorAgent:
     def run(self, tasks: list[TaskItem]) -> tuple[list[TaskItem], AgentTrace]:
-        updated_tasks: list[TaskItem] = []
-        for task in tasks:
-            updated_tasks.append(
-                task.model_copy(
-                    update={
-                        "owner": "Project Owner",
-                        "due_date": "This week",
-                    }
-                )
-            )
-
+        updated_tasks = normalize_tasks(tasks)
+        missing_owner_count = sum(1 for task in updated_tasks if task.owner == "TBD")
+        missing_due_count = sum(1 for task in updated_tasks if task.due_date == "TBD")
         trace = AgentTrace(
             agent="coordinator",
-            summary="Added a tentative owner and due date to each task.",
+            summary=(
+                f"Normalized {len(updated_tasks)} task(s); "
+                f"{missing_owner_count} still need owners and {missing_due_count} still need due dates."
+            ),
         )
         return updated_tasks, trace

@@ -3,6 +3,7 @@ from app.agents.memory import MemoryAgent
 from app.agents.planner import PlannerAgent
 from app.agents.reviewer import ReviewerAgent
 from app.schemas.analyze import AnalyzeRequest, AnalyzeResponse
+from app.services.text_analysis import build_next_actions, build_summary
 
 
 class AgentOrchestrator:
@@ -17,7 +18,8 @@ class AgentOrchestrator:
         tasks, coordinator_trace = self.coordinator.run(tasks)
         risks, reviewer_trace = self.reviewer.run(tasks)
 
-        summary = "Generated an initial collaboration view from the latest message."
+        summary = build_summary(payload.raw_text, tasks)
+        next_actions = build_next_actions(tasks, risks)
         memory_trace = self.memory.run(summary)
 
         return AnalyzeResponse(
@@ -25,10 +27,7 @@ class AgentOrchestrator:
             summary=summary,
             tasks=tasks,
             risks=risks,
-            next_actions=[
-                "Confirm the owner for each task.",
-                "Confirm concrete due dates in the Feishu chat.",
-            ],
+            next_actions=next_actions,
             agent_traces=[
                 planner_trace,
                 coordinator_trace,
