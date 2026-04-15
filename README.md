@@ -41,6 +41,14 @@ Run the container on port `9000`:
 docker run --name feishu-im-agent-mvp --env-file .env -p 9000:9000 feishu-im-agent-mvp
 ```
 
+PowerShell redeploy helper:
+
+```powershell
+.\scripts\redeploy.ps1
+```
+
+This script uses the Docker context `mylinux` by default, rebuilds the image, replaces the running container, and prints recent logs.
+
 If you expose the host through FRP and map `175.178.183.71:19000` to local `9000`, then your Feishu callback URL should be:
 
 ```text
