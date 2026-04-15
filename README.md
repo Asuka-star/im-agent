@@ -27,6 +27,26 @@ Current goal:
 uvicorn app.main:app --reload
 ```
 
+## Docker
+
+Build the image:
+
+```bash
+docker build -t feishu-im-agent-mvp .
+```
+
+Run the container on port `9000`:
+
+```bash
+docker run --name feishu-im-agent-mvp --env-file .env -p 9000:9000 feishu-im-agent-mvp
+```
+
+If you expose the host through FRP and map `175.178.183.71:19000` to local `9000`, then your Feishu callback URL should be:
+
+```text
+http://175.178.183.71:19000/api/feishu/events
+```
+
 ## Current status
 
 This is an early backend scaffold with a working Feishu event entrypoint, token validation support, and a reply-preview flow. Real model integration and persistent chat memory are still placeholders.
@@ -44,3 +64,20 @@ The Feishu event endpoint currently supports:
 - generating a reply preview from the internal workflow
 - optional verification token checks
 - optional real message replies when `FEISHU_REPLY_ENABLED=true`
+
+## Feishu event config
+
+For the current codebase:
+
+- `FEISHU_VERIFICATION_TOKEN`
+  - Fill this with the same verification token shown in your Feishu app's event subscription settings.
+  - Our backend uses it to validate incoming callbacks.
+- `FEISHU_ENCRYPT_KEY`
+  - Only needed if you enable encrypted event pushes in Feishu.
+  - The current code does not decrypt encrypted payloads yet, so the easiest setup is to keep event encryption disabled and leave this blank for now.
+
+Recommended first real-world setup:
+
+- `FEISHU_REPLY_ENABLED=false`
+- event encryption disabled
+- verification token enabled
