@@ -22,6 +22,10 @@ class Settings(BaseSettings):
     llm_base_url: str = Field(default="", alias="LLM_BASE_URL")
     llm_model: str = Field(default="", alias="LLM_MODEL")
 
+    anthropic_auth_token: str = Field(default="", alias="ANTHROPIC_AUTH_TOKEN")
+    anthropic_base_url: str = Field(default="", alias="ANTHROPIC_BASE_URL")
+    anthropic_model: str = Field(default="claude-sonnet-4-5", alias="ANTHROPIC_MODEL")
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

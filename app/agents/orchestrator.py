@@ -14,12 +14,20 @@ class AgentOrchestrator:
         self.memory = MemoryAgent()
 
     def run(self, payload: AnalyzeRequest) -> AnalyzeResponse:
-        tasks, planner_trace = self.planner.run(payload)
+        tasks, planner_trace, llm_result = self.planner.run(payload)
         tasks, coordinator_trace = self.coordinator.run(tasks)
-        risks, reviewer_trace = self.reviewer.run(tasks)
+        if llm_result and isinstance(llm_result.get("risks"), list):
+            risks = [str(item) for item in llm_result["risks"] if str(item).strip()]
+            reviewer_trace = self.reviewer.run(tasks)[1]
+        else:
+            risks, reviewer_trace = self.reviewer.run(tasks)
 
-        summary = build_summary(payload.raw_text, tasks)
-        next_actions = build_next_actions(tasks, risks)
+        summary = str(llm_result.get("summary")).strip() if llm_result and llm_result.get("summary") else build_summary(payload.raw_text, tasks)
+        next_actions = (
+            [str(item) for item in llm_result["next_actions"] if str(item).strip()][:4]
+            if llm_result and isinstance(llm_result.get("next_actions"), list) and llm_result.get("next_actions")
+            else build_next_actions(tasks, risks)
+        )
         memory_trace = self.memory.run(summary)
 
         return AnalyzeResponse(

@@ -90,6 +90,12 @@ Recommended first real-world setup:
 - event encryption disabled
 - verification token enabled
 
+For Anthropic-compatible Kimi Coding integration, set:
+
+- `ANTHROPIC_AUTH_TOKEN`
+- `ANTHROPIC_BASE_URL`
+- `ANTHROPIC_MODEL`
+
 To inspect live Feishu callbacks after deployment:
 
 ```bash
