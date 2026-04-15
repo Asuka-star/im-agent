@@ -89,3 +89,9 @@ Recommended first real-world setup:
 - `FEISHU_REPLY_ENABLED=false`
 - event encryption disabled
 - verification token enabled
+
+To inspect live Feishu callbacks after deployment:
+
+```bash
+docker logs -f feishu-im-agent-mvp
+```

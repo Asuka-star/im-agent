@@ -1,8 +1,13 @@
+import logging
+
 from app.agents.orchestrator import AgentOrchestrator
 from app.core.config import settings
 from app.feishu.message_api import FeishuMessageAPI
 from app.schemas.analyze import AnalyzeRequest, AnalyzeResponse
 from app.schemas.feishu_event import FeishuMessageContext
+
+
+logger = logging.getLogger(__name__)
 
 
 class FeishuWorkflowService:
@@ -34,6 +39,7 @@ class FeishuWorkflowService:
                 reply_sent = True
             except Exception as exc:  # noqa: BLE001
                 reply_error = str(exc)
+                logger.exception("Failed to send Feishu reply")
 
         return {
             "session_id": analysis.session_id,
