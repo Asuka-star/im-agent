@@ -51,11 +51,6 @@ async def receive_events(request: Request) -> dict:
         return {"code": 0, "msg": "duplicate_ignored"}
 
     result = workflow_service.handle_message(message_context)
-    dedup_service.mark_processed(
-        message_id=message_context.message_id,
-        session_id=result["session_id"],
-        content=message_context.text,
-    )
     logger.info(
         "Workflow completed: message_id=%s session_id=%s reply_sent=%s task_count=%s reply_error=%s",
         message_context.message_id,

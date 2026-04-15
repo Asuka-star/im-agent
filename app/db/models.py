@@ -42,4 +42,5 @@ class Memory(Base):
     id = Column(Integer, primary_key=True, index=True)
     session_id = Column(String(128), nullable=False, index=True)
     summary = Column(Text, nullable=False)
+    payload = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)

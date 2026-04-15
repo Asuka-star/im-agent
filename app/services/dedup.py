@@ -26,12 +26,5 @@ class MessageDedupService:
             if existing is not None:
                 return
 
-            session.add(
-                Message(
-                    message_id=message_id,
-                    session_id=session_id,
-                    role="user",
-                    content=content,
-                )
-            )
+            session.add(Message(message_id=message_id, session_id=session_id, role="user", content=content))
             session.commit()

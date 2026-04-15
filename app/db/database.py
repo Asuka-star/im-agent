@@ -43,3 +43,9 @@ def _run_lightweight_migrations() -> None:
         with engine.begin() as connection:
             connection.execute(text("ALTER TABLE messages ADD COLUMN message_id VARCHAR(128)"))
             connection.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_messages_message_id ON messages (message_id)"))
+
+    if "memories" in tables:
+        memory_columns = {column["name"] for column in inspector.get_columns("memories")}
+        if "payload" not in memory_columns:
+            with engine.begin() as connection:
+                connection.execute(text("ALTER TABLE memories ADD COLUMN payload TEXT"))

@@ -5,6 +5,7 @@ from app.core.config import settings
 from app.feishu.message_api import FeishuMessageAPI
 from app.schemas.analyze import AnalyzeRequest, AnalyzeResponse
 from app.schemas.feishu_event import FeishuMessageContext
+from app.services.memory_service import MemoryService
 
 
 logger = logging.getLogger(__name__)
@@ -16,12 +17,21 @@ class FeishuWorkflowService:
     def __init__(self) -> None:
         self.orchestrator = AgentOrchestrator()
         self.message_api = FeishuMessageAPI()
+        self.memory_service = MemoryService()
 
     def handle_message(self, message: FeishuMessageContext) -> dict:
+        self.memory_service.save_user_message(
+            session_id=message.session_id,
+            message_id=message.message_id,
+            content=message.text,
+        )
+        history_context = self.memory_service.build_context_block(message.session_id)
+        enriched_text = message.text if not history_context else f"{history_context}\n\n[本轮新消息]\n{message.text}"
+
         analysis = self.orchestrator.run(
             AnalyzeRequest(
                 session_id=message.session_id,
-                raw_text=message.text,
+                raw_text=enriched_text,
             )
         )
 
@@ -40,6 +50,15 @@ class FeishuWorkflowService:
             except Exception as exc:  # noqa: BLE001
                 reply_error = str(exc)
                 logger.exception("Failed to send Feishu reply")
+
+        self.memory_service.save_assistant_message(
+            session_id=message.session_id,
+            content=reply_preview,
+        )
+        self.memory_service.save_round(
+            session_id=message.session_id,
+            analysis=analysis,
+        )
 
         return {
             "session_id": analysis.session_id,
