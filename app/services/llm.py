@@ -27,7 +27,6 @@ class LLMService:
         payload = {
             "model": self.model,
             "temperature": 0.2,
-            "response_format": {"type": "json_object"},
             "messages": [
                 {
                     "role": "system",
@@ -39,6 +38,10 @@ class LLMService:
                 },
             ],
         }
+
+        # Kimi Code docs recommend OpenAI-compatible "legacy" chat format for third-party coding agents.
+        if not self._uses_kimi_coding():
+            payload["response_format"] = {"type": "json_object"}
 
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -54,6 +57,9 @@ class LLMService:
         result = self._parse_json(text)
         logger.info("LLM extraction succeeded with %s task(s)", len(result.get("tasks", [])))
         return result
+
+    def _uses_kimi_coding(self) -> bool:
+        return "api.kimi.com/coding/v1" in self.base_url
 
     def _extract_text(self, payload: dict[str, Any]) -> str:
         choices = payload.get("choices", [])

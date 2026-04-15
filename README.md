@@ -98,10 +98,19 @@ For Kimi OpenAI-compatible integration, set:
 
 Recommended values:
 
-- `LLM_BASE_URL=https://api.moonshot.cn/v1`
-- `LLM_MODEL=kimi-k2.5`
+- `LLM_BASE_URL=https://api.kimi.com/coding/v1`
+- `LLM_MODEL=kimi-for-coding`
 
 The `ANTHROPIC_*` variables are only kept as a compatibility fallback.
+
+For Kimi Code membership API, the official third-party agent docs recommend:
+
+- `LLM_BASE_URL=https://api.kimi.com/coding/v1`
+- `LLM_MODEL=kimi-for-coding`
+
+Reference:
+
+- https://www.kimi.com/code/docs/more/third-party-agents.html
 
 To inspect live Feishu callbacks after deployment:
 
