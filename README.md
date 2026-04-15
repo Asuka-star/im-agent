@@ -90,7 +90,7 @@ Recommended first real-world setup:
 - event encryption disabled
 - verification token enabled
 
-For Kimi OpenAI-compatible integration, set:
+For OpenAI-compatible LLM integration, set:
 
 - `LLM_API_KEY`
 - `LLM_BASE_URL`
@@ -98,19 +98,10 @@ For Kimi OpenAI-compatible integration, set:
 
 Recommended values:
 
-- `LLM_BASE_URL=https://api.kimi.com/coding/v1`
-- `LLM_MODEL=kimi-for-coding`
+- `LLM_BASE_URL=https://openrouter.ai/api/v1`
+- `LLM_MODEL=deepseek/deepseek-v3.2`
 
 The `ANTHROPIC_*` variables are only kept as a compatibility fallback.
-
-For Kimi Code membership API, the official third-party agent docs recommend:
-
-- `LLM_BASE_URL=https://api.kimi.com/coding/v1`
-- `LLM_MODEL=kimi-for-coding`
-
-Reference:
-
-- https://www.kimi.com/code/docs/more/third-party-agents.html
 
 To inspect live Feishu callbacks after deployment:
 
