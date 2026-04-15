@@ -90,11 +90,18 @@ Recommended first real-world setup:
 - event encryption disabled
 - verification token enabled
 
-For Anthropic-compatible Kimi Coding integration, set:
+For Kimi OpenAI-compatible integration, set:
 
-- `ANTHROPIC_AUTH_TOKEN`
-- `ANTHROPIC_BASE_URL`
-- `ANTHROPIC_MODEL`
+- `LLM_API_KEY`
+- `LLM_BASE_URL`
+- `LLM_MODEL`
+
+Recommended values:
+
+- `LLM_BASE_URL=https://api.moonshot.cn/v1`
+- `LLM_MODEL=kimi-k2.5`
+
+The `ANTHROPIC_*` variables are only kept as a compatibility fallback.
 
 To inspect live Feishu callbacks after deployment:
 

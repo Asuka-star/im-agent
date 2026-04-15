@@ -10,41 +10,43 @@ logger = logging.getLogger(__name__)
 
 
 class LLMService:
-    """Anthropic-compatible LLM client with structured extraction support."""
+    """OpenAI-compatible LLM client for structured collaboration extraction."""
 
     def __init__(self) -> None:
-        self.auth_token = settings.anthropic_auth_token
-        self.base_url = settings.anthropic_base_url.rstrip("/")
-        self.model = settings.anthropic_model
+        self.api_key = settings.llm_api_key or settings.anthropic_auth_token
+        self.base_url = (settings.llm_base_url or settings.anthropic_base_url).rstrip("/")
+        self.model = settings.llm_model or settings.anthropic_model
 
     def is_configured(self) -> bool:
-        return bool(self.auth_token and self.base_url and self.model)
+        return bool(self.api_key and self.base_url and self.model)
 
     def extract_collaboration(self, raw_text: str) -> dict[str, Any]:
         if not self.is_configured():
-            raise RuntimeError("Anthropic-compatible LLM config is incomplete.")
+            raise RuntimeError("LLM config is incomplete.")
 
-        prompt = self._build_prompt(raw_text)
         payload = {
             "model": self.model,
-            "max_tokens": 1200,
             "temperature": 0.2,
+            "response_format": {"type": "json_object"},
             "messages": [
                 {
+                    "role": "system",
+                    "content": self._system_prompt(),
+                },
+                {
                     "role": "user",
-                    "content": prompt,
-                }
+                    "content": raw_text,
+                },
             ],
         }
 
         headers = {
-            "Authorization": f"Bearer {self.auth_token}",
+            "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
-            "anthropic-version": "2023-06-01",
         }
 
         with httpx.Client(timeout=60.0) as client:
-            response = client.post(f"{self.base_url}/messages", json=payload, headers=headers)
+            response = client.post(f"{self.base_url}/chat/completions", json=payload, headers=headers)
             response.raise_for_status()
             data = response.json()
 
@@ -54,19 +56,15 @@ class LLMService:
         return result
 
     def _extract_text(self, payload: dict[str, Any]) -> str:
-        content = payload.get("content", [])
-        if not isinstance(content, list):
-            raise RuntimeError("Unexpected LLM response format: content is not a list.")
+        choices = payload.get("choices", [])
+        if not isinstance(choices, list) or not choices:
+            raise RuntimeError("Unexpected LLM response format: missing choices.")
 
-        text_parts: list[str] = []
-        for item in content:
-            if isinstance(item, dict) and item.get("type") == "text":
-                text_parts.append(item.get("text", ""))
-
-        text = "\n".join(part for part in text_parts if part)
-        if not text:
-            raise RuntimeError("LLM response did not include text output.")
-        return text
+        message = choices[0].get("message", {})
+        content = message.get("content")
+        if not isinstance(content, str) or not content.strip():
+            raise RuntimeError("LLM response did not include text content.")
+        return content
 
     def _parse_json(self, text: str) -> dict[str, Any]:
         candidate = text.strip()
@@ -83,38 +81,33 @@ class LLMService:
         json_text = candidate[start : end + 1]
         return json.loads(json_text)
 
-    def _build_prompt(self, raw_text: str) -> str:
-        return f"""
-You are extracting structured collaboration data from a Feishu chat message.
-All output strings must be written in Simplified Chinese.
+    def _system_prompt(self) -> str:
+        return """
+你是一个飞书群聊协作助手，负责从聊天内容中提取结构化协作信息。
 
-Return only valid JSON with this schema:
-{{
-  "summary": "string",
+你必须只输出合法 JSON，不要输出 markdown，不要输出解释。
+
+输出格式：
+{
+  "summary": "中文摘要",
   "tasks": [
-    {{
-      "title": "string",
-      "owner": "string or TBD",
+    {
+      "title": "任务标题",
+      "owner": "负责人，若不明确则填 TBD",
       "priority": "high|medium|low",
-      "due_date": "string or TBD",
+      "due_date": "截止时间，若不明确则填 TBD",
       "status": "draft",
-      "notes": "string"
-    }}
+      "notes": "支撑该任务的原始语句"
+    }
   ],
-  "risks": ["string"],
-  "next_actions": ["string"]
-}}
+  "risks": ["中文风险点"],
+  "next_actions": ["中文下一步建议"]
+}
 
-Rules:
-- Extract all concrete tasks mentioned in the message.
-- If no owner is explicit, use "TBD".
-- If no due date is explicit, use "TBD".
-- Keep status as "draft".
-- Notes should preserve the supporting clause from the source text.
-- If the text is short or vague, still produce your best structured interpretation.
-- Do not include markdown, explanations, or any text outside JSON.
-- summary, risks, and next_actions must be in Simplified Chinese.
-
-Source text:
-{raw_text}
+规则：
+- 尽量提取所有明确任务。
+- 如果没有明确负责人，填写 TBD。
+- 如果没有明确截止时间，填写 TBD。
+- 所有输出都使用简体中文。
+- 如果原文很短，也要尽力给出合理结构化结果。
 """.strip()

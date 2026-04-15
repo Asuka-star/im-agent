@@ -19,8 +19,8 @@ class Settings(BaseSettings):
     feishu_reply_enabled: bool = Field(default=False, alias="FEISHU_REPLY_ENABLED")
 
     llm_api_key: str = Field(default="", alias="LLM_API_KEY")
-    llm_base_url: str = Field(default="", alias="LLM_BASE_URL")
-    llm_model: str = Field(default="", alias="LLM_MODEL")
+    llm_base_url: str = Field(default="https://api.moonshot.cn/v1", alias="LLM_BASE_URL")
+    llm_model: str = Field(default="kimi-k2.5", alias="LLM_MODEL")
 
     anthropic_auth_token: str = Field(default="", alias="ANTHROPIC_AUTH_TOKEN")
     anthropic_base_url: str = Field(default="", alias="ANTHROPIC_BASE_URL")
