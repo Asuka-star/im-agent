@@ -1,4 +1,5 @@
 import json
+import re
 
 from app.core.config import settings
 from app.schemas.feishu_event import (
@@ -38,8 +39,10 @@ class FeishuEventHandler:
             return None
 
         parsed_content = self._parse_message_content(message.content)
-        text = parsed_content.get("text", "").strip()
-        if not text:
+        raw_text = parsed_content.get("text", "").strip()
+        mentions = message.mentions or []
+        text = self._strip_mentions(raw_text, mentions)
+        if not raw_text:
             return None
 
         session_id = (
@@ -66,6 +69,8 @@ class FeishuEventHandler:
             session_id=session_id,
             sender_id=sender_label,
             text=text,
+            raw_text=raw_text,
+            is_mentioned=bool(mentions),
         )
 
     def _parse_message_content(self, content: str | None) -> dict:
@@ -78,3 +83,16 @@ class FeishuEventHandler:
             return {"text": content}
 
         return parsed if isinstance(parsed, dict) else {"text": str(parsed)}
+
+    def _strip_mentions(self, text: str, mentions: list) -> str:
+        cleaned = text
+        for mention in mentions:
+            key = getattr(mention, "key", None)
+            name = getattr(mention, "name", None)
+            if key:
+                cleaned = cleaned.replace(key, " ")
+            if name:
+                cleaned = cleaned.replace(f"@{name}", " ")
+
+        cleaned = re.sub(r"@[^\s]+\s*", " ", cleaned)
+        return re.sub(r"\s+", " ", cleaned).strip()

@@ -27,9 +27,12 @@ class FeishuWorkflowService:
             session_id=message.session_id,
             message_id=message.message_id,
             sender_id=message.sender_id,
-            content=message.text,
+            content=message.text or message.raw_text,
         )
-        decision = self.interaction_service.decide(message.text)
+        if message.chat_type == "group" and not message.is_mentioned:
+            decision = InteractionDecision(mode="buffer", label="群聊普通讨论，继续旁听")
+        else:
+            decision = self.interaction_service.decide(message.text)
 
         if decision.mode == "buffer":
             return {

@@ -65,13 +65,13 @@ The current MVP already supports:
 - local message / task / memory persistence
 - buffered collaboration mode
 
-In the current interaction design, ordinary discussion messages are only stored. The assistant replies only when the group sends explicit trigger phrases such as:
+In the current interaction design, ordinary discussion messages are only stored. In group chats, the assistant replies only when it is explicitly mentioned and the group sends trigger phrases such as:
 
-- `总结一下`
-- `整理待办`
-- `看风险`
-- `现在还有哪些任务没负责人？`
-- `生成演示稿大纲`
+- `@机器人 总结一下`
+- `@机器人 整理待办`
+- `@机器人 看风险`
+- `@机器人 现在还有哪些任务没负责人？`
+- `@机器人 生成演示稿大纲`
 
 ## Available endpoints
 

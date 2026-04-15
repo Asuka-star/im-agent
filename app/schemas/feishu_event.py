@@ -29,6 +29,19 @@ class FeishuSender(BaseModel):
     tenant_key: str | None = None
 
 
+class FeishuMentionId(BaseModel):
+    union_id: str | None = None
+    user_id: str | None = None
+    open_id: str | None = None
+
+
+class FeishuMention(BaseModel):
+    key: str | None = None
+    id: FeishuMentionId | None = None
+    name: str | None = None
+    tenant_key: str | None = None
+
+
 class FeishuMessage(BaseModel):
     message_id: str | None = None
     root_id: str | None = None
@@ -38,6 +51,7 @@ class FeishuMessage(BaseModel):
     message_type: str | None = None
     content: str | None = None
     create_time: str | None = None
+    mentions: list[FeishuMention] = []
 
 
 class FeishuMessageEvent(BaseModel):
@@ -63,3 +77,5 @@ class FeishuMessageContext(BaseModel):
     session_id: str
     sender_id: str
     text: str
+    raw_text: str
+    is_mentioned: bool = False
