@@ -15,6 +15,7 @@ class Message(Base):
     __tablename__ = "messages"
 
     id = Column(Integer, primary_key=True, index=True)
+    message_id = Column(String(128), unique=True, nullable=True, index=True)
     session_id = Column(String(128), nullable=False, index=True)
     role = Column(String(32), nullable=False)
     content = Column(Text, nullable=False)

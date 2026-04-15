@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 from app.core.config import settings
@@ -29,3 +29,17 @@ def init_db() -> None:
     from app.db.models import Message, Memory, Session, Task  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
+    _run_lightweight_migrations()
+
+
+def _run_lightweight_migrations() -> None:
+    inspector = inspect(engine)
+    tables = set(inspector.get_table_names())
+    if "messages" not in tables:
+        return
+
+    columns = {column["name"] for column in inspector.get_columns("messages")}
+    if "message_id" not in columns:
+        with engine.begin() as connection:
+            connection.execute(text("ALTER TABLE messages ADD COLUMN message_id VARCHAR(128)"))
+            connection.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_messages_message_id ON messages (message_id)"))

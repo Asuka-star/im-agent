@@ -3,12 +3,14 @@ import logging
 from fastapi import APIRouter, HTTPException, Request
 
 from app.feishu.event_handler import FeishuEventHandler
+from app.services.dedup import MessageDedupService
 from app.services.feishu_workflow import FeishuWorkflowService
 
 
 router = APIRouter()
 event_handler = FeishuEventHandler()
 workflow_service = FeishuWorkflowService()
+dedup_service = MessageDedupService()
 logger = logging.getLogger(__name__)
 
 
@@ -37,15 +39,26 @@ async def receive_events(request: Request) -> dict:
         return {"code": 0, "msg": "ignored"}
 
     logger.info(
-        "Processing message event: chat_id=%s sender_id=%s text=%s",
+        "Processing message event: message_id=%s chat_id=%s sender_id=%s text=%s",
+        message_context.message_id,
         message_context.chat_id,
         message_context.sender_id,
         message_context.text,
     )
 
+    if dedup_service.already_processed(message_context.message_id):
+        logger.info("Skipping duplicate message event: message_id=%s", message_context.message_id)
+        return {"code": 0, "msg": "duplicate_ignored"}
+
     result = workflow_service.handle_message(message_context)
+    dedup_service.mark_processed(
+        message_id=message_context.message_id,
+        session_id=result["session_id"],
+        content=message_context.text,
+    )
     logger.info(
-        "Workflow completed: session_id=%s reply_sent=%s task_count=%s reply_error=%s",
+        "Workflow completed: message_id=%s session_id=%s reply_sent=%s task_count=%s reply_error=%s",
+        message_context.message_id,
         result["session_id"],
         result["reply_sent"],
         len(result["analysis"].tasks),
