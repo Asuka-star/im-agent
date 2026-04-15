@@ -18,6 +18,7 @@ class Message(Base):
     message_id = Column(String(128), unique=True, nullable=True, index=True)
     session_id = Column(String(128), nullable=False, index=True)
     role = Column(String(32), nullable=False)
+    sender_id = Column(String(128), nullable=True)
     content = Column(Text, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 

@@ -4,10 +4,10 @@ This project is the MVP codebase for a Feishu IM collaboration assistant.
 
 Current goal:
 
-- receive Feishu chat messages
-- analyze them with an LLM-driven multi-agent pipeline
-- reply with structured collaboration results
-- persist lightweight conversation memory locally
+- receive Feishu group chat messages
+- buffer multi-person discussion instead of interrupting every message
+- trigger AI output only when the group asks for summary / tasks / risks / slides
+- persist lightweight collaboration memory locally
 
 ## Stack
 
@@ -57,7 +57,21 @@ http://175.178.183.71:19000/api/feishu/events
 
 ## Current status
 
-This is an early backend scaffold with a working Feishu event entrypoint, token validation support, and a reply-preview flow. Real model integration and persistent chat memory are still placeholders.
+The current MVP already supports:
+
+- Feishu group message intake
+- duplicate-event protection
+- OpenRouter-compatible LLM extraction
+- local message / task / memory persistence
+- buffered collaboration mode
+
+In the current interaction design, ordinary discussion messages are only stored. The assistant replies only when the group sends explicit trigger phrases such as:
+
+- `总结一下`
+- `整理待办`
+- `看风险`
+- `现在还有哪些任务没负责人？`
+- `生成演示稿大纲`
 
 ## Available endpoints
 
@@ -69,7 +83,8 @@ The Feishu event endpoint currently supports:
 
 - url verification challenge response
 - parsing `im.message.receive_v1` text messages
-- generating a reply preview from the internal workflow
+- buffering normal discussion messages without replying
+- generating structured outputs only for explicit trigger commands
 - optional verification token checks
 - optional real message replies when `FEISHU_REPLY_ENABLED=true`
 

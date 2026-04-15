@@ -21,7 +21,7 @@ class PlannerAgent:
                     for task in llm_result.get("tasks", [])
                     if isinstance(task, dict)
                 ]
-                if tasks:
+                if tasks or llm_result.get("summary"):
                     logger.info("Planner used LLM extraction and produced %s task(s)", len(tasks))
                     trace = AgentTrace(
                         agent="planner",

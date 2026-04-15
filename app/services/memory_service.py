@@ -1,5 +1,4 @@
 import json
-from typing import Any
 
 from sqlalchemy import delete, desc, select
 
@@ -9,7 +8,7 @@ from app.schemas.analyze import AnalyzeResponse
 
 
 class MemoryService:
-    """Stores chat history and task snapshots, and builds lightweight context windows."""
+    """Stores discussion history, task snapshots, and lightweight session context."""
 
     def ensure_session(self, session_id: str) -> None:
         with SessionLocal() as session:
@@ -20,7 +19,14 @@ class MemoryService:
                 session.add(Session(session_id=session_id))
                 session.commit()
 
-    def save_user_message(self, *, session_id: str, message_id: str | None, content: str) -> None:
+    def save_user_message(
+        self,
+        *,
+        session_id: str,
+        message_id: str | None,
+        sender_id: str | None,
+        content: str,
+    ) -> None:
         self.ensure_session(session_id)
         with SessionLocal() as session:
             if message_id:
@@ -35,6 +41,7 @@ class MemoryService:
                     message_id=message_id,
                     session_id=session_id,
                     role="user",
+                    sender_id=sender_id,
                     content=content,
                 )
             )
@@ -47,6 +54,7 @@ class MemoryService:
                 Message(
                     session_id=session_id,
                     role="assistant",
+                    sender_id="assistant",
                     content=content,
                 )
             )
@@ -85,9 +93,9 @@ class MemoryService:
 
             session.commit()
 
-    def build_context_block(self, session_id: str, limit: int = 6) -> str:
+    def get_recent_messages(self, session_id: str, limit: int = 12) -> list[Message]:
         with SessionLocal() as session:
-            messages = (
+            return (
                 session.execute(
                     select(Message)
                     .where(Message.session_id == session_id)
@@ -98,7 +106,9 @@ class MemoryService:
                 .all()
             )
 
-            tasks = (
+    def get_current_tasks(self, session_id: str) -> list[Task]:
+        with SessionLocal() as session:
+            return (
                 session.execute(
                     select(Task)
                     .where(Task.session_id == session_id)
@@ -108,27 +118,83 @@ class MemoryService:
                 .all()
             )
 
-            memories = (
+    def get_recent_memories(self, session_id: str, limit: int = 3) -> list[Memory]:
+        with SessionLocal() as session:
+            return (
                 session.execute(
                     select(Memory)
                     .where(Memory.session_id == session_id)
                     .order_by(desc(Memory.id))
-                    .limit(3)
+                    .limit(limit)
                 )
                 .scalars()
                 .all()
             )
 
-        if not messages and not tasks and not memories:
+    def get_pending_user_messages(
+        self,
+        session_id: str,
+        *,
+        exclude_message_id: str | None = None,
+        limit: int = 20,
+    ) -> list[Message]:
+        with SessionLocal() as session:
+            last_assistant_id = session.execute(
+                select(Message.id)
+                .where(Message.session_id == session_id, Message.role == "assistant")
+                .order_by(desc(Message.id))
+                .limit(1)
+            ).scalar_one_or_none()
+
+            statement = (
+                select(Message)
+                .where(Message.session_id == session_id, Message.role == "user")
+                .order_by(Message.id.asc())
+            )
+            if last_assistant_id is not None:
+                statement = statement.where(Message.id > last_assistant_id)
+            if exclude_message_id:
+                statement = statement.where(Message.message_id != exclude_message_id)
+
+            messages = session.execute(statement).scalars().all()
+            if limit and len(messages) > limit:
+                return messages[-limit:]
+            return messages
+
+    def build_discussion_block(
+        self,
+        session_id: str,
+        *,
+        exclude_message_id: str | None = None,
+        limit: int = 20,
+    ) -> str:
+        messages = self.get_pending_user_messages(
+            session_id,
+            exclude_message_id=exclude_message_id,
+            limit=limit,
+        )
+        if not messages:
             return ""
 
-        lines: list[str] = ["[历史上下文]"]
+        lines = ["[近期群聊讨论]"]
+        for message in messages:
+            speaker = message.sender_id or "成员"
+            lines.append(f"- {speaker}: {message.content}")
+        return "\n".join(lines)
 
-        if messages:
-            lines.append("最近消息：")
-            for message in reversed(messages):
-                role = "用户" if message.role == "user" else "助手"
-                lines.append(f"- {role}: {message.content}")
+    def build_workspace_context(self, session_id: str, *, include_pending: bool = True) -> str:
+        tasks = self.get_current_tasks(session_id)
+        memories = self.get_recent_memories(session_id)
+        recent_messages = self.get_recent_messages(session_id)
+        pending_block = self.build_discussion_block(session_id) if include_pending else ""
+
+        if not tasks and not memories and not recent_messages and not pending_block:
+            return ""
+
+        lines: list[str] = ["[协作上下文]"]
+
+        if pending_block:
+            lines.append(pending_block)
 
         if tasks:
             lines.append("当前任务快照：")
@@ -142,4 +208,23 @@ class MemoryService:
             for memory in reversed(memories):
                 lines.append(f"- {memory.summary}")
 
+        if recent_messages:
+            lines.append("最近消息：")
+            for message in reversed(recent_messages[-6:]):
+                role = "群成员" if message.role == "user" else "助手"
+                speaker = message.sender_id or role
+                lines.append(f"- {speaker}: {message.content}")
+
         return "\n".join(lines)
+
+    def load_memory_payload(self, session_id: str) -> dict:
+        memories = self.get_recent_memories(session_id, limit=1)
+        if not memories or not memories[0].payload:
+            return {}
+
+        try:
+            payload = json.loads(memories[0].payload)
+        except json.JSONDecodeError:
+            return {}
+
+        return payload if isinstance(payload, dict) else {}

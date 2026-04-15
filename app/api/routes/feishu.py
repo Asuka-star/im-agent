@@ -51,12 +51,14 @@ async def receive_events(request: Request) -> dict:
         return {"code": 0, "msg": "duplicate_ignored"}
 
     result = workflow_service.handle_message(message_context)
+    task_count = len(result["analysis"].tasks) if result["analysis"] is not None else 0
     logger.info(
-        "Workflow completed: message_id=%s session_id=%s reply_sent=%s task_count=%s reply_error=%s",
+        "Workflow completed: message_id=%s session_id=%s mode=%s reply_sent=%s task_count=%s reply_error=%s",
         message_context.message_id,
         result["session_id"],
+        result["mode"],
         result["reply_sent"],
-        len(result["analysis"].tasks),
+        task_count,
         result["reply_error"],
     )
     return {
@@ -64,9 +66,10 @@ async def receive_events(request: Request) -> dict:
         "msg": "ok",
         "data": {
             "session_id": result["session_id"],
+            "mode": result["mode"],
             "reply_preview": result["reply_preview"],
             "reply_sent": result["reply_sent"],
             "reply_error": result["reply_error"],
-            "task_count": len(result["analysis"].tasks),
+            "task_count": task_count,
         },
     }
