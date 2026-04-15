@@ -86,6 +86,7 @@ class LLMService:
     def _build_prompt(self, raw_text: str) -> str:
         return f"""
 You are extracting structured collaboration data from a Feishu chat message.
+All output strings must be written in Simplified Chinese.
 
 Return only valid JSON with this schema:
 {{
@@ -112,6 +113,7 @@ Rules:
 - Notes should preserve the supporting clause from the source text.
 - If the text is short or vague, still produce your best structured interpretation.
 - Do not include markdown, explanations, or any text outside JSON.
+- summary, risks, and next_actions must be in Simplified Chinese.
 
 Source text:
 {raw_text}

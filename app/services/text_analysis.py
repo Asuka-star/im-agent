@@ -65,11 +65,11 @@ def extract_tasks(raw_text: str) -> list[TaskItem]:
 
     fallback_notes = raw_text.strip()[:200]
     if not fallback_notes:
-        fallback_notes = "No discussion text provided."
+        fallback_notes = "\u672a\u63d0\u4f9b\u6709\u6548\u7684\u8ba8\u8bba\u5185\u5bb9\u3002"
 
     return [
         TaskItem(
-            title="Clarify the latest discussion and identify concrete follow-up",
+            title="\u68b3\u7406\u6700\u65b0\u8ba8\u8bba\u5e76\u786e\u8ba4\u540e\u7eed\u52a8\u4f5c",
             owner="TBD",
             priority="low",
             due_date="TBD",
@@ -81,15 +81,16 @@ def extract_tasks(raw_text: str) -> list[TaskItem]:
 
 def build_summary(raw_text: str, tasks: list[TaskItem]) -> str:
     if not tasks:
-        return "No concrete task was identified from the latest discussion."
+        return "\u672c\u8f6e\u8ba8\u8bba\u4e2d\u6682\u672a\u8bc6\u522b\u51fa\u660e\u786e\u4efb\u52a1\u3002"
 
     owner_count = len({task.owner for task in tasks if task.owner != "TBD"})
     preview = raw_text.strip().replace("\n", " ")
     preview = re.sub(r"\s+", " ", preview)
     preview = preview[:80]
     return (
-        f"Identified {len(tasks)} task(s) from the latest discussion, involving "
-        f"{owner_count} named owner(s). Source preview: {preview}"
+        f"\u5df2\u4ece\u6700\u65b0\u8ba8\u8bba\u4e2d\u8bc6\u522b {len(tasks)} \u9879\u4efb\u52a1\uff0c"
+        f"\u6d89\u53ca {owner_count} \u4f4d\u5df2\u660e\u786e\u8d1f\u8d23\u4eba\u3002"
+        f"\u539f\u59cb\u5185\u5bb9\u6458\u8981\uff1a{preview}"
     )
 
 
@@ -97,18 +98,18 @@ def build_next_actions(tasks: list[TaskItem], risks: list[str]) -> list[str]:
     actions: list[str] = []
 
     if any(task.owner == "TBD" for task in tasks):
-        actions.append("Confirm the owner for tasks that still have no assigned person.")
+        actions.append("\u786e\u8ba4\u4ecd\u672a\u5206\u914d\u8d1f\u8d23\u4eba\u7684\u4efb\u52a1\u7531\u8c01\u63a5\u624b\u3002")
 
     if any(task.due_date == "TBD" for task in tasks):
-        actions.append("Confirm concrete due dates for tasks that still have no deadline.")
+        actions.append("\u786e\u8ba4\u4ecd\u672a\u660e\u786e\u622a\u6b62\u65f6\u95f4\u7684\u4efb\u52a1\u8282\u70b9\u3002")
 
     if risks:
-        actions.append("Review the highlighted risks in the Feishu group and resolve the ambiguous items.")
+        actions.append("\u5728\u98de\u4e66\u7fa4\u91cc\u518d\u786e\u8ba4\u4e00\u6b21\u9ad8\u98ce\u9669\u9879\u548c\u6a21\u7cca\u70b9\u3002")
 
     if not actions:
-        actions.append("Confirm the generated task list in the Feishu group.")
+        actions.append("\u5728\u98de\u4e66\u7fa4\u91cc\u786e\u8ba4\u672c\u6b21\u751f\u6210\u7684\u4efb\u52a1\u6e05\u5355\u3002")
 
-    actions.append("Send a follow-up message after updates so the assistant can refresh the task view.")
+    actions.append("\u6709\u65b0\u8fdb\u5c55\u65f6\u7ee7\u7eed\u5728\u7fa4\u91cc\u540c\u6b65\uff0c\u4ee5\u4fbf\u52a9\u624b\u5237\u65b0\u4efb\u52a1\u89c6\u56fe\u3002")
     return actions[:4]
 
 
@@ -117,19 +118,19 @@ def infer_risks(tasks: list[TaskItem]) -> list[str]:
 
     for task in tasks:
         if task.owner == "TBD":
-            risks.append(f"Task '{task.title}' still has no confirmed owner.")
+            risks.append(f"\u4efb\u52a1\u300a{task.title}\u300b\u4ecd\u672a\u786e\u8ba4\u8d1f\u8d23\u4eba\u3002")
         if task.due_date == "TBD":
-            risks.append(f"Task '{task.title}' still has no confirmed due date.")
+            risks.append(f"\u4efb\u52a1\u300a{task.title}\u300b\u4ecd\u672a\u786e\u8ba4\u622a\u6b62\u65f6\u95f4\u3002")
         if len(task.title) < 8:
-            risks.append(f"Task '{task.title}' may be too vague and should be clarified.")
+            risks.append(f"\u4efb\u52a1\u300a{task.title}\u300b\u63cf\u8ff0\u504f\u7b80\u7565\uff0c\u5efa\u8bae\u518d\u8865\u5145\u7ec6\u8282\u3002")
 
     owner_counter = Counter(task.owner for task in tasks if task.owner != "TBD")
     overloaded = [owner for owner, count in owner_counter.items() if count >= 3]
     for owner in overloaded:
-        risks.append(f"Owner '{owner}' currently has many tasks and may need rebalancing.")
+        risks.append(f"\u8d1f\u8d23\u4eba\u300a{owner}\u300b\u5f53\u524d\u5f85\u529e\u8f83\u591a\uff0c\u53ef\u80fd\u9700\u8981\u91cd\u65b0\u5206\u914d\u3002")
 
     if not risks:
-        risks.append("The current task plan looks coherent, but owners and due dates should still be confirmed in chat.")
+        risks.append("\u5f53\u524d\u4efb\u52a1\u62c6\u89e3\u57fa\u672c\u5408\u7406\uff0c\u4f46\u4ecd\u5efa\u8bae\u5728\u7fa4\u91cc\u786e\u8ba4\u8d1f\u8d23\u4eba\u548c\u65f6\u95f4\u8282\u70b9\u3002")
 
     return risks
 
@@ -279,7 +280,7 @@ def _looks_like_action_clause(clause: str) -> bool:
 def _clean_action(action: str) -> str:
     cleaned = re.sub(r"\s+", " ", action).strip()
     cleaned = cleaned.lstrip(":：- ")
-    return cleaned[:120] if cleaned else "Clarify follow-up"
+    return cleaned[:120] if cleaned else "\u68b3\u7406\u540e\u7eed\u8ddf\u8fdb\u4e8b\u9879"
 
 
 def _clean_due_date(due_date: str) -> str:

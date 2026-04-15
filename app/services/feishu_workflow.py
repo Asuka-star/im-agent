@@ -51,21 +51,21 @@ class FeishuWorkflowService:
 
     def _format_reply(self, analysis: AnalyzeResponse) -> str:
         lines = [
-            "[Collaboration Summary]",
-            f"1. Summary: {analysis.summary}",
-            "2. Tasks:",
+            "\u3010\u672c\u8f6e\u534f\u540c\u603b\u7ed3\u3011",
+            f"1. \u6458\u8981\uff1a{analysis.summary}",
+            "2. \u4efb\u52a1\uff1a",
         ]
 
         for idx, task in enumerate(analysis.tasks, start=1):
             lines.append(
-                f"   {idx}) {task.title} | Owner: {task.owner} | Due: {task.due_date} | Priority: {task.priority}"
+                f"   {idx}) {task.title} | \u8d1f\u8d23\u4eba\uff1a{task.owner} | \u622a\u6b62\uff1a{task.due_date} | \u4f18\u5148\u7ea7\uff1a{task.priority}"
             )
 
-        lines.append("3. Risks:")
+        lines.append("3. \u98ce\u9669\uff1a")
         for idx, risk in enumerate(analysis.risks, start=1):
             lines.append(f"   {idx}) {risk}")
 
-        lines.append("4. Next actions:")
+        lines.append("4. \u4e0b\u4e00\u6b65\u5efa\u8bae\uff1a")
         for idx, action in enumerate(analysis.next_actions, start=1):
             lines.append(f"   {idx}) {action}")
 
