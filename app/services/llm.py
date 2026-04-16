@@ -39,6 +39,29 @@ class LLMService:
         logger.info("LLM extraction succeeded with %s task(s)", len(result.get("tasks", [])))
         return result
 
+    def classify_intent(self, user_text: str) -> dict[str, Any]:
+        self._ensure_configured()
+
+        payload = {
+            "model": self.model,
+            "temperature": 0.0,
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {"role": "system", "content": self._intent_prompt()},
+                {"role": "user", "content": user_text},
+            ],
+        }
+
+        data = self._post_chat_completion(payload)
+        text = self._extract_text(data)
+        result = self._parse_json(text)
+        logger.info(
+            "LLM intent classification succeeded: intent=%s confidence=%s",
+            result.get("intent"),
+            result.get("confidence"),
+        )
+        return result
+
     def generate_presentation_package(self, workspace_context: str, instruction: str) -> dict[str, Any]:
         self._ensure_configured()
 
@@ -160,4 +183,35 @@ Rules:
 - Each slide should have 2 to 4 concise bullets.
 - Use only information supported by the workspace context.
 - Prioritize actionability: goals, decisions, task split, timeline, risks, next steps.
+""".strip()
+
+    def _intent_prompt(self) -> str:
+        return """
+You are an intent router for a Feishu collaboration bot.
+Classify the user's request into exactly one intent.
+Return valid JSON only. No markdown, no explanation.
+
+Available intents:
+- summary: summarize recent discussion
+- tasks: organize TODOs / action items
+- risks: identify risks / blockers
+- status: answer current project/task status questions
+- slides: create a presentation / report / PPT outline
+- bitable: sync action items into a Feishu Bitable / task table
+- help: user asks what the bot can do, or the request is too vague and needs guidance
+- unknown: the request is too ambiguous to safely execute
+
+Schema:
+{
+  "intent": "summary|tasks|risks|status|slides|bitable|help|unknown",
+  "confidence": 0.0,
+  "reason": "short reason in Simplified Chinese"
+}
+
+Rules:
+- If the user asks for report outline / presentation / PPT / slides, choose slides.
+- If the user asks to sync / write / update a table or Bitable, choose bitable.
+- If the user asks who owns tasks / what is pending / deadlines / progress, choose status.
+- If the user only says vague things like 'help me handle this' without enough detail, choose help.
+- All reasons must be in Simplified Chinese.
 """.strip()

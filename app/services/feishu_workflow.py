@@ -36,7 +36,7 @@ class FeishuWorkflowService:
         if message.chat_type == "group" and not message.is_mentioned:
             decision = InteractionDecision(mode="buffer", label="群聊普通讨论，继续旁听")
         else:
-            decision = self.interaction_service.decide(message.text)
+            decision = self._decide_interaction(message.text)
 
         if decision.mode == "help":
             reply_preview = self._format_help_reply()
@@ -61,6 +61,35 @@ class FeishuWorkflowService:
             )
 
         return result
+
+    def _decide_interaction(self, text: str) -> InteractionDecision:
+        fallback = self.interaction_service.decide(text)
+        if not self.llm_service.is_configured():
+            return fallback
+
+        try:
+            llm_result = self.llm_service.classify_intent(text)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("LLM intent classification failed, falling back to rules: %s", exc)
+            return fallback
+
+        intent = str(llm_result.get("intent") or "").strip().lower()
+        reason = str(llm_result.get("reason") or "").strip()
+        confidence = self._safe_confidence(llm_result.get("confidence"))
+
+        if intent in {"summary", "tasks", "risks", "status", "slides", "bitable", "help"} and confidence >= 0.55:
+            return InteractionDecision(mode=intent, label=reason or f"LLM classified intent as {intent}")
+
+        if fallback.mode != "buffer":
+            return fallback
+
+        return InteractionDecision(mode="help", label=reason or "意图不够明确，返回帮助提示")
+
+    def _safe_confidence(self, value: Any) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
 
     def _empty_result(self, session_id: str, mode: str) -> dict[str, Any]:
         return {

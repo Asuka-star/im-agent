@@ -81,6 +81,12 @@ The trigger parsing is intentionally fuzzy, so natural phrasings also work, for 
 - `@机器人 给我出个汇报大纲`
 - `@机器人 帮我总结一下这轮讨论`
 
+The bot now routes mentioned requests with:
+
+- LLM-based intent recognition first
+- rule-based fallback when the intent is obvious
+- a short help reply when the request is still too vague
+
 For slide drafting, the current MVP outputs a presentation package with:
 
 - theme
