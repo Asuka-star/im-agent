@@ -36,11 +36,17 @@ class FeishuWorkflowService:
 
     def handle_message(self, message: FeishuMessageContext) -> dict:
         started_at = time.perf_counter()
+        active_episode_id: int | None = None
+        if message.chat_type == "group" and not message.is_mentioned:
+            active_episode = self.memory_service.ensure_active_episode(message.session_id)
+            active_episode_id = active_episode.id
+
         self.memory_service.save_user_message(
             session_id=message.session_id,
             message_id=message.message_id,
             sender_id=message.sender_id,
             content=message.text or message.raw_text,
+            episode_id=active_episode_id,
             embed=False,
         )
         logger.info(
@@ -62,6 +68,7 @@ class FeishuWorkflowService:
             self.memory_service.save_assistant_message(
                 session_id=message.session_id,
                 content=result["reply_preview"],
+                episode_id=result.get("episode_id"),
                 embed=False,
             )
         logger.info(
@@ -72,12 +79,15 @@ class FeishuWorkflowService:
         return result
 
     def _handle_mentioned_request(self, message: FeishuMessageContext) -> dict:
+        active_episode = self.memory_service.get_active_episode(message.session_id)
+        active_episode_id = active_episode.id if active_episode else None
         base_workspace_context = self.memory_service.build_workspace_context(
             message.session_id,
             include_pending=True,
             exclude_message_id=message.message_id,
             query_text=message.text,
             include_semantic_search=False,
+            episode_id=active_episode_id,
         )
         workspace_context = base_workspace_context
 
@@ -91,6 +101,7 @@ class FeishuWorkflowService:
                         exclude_message_id=message.message_id,
                         query_text=message.text,
                         include_semantic_search=True,
+                        episode_id=active_episode_id,
                     )
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Memory gate failed, continuing without semantic recall: %s", exc)
@@ -98,17 +109,18 @@ class FeishuWorkflowService:
         if self.llm_service.is_configured():
             try:
                 llm_result = self.llm_service.resolve_workspace_request(workspace_context, message.text)
-                return self._execute_llm_request(message, llm_result, workspace_context)
+                return self._execute_llm_request(message, llm_result, workspace_context, active_episode_id)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Unified workspace request failed, falling back: %s", exc)
 
-        return self._handle_fallback_request(message)
+        return self._handle_fallback_request(message, active_episode_id)
 
     def _execute_llm_request(
         self,
         message: FeishuMessageContext,
         llm_result: dict,
         workspace_context: str,
+        active_episode_id: int | None,
     ) -> dict:
         intent = str(llm_result.get("intent") or "").strip().lower()
         reason = str(llm_result.get("reason") or "").strip()
@@ -125,7 +137,10 @@ class FeishuWorkflowService:
                     logger.warning("Slide package fallback generation failed: %s", exc)
                     package = self._build_fallback_presentation_package(message.session_id)
             reply_preview = self._format_presentation_reply(package)
-            return self._deliver_reply(message, "slides", reply_preview, analysis=None)
+            result = self._deliver_reply(message, "slides", reply_preview, analysis=None, episode_id=active_episode_id)
+            if active_episode_id is not None:
+                self.memory_service.close_active_episode(message.session_id, title="slides")
+            return result
 
         if intent == "status":
             status_answer = str(llm_result.get("status_answer") or "").strip()
@@ -138,6 +153,7 @@ class FeishuWorkflowService:
         if intent in {"summary", "tasks", "risks", "bitable"}:
             source_text = self.memory_service.build_discussion_block(
                 message.session_id,
+                episode_id=active_episode_id,
                 exclude_message_id=message.message_id,
             ) or workspace_context or message.text
             analysis = self._build_analysis_from_llm(
@@ -154,9 +170,13 @@ class FeishuWorkflowService:
             self.memory_service.save_round(
                 session_id=message.session_id,
                 analysis=analysis,
+                episode_id=active_episode_id,
                 async_embed=True,
             )
-            return self._deliver_reply(message, intent, reply_preview, analysis=analysis)
+            result = self._deliver_reply(message, intent, reply_preview, analysis=analysis, episode_id=active_episode_id)
+            if active_episode_id is not None:
+                self.memory_service.close_active_episode(message.session_id, title=analysis.summary)
+            return result
 
         return self._deliver_reply(message, "help", self._format_help_reply(reason), analysis=None)
 
@@ -218,14 +238,14 @@ class FeishuWorkflowService:
             agent_traces=traces,
         )
 
-    def _handle_fallback_request(self, message: FeishuMessageContext) -> dict:
+    def _handle_fallback_request(self, message: FeishuMessageContext, active_episode_id: int | None) -> dict:
         decision = self.interaction_service.decide(message.text)
 
         if decision.mode == "help":
             return self._deliver_reply(message, "help", self._format_help_reply(), analysis=None)
 
         if decision.mode == "slides":
-            return self._handle_fallback_slides(message)
+            return self._handle_fallback_slides(message, active_episode_id)
 
         if decision.mode == "status":
             tasks = self.memory_service.get_current_tasks(message.session_id)
@@ -235,6 +255,7 @@ class FeishuWorkflowService:
 
         discussion_block = self.memory_service.build_discussion_block(
             message.session_id,
+            episode_id=active_episode_id,
             exclude_message_id=message.message_id,
         )
         if not discussion_block:
@@ -251,16 +272,21 @@ class FeishuWorkflowService:
         self.memory_service.save_round(
             session_id=message.session_id,
             analysis=analysis,
+            episode_id=active_episode_id,
             async_embed=True,
         )
-        return self._deliver_reply(message, decision.mode, reply_preview, analysis=analysis)
+        result = self._deliver_reply(message, decision.mode, reply_preview, analysis=analysis, episode_id=active_episode_id)
+        if active_episode_id is not None:
+            self.memory_service.close_active_episode(message.session_id, title=analysis.summary)
+        return result
 
-    def _handle_fallback_slides(self, message: FeishuMessageContext) -> dict:
+    def _handle_fallback_slides(self, message: FeishuMessageContext, active_episode_id: int | None) -> dict:
         workspace_context = self.memory_service.build_workspace_context(
             message.session_id,
             include_pending=True,
             exclude_message_id=message.message_id,
             query_text=message.text,
+            episode_id=active_episode_id,
         )
         if not workspace_context.strip():
             reply = "我这边还没有拿到可用的讨论素材。先在群里把目标、分工和结论聊出来，再让我生成汇报大纲会更准确。"
@@ -273,7 +299,10 @@ class FeishuWorkflowService:
             package = self._build_fallback_presentation_package(message.session_id)
 
         reply_preview = self._format_presentation_reply(package)
-        return self._deliver_reply(message, "slides", reply_preview, analysis=None)
+        result = self._deliver_reply(message, "slides", reply_preview, analysis=None, episode_id=active_episode_id)
+        if active_episode_id is not None:
+            self.memory_service.close_active_episode(message.session_id, title="slides")
+        return result
 
     def _empty_result(self, session_id: str, mode: str) -> dict:
         return {
@@ -292,6 +321,7 @@ class FeishuWorkflowService:
         reply_preview: str | None,
         *,
         analysis: AnalyzeResponse | None,
+        episode_id: int | None = None,
     ) -> dict:
         reply_sent = False
         reply_error: str | None = None
@@ -310,6 +340,7 @@ class FeishuWorkflowService:
 
         return {
             "session_id": message.session_id,
+            "episode_id": episode_id,
             "mode": mode,
             "analysis": analysis,
             "reply_preview": reply_preview,

@@ -13,12 +13,24 @@ class Session(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
+class Episode(Base):
+    __tablename__ = "episodes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    session_id = Column(String(128), nullable=False, index=True)
+    status = Column(String(32), nullable=False, default="active", index=True)
+    title = Column(String(255), nullable=True)
+    opened_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    closed_at = Column(DateTime(timezone=True), nullable=True)
+
+
 class Message(Base):
     __tablename__ = "messages"
 
     id = Column(Integer, primary_key=True, index=True)
     message_id = Column(String(128), unique=True, nullable=True, index=True)
     session_id = Column(String(128), nullable=False, index=True)
+    episode_id = Column(Integer, nullable=True, index=True)
     role = Column(String(32), nullable=False)
     sender_id = Column(String(128), nullable=True)
     content = Column(Text, nullable=False)
@@ -36,6 +48,24 @@ class Task(Base):
     due_date = Column(String(64), nullable=False, default="TBD")
     status = Column(String(64), nullable=False, default="draft")
     notes = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class TaskChangeLog(Base):
+    __tablename__ = "task_change_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    session_id = Column(String(128), nullable=False, index=True)
+    episode_id = Column(Integer, nullable=True, index=True)
+    action = Column(String(32), nullable=False, index=True)
+    title = Column(String(255), nullable=False)
+    owner = Column(String(128), nullable=False, default="TBD")
+    priority = Column(String(32), nullable=False, default="medium")
+    due_date = Column(String(64), nullable=False, default="TBD")
+    status = Column(String(64), nullable=False, default="draft")
+    notes = Column(Text, nullable=True)
+    reason = Column(Text, nullable=True)
+    details_json = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 

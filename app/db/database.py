@@ -26,7 +26,7 @@ Base = declarative_base()
 
 
 def init_db() -> None:
-    from app.db.models import Memory, MemoryChunk, Message, Session, Task  # noqa: F401
+    from app.db.models import Episode, Memory, MemoryChunk, Message, Session, Task, TaskChangeLog  # noqa: F401
 
     _prepare_database_extensions()
     Base.metadata.create_all(bind=engine)
@@ -55,12 +55,40 @@ def _run_lightweight_migrations() -> None:
     if "sender_id" not in columns:
         with engine.begin() as connection:
             connection.execute(text("ALTER TABLE messages ADD COLUMN sender_id VARCHAR(128)"))
+    if "episode_id" not in columns:
+        with engine.begin() as connection:
+            connection.execute(text("ALTER TABLE messages ADD COLUMN episode_id INTEGER"))
+            connection.execute(text("CREATE INDEX IF NOT EXISTS ix_messages_episode_id ON messages (episode_id)"))
 
     if "memories" in tables:
         memory_columns = {column["name"] for column in inspector.get_columns("memories")}
         if "payload" not in memory_columns:
             with engine.begin() as connection:
                 connection.execute(text("ALTER TABLE memories ADD COLUMN payload TEXT"))
+
+    if "episodes" in tables:
+        episode_columns = {column["name"] for column in inspector.get_columns("episodes")}
+        if "title" not in episode_columns:
+            with engine.begin() as connection:
+                connection.execute(text("ALTER TABLE episodes ADD COLUMN title VARCHAR(255)"))
+        if "closed_at" not in episode_columns:
+            with engine.begin() as connection:
+                connection.execute(text("ALTER TABLE episodes ADD COLUMN closed_at TIMESTAMPTZ"))
+
+    if "task_change_logs" in tables:
+        change_columns = {column["name"] for column in inspector.get_columns("task_change_logs")}
+        if "details_json" not in change_columns:
+            with engine.begin() as connection:
+                connection.execute(text("ALTER TABLE task_change_logs ADD COLUMN details_json TEXT"))
+        if "reason" not in change_columns:
+            with engine.begin() as connection:
+                connection.execute(text("ALTER TABLE task_change_logs ADD COLUMN reason TEXT"))
+        if "episode_id" not in change_columns:
+            with engine.begin() as connection:
+                connection.execute(text("ALTER TABLE task_change_logs ADD COLUMN episode_id INTEGER"))
+                connection.execute(
+                    text("CREATE INDEX IF NOT EXISTS ix_task_change_logs_episode_id ON task_change_logs (episode_id)")
+                )
 
     if "memory_chunks" in tables:
         chunk_columns = {column["name"] for column in inspector.get_columns("memory_chunks")}
