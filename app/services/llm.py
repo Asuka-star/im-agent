@@ -154,6 +154,7 @@ Rules:
 - If the message is mostly discussion without clear actions, return an empty tasks array.
 - If owner is unclear, use TBD.
 - If due date is unclear, use TBD.
+- If the source mentions relative time such as 今天 / 明天 / 周五前 / 下周三, convert it to an absolute date in YYYY-MM-DD format when possible.
 - All output must be Simplified Chinese.
 """.strip()
 

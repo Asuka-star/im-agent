@@ -1,0 +1,124 @@
+import re
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
+
+from app.schemas.task import TaskItem
+
+
+WEEKDAY_MAP = {
+    "周一": 0,
+    "星期一": 0,
+    "周二": 1,
+    "星期二": 1,
+    "周三": 2,
+    "星期三": 2,
+    "周四": 3,
+    "星期四": 3,
+    "周五": 4,
+    "星期五": 4,
+    "周六": 5,
+    "星期六": 5,
+    "周日": 6,
+    "星期日": 6,
+    "周天": 6,
+    "星期天": 6,
+    "monday": 0,
+    "tuesday": 1,
+    "wednesday": 2,
+    "thursday": 3,
+    "friday": 4,
+    "saturday": 5,
+    "sunday": 6,
+}
+
+
+def normalize_due_date_text(text: str, *, today: date | None = None) -> str:
+    candidate = (text or "").strip()
+    if not candidate or candidate.upper() == "TBD":
+        return "TBD"
+
+    today = today or datetime.now(ZoneInfo("Asia/Shanghai")).date()
+    parsed = (
+        _parse_iso_date(candidate)
+        or _parse_month_day(candidate, today)
+        or _parse_relative_day(candidate, today)
+        or _parse_weekday(candidate, today)
+    )
+    if parsed is None:
+        return candidate
+    return parsed.isoformat()
+
+
+def normalize_task_dates(tasks: list[TaskItem]) -> list[TaskItem]:
+    normalized: list[TaskItem] = []
+    for task in tasks:
+        due_source = task.due_date if task.due_date != "TBD" else task.notes
+        normalized_due_date = normalize_due_date_text(due_source)
+        normalized.append(task.model_copy(update={"due_date": normalized_due_date}))
+    return normalized
+
+
+def _parse_iso_date(text: str) -> date | None:
+    match = re.search(r"(?P<year>\d{4})[-/.](?P<month>\d{1,2})[-/.](?P<day>\d{1,2})", text)
+    if not match:
+        return None
+    return _safe_date(
+        int(match.group("year")),
+        int(match.group("month")),
+        int(match.group("day")),
+    )
+
+
+def _parse_month_day(text: str, today: date) -> date | None:
+    match = re.search(r"(?:(?P<year>\d{4})年)?(?P<month>\d{1,2})月(?P<day>\d{1,2})[日号]?", text)
+    if not match:
+        return None
+    year = int(match.group("year")) if match.group("year") else today.year
+    parsed = _safe_date(year, int(match.group("month")), int(match.group("day")))
+    if parsed is None:
+        return None
+    if not match.group("year") and parsed < today - timedelta(days=30):
+        return _safe_date(year + 1, int(match.group("month")), int(match.group("day")))
+    return parsed
+
+
+def _parse_relative_day(text: str, today: date) -> date | None:
+    lowered = text.lower()
+    if "今天" in text or "today" in lowered:
+        return today
+    if "明天" in text or "tomorrow" in lowered:
+        return today + timedelta(days=1)
+    if "后天" in text:
+        return today + timedelta(days=2)
+    if "今晚" in text or "tonight" in lowered:
+        return today
+    return None
+
+
+def _parse_weekday(text: str, today: date) -> date | None:
+    lowered = text.lower()
+    for token, weekday in WEEKDAY_MAP.items():
+        if token not in text and token not in lowered:
+            continue
+
+        current_week_start = today - timedelta(days=today.weekday())
+        if "下周" in text or "next week" in lowered:
+            week_start = current_week_start + timedelta(days=7)
+        elif "本周" in text or "这周" in text or "this week" in lowered:
+            week_start = current_week_start
+        elif token.startswith("周") or token.startswith("星期"):
+            week_start = current_week_start
+            if weekday < today.weekday():
+                week_start = current_week_start + timedelta(days=7)
+        else:
+            week_start = current_week_start
+
+        return week_start + timedelta(days=weekday)
+    return None
+
+
+def _safe_date(year: int, month: int, day: int) -> date | None:
+    try:
+        return date(year, month, day)
+    except ValueError:
+        return None

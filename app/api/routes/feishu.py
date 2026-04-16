@@ -38,6 +38,10 @@ async def receive_events(request: Request) -> dict:
         logger.info("Ignored callback because no supported message context was extracted")
         return {"code": 0, "msg": "ignored"}
 
+    if dedup_service.already_processed(message_context.message_id):
+        logger.info("Skipping duplicate message event: message_id=%s", message_context.message_id)
+        return {"code": 0, "msg": "duplicate_ignored"}
+
     logger.info(
         "Processing message event: message_id=%s chat_id=%s sender_id=%s mentioned=%s text=%s raw_text=%s",
         message_context.message_id,
@@ -47,10 +51,6 @@ async def receive_events(request: Request) -> dict:
         message_context.text,
         message_context.raw_text,
     )
-
-    if dedup_service.already_processed(message_context.message_id):
-        logger.info("Skipping duplicate message event: message_id=%s", message_context.message_id)
-        return {"code": 0, "msg": "duplicate_ignored"}
 
     result = workflow_service.handle_message(message_context)
     task_count = len(result["analysis"].tasks) if result["analysis"] is not None else 0
