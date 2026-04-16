@@ -1,7 +1,7 @@
 from app.schemas.analyze import AgentTrace, AnalyzeRequest
 from app.schemas.task import TaskItem
 from app.services.llm import LLMService
-from app.services.text_analysis import extract_tasks
+from app.services.text_analysis import apply_discussion_updates, extract_tasks
 import logging
 
 
@@ -21,6 +21,8 @@ class PlannerAgent:
                     for task in llm_result.get("tasks", [])
                     if isinstance(task, dict)
                 ]
+                if tasks:
+                    tasks = apply_discussion_updates(tasks, payload.raw_text)
                 if tasks or llm_result.get("summary"):
                     logger.info("Planner used LLM extraction and produced %s task(s)", len(tasks))
                     trace = AgentTrace(

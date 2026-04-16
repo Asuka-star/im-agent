@@ -11,8 +11,8 @@ ACTION_OWNER_RE = re.compile(
     r"^(?P<owner>[\u4e00-\u9fa5A-Za-z0-9]{1,4})(?=负责|去|完成|准备|处理|搞|做|跟进|推进|这个)"
 )
 DUE_HINT_RE = re.compile(
-    r"(今天|明天|后天|今晚|本周|这周|下周(?:[一二三四五六日天])(?:前)?|"
-    r"(?:本周|这周)(?:[一二三四五六日天])(?:前)?|(?:周|星期)[一二三四五六日天](?:前)?|"
+    r"((?:本周|这周|下周)(?:[一二三四五六日天])(?:前)?|(?:周|星期)[一二三四五六日天](?:前)?|"
+    r"今天|明天|后天|今晚|本周|这周|下周|"
     r"\d{4}-\d{2}-\d{2}|\d{1,2}月\d{1,2}日)"
 )
 
@@ -50,6 +50,41 @@ def normalize_tasks(tasks: list[TaskItem]) -> list[TaskItem]:
             )
         )
     return normalized
+
+
+def apply_discussion_updates(tasks: list[TaskItem], raw_text: str) -> list[TaskItem]:
+    if not tasks:
+        return tasks
+
+    updated_tasks = [task.model_copy(deep=True) for task in tasks]
+    for signal in _extract_update_signals(raw_text):
+        target_index = _find_update_target(updated_tasks, signal)
+        if target_index is None:
+            continue
+
+        target = updated_tasks[target_index]
+        notes = target.notes or ""
+        extra_note = signal["note"]
+        if extra_note and extra_note not in notes:
+            notes = f"{notes}；更新：{extra_note}".strip("；")
+
+        new_due_date = signal["due_date"] or target.due_date
+        new_priority = _pick_higher_priority(target.priority, signal["priority"])
+        new_title = target.title
+        title_hint = str(signal.get("title_hint") or "").strip()
+        if title_hint and title_hint not in {"待确认任务", "__UPDATE__"}:
+            new_title = title_hint
+
+        updated_tasks[target_index] = target.model_copy(
+            update={
+                "title": new_title,
+                "priority": new_priority,
+                "due_date": new_due_date,
+                "notes": notes,
+            }
+        )
+
+    return updated_tasks
 
 
 def infer_risks(tasks: list[TaskItem]) -> list[str]:
@@ -185,6 +220,62 @@ def _parse_clause(clause: str) -> TaskItem | None:
         status="draft",
         notes=notes,
     )
+
+
+def _extract_update_signals(raw_text: str) -> list[dict[str, str]]:
+    signals: list[dict[str, str]] = []
+    for raw_line in (raw_text or "").splitlines():
+        line = SENDER_PREFIX_RE.sub("", raw_line.strip())
+        line = line.lstrip("-* ").strip()
+        line = LEADING_FILLER_RE.sub("", line).strip()
+        if not line:
+            continue
+
+        owner = _extract_owner(line)
+        due_date = _extract_due_hint(line)
+        is_update = any(token in line for token in ("不对", "改成", "调整", "提前", "推迟", "延期", "紧急"))
+        if owner == "TBD" or (due_date == "TBD" and not is_update):
+            continue
+
+        title_hint = _extract_title(line, owner, due_date)
+        if not title_hint and not is_update:
+            continue
+
+        priority = "high" if any(word in line for word in ("紧急", "尽快", "马上", "立即")) else "medium"
+        signals.append(
+            {
+                "owner": owner,
+                "due_date": due_date,
+                "priority": priority,
+                "title_hint": title_hint or "__UPDATE__",
+                "note": line,
+            }
+        )
+    return signals
+
+
+def _find_update_target(tasks: list[TaskItem], signal: dict[str, str]) -> int | None:
+    owner = signal["owner"]
+    title_hint = str(signal.get("title_hint") or "")
+
+    same_owner_indices = [idx for idx, task in enumerate(tasks) if task.owner == owner]
+    if not same_owner_indices:
+        return None
+
+    if title_hint and title_hint not in {"待确认任务", "__UPDATE__"}:
+        for idx in reversed(same_owner_indices):
+            task = tasks[idx]
+            if task.title == title_hint or title_hint in task.title or task.title in title_hint:
+                return idx
+
+    return same_owner_indices[-1]
+
+
+def _pick_higher_priority(current: str, incoming: str) -> str:
+    order = {"low": 0, "medium": 1, "high": 2}
+    current_value = order.get((current or "medium").lower(), 1)
+    incoming_value = order.get((incoming or "medium").lower(), 1)
+    return incoming if incoming_value > current_value else current
 
 
 def _extract_owner(text: str) -> str:
