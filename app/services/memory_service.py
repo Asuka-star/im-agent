@@ -158,6 +158,7 @@ class MemoryService:
     ) -> None:
         self.ensure_session(session_id)
         previous_tasks = self.get_current_tasks(session_id)
+        merged_tasks = self._merge_current_tasks(previous_tasks, analysis.tasks)
         payload = {
             "summary": analysis.summary,
             "risks": analysis.risks,
@@ -175,7 +176,7 @@ class MemoryService:
             )
 
             session.query(Task).filter(Task.session_id == session_id).delete()
-            for task in analysis.tasks:
+            for task in merged_tasks:
                 session.add(
                     Task(
                         session_id=session_id,
@@ -194,7 +195,7 @@ class MemoryService:
             session_id=session_id,
             episode_id=episode_id,
             previous_tasks=previous_tasks,
-            current_tasks=analysis.tasks,
+            current_tasks=merged_tasks,
             reason=analysis.summary,
         )
 
@@ -479,20 +480,19 @@ class MemoryService:
         current_tasks: list[TaskItem],
         reason: str,
     ) -> None:
-        previous_map = {self._task_key(task.title): task for task in previous_tasks}
-        current_map = {self._task_key(task.title): task for task in current_tasks}
+        matched_pairs, unmatched_previous, unmatched_current = self._match_task_pairs(previous_tasks, current_tasks)
         rows: list[TaskChangeLog] = []
 
-        for key in sorted(set(previous_map) | set(current_map)):
-            before = previous_map.get(key)
-            after = current_map.get(key)
-
-            if before is None and after is not None:
+        for before, after in matched_pairs:
+            before_snapshot = self._task_snapshot(before)
+            after_snapshot = after.model_dump()
+            if before_snapshot != after_snapshot:
+                changed_fields = [field for field in after_snapshot if before_snapshot.get(field) != after_snapshot.get(field)]
                 rows.append(
                     TaskChangeLog(
                         session_id=session_id,
                         episode_id=episode_id,
-                        action="created",
+                        action="updated",
                         title=after.title,
                         owner=after.owner,
                         priority=after.priority,
@@ -500,59 +500,41 @@ class MemoryService:
                         status=after.status,
                         notes=after.notes,
                         reason=reason,
-                        details_json=json.dumps({"before": None, "after": after.model_dump()}, ensure_ascii=False),
-                    )
-                )
-                continue
-
-            if before is not None and after is None:
-                rows.append(
-                    TaskChangeLog(
-                        session_id=session_id,
-                        episode_id=episode_id,
-                        action="removed",
-                        title=before.title,
-                        owner=before.owner,
-                        priority=before.priority,
-                        due_date=before.due_date,
-                        status=before.status,
-                        notes=before.notes,
-                        reason=reason,
                         details_json=json.dumps(
-                            {"before": self._task_snapshot(before), "after": None},
+                            {
+                                "before": before_snapshot,
+                                "after": after_snapshot,
+                                "changed_fields": changed_fields,
+                            },
                             ensure_ascii=False,
                         ),
                     )
                 )
-                continue
 
-            if before is not None and after is not None:
-                before_snapshot = self._task_snapshot(before)
-                after_snapshot = after.model_dump()
-                if before_snapshot != after_snapshot:
-                    changed_fields = [field for field in after_snapshot if before_snapshot.get(field) != after_snapshot.get(field)]
-                    rows.append(
-                        TaskChangeLog(
-                            session_id=session_id,
-                            episode_id=episode_id,
-                            action="updated",
-                            title=after.title,
-                            owner=after.owner,
-                            priority=after.priority,
-                            due_date=after.due_date,
-                            status=after.status,
-                            notes=after.notes,
-                            reason=reason,
-                            details_json=json.dumps(
-                                {
-                                    "before": before_snapshot,
-                                    "after": after_snapshot,
-                                    "changed_fields": changed_fields,
-                                },
-                                ensure_ascii=False,
-                            ),
-                        )
-                    )
+        for after in unmatched_current:
+            rows.append(
+                TaskChangeLog(
+                    session_id=session_id,
+                    episode_id=episode_id,
+                    action="created",
+                    title=after.title,
+                    owner=after.owner,
+                    priority=after.priority,
+                    due_date=after.due_date,
+                    status=after.status,
+                    notes=after.notes,
+                    reason=reason,
+                    details_json=json.dumps({"before": None, "after": after.model_dump()}, ensure_ascii=False),
+                )
+            )
+
+        for before in unmatched_previous:
+            logger.debug(
+                "Retaining previous task without changes: session_id=%s title=%s owner=%s",
+                session_id,
+                before.title,
+                before.owner,
+            )
 
         if not rows:
             return
@@ -561,6 +543,62 @@ class MemoryService:
             for row in rows:
                 session.add(row)
             session.commit()
+
+    def _merge_current_tasks(self, previous_tasks: list[Task], current_tasks: list[TaskItem]) -> list[TaskItem]:
+        matched_pairs, unmatched_previous, unmatched_current = self._match_task_pairs(previous_tasks, current_tasks)
+        merged: list[TaskItem] = [after for _, after in matched_pairs]
+        merged.extend(unmatched_current)
+        merged.extend(self._task_item_from_row(task) for task in unmatched_previous)
+        return merged
+
+    def _match_task_pairs(
+        self,
+        previous_tasks: list[Task],
+        current_tasks: list[TaskItem],
+    ) -> tuple[list[tuple[Task, TaskItem]], list[Task], list[TaskItem]]:
+        matched_pairs: list[tuple[Task, TaskItem]] = []
+        used_previous_ids: set[int] = set()
+        unmatched_current: list[TaskItem] = []
+
+        for current in current_tasks:
+            previous = self._find_matching_previous_task(previous_tasks, current, used_previous_ids)
+            if previous is None:
+                unmatched_current.append(current)
+                continue
+            used_previous_ids.add(previous.id)
+            matched_pairs.append((previous, current))
+
+        unmatched_previous = [task for task in previous_tasks if task.id not in used_previous_ids]
+        return matched_pairs, unmatched_previous, unmatched_current
+
+    def _find_matching_previous_task(
+        self,
+        previous_tasks: list[Task],
+        current_task: TaskItem,
+        used_previous_ids: set[int],
+    ) -> Task | None:
+        current_title = self._task_key(current_task.title)
+        current_owner = self._owner_key(current_task.owner)
+
+        exact_matches = [
+            task
+            for task in previous_tasks
+            if task.id not in used_previous_ids
+            and self._task_key(task.title) == current_title
+            and self._owner_key(task.owner) == current_owner
+        ]
+        if exact_matches:
+            return exact_matches[-1]
+
+        title_matches = [
+            task
+            for task in previous_tasks
+            if task.id not in used_previous_ids and self._task_key(task.title) == current_title
+        ]
+        if len(title_matches) == 1:
+            return title_matches[0]
+
+        return None
 
     def _prune_memory_chunks(self, *, session_id: str, source_type: str) -> None:
         keep_count = self._chunk_keep_count(source_type)
@@ -605,6 +643,20 @@ class MemoryService:
 
     def _task_key(self, title: str) -> str:
         return " ".join((title or "").lower().split())
+
+    def _owner_key(self, owner: str) -> str:
+        value = " ".join((owner or "").lower().split())
+        return "" if value == "tbd" else value
+
+    def _task_item_from_row(self, task: Task) -> TaskItem:
+        return TaskItem(
+            title=task.title,
+            owner=task.owner,
+            priority=task.priority,
+            due_date=task.due_date,
+            status=task.status,
+            notes=task.notes or "",
+        )
 
     def _task_snapshot(self, task: Task) -> dict:
         return {

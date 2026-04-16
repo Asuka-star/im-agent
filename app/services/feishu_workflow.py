@@ -138,7 +138,7 @@ class FeishuWorkflowService:
                     package = self._build_fallback_presentation_package(message.session_id)
             reply_preview = self._format_presentation_reply(package)
             result = self._deliver_reply(message, "slides", reply_preview, analysis=None, episode_id=active_episode_id)
-            if active_episode_id is not None:
+            if active_episode_id is not None and self._should_close_episode(result, reply_preview):
                 self.memory_service.close_active_episode(message.session_id, title="slides")
             return result
 
@@ -174,7 +174,7 @@ class FeishuWorkflowService:
                 async_embed=True,
             )
             result = self._deliver_reply(message, intent, reply_preview, analysis=analysis, episode_id=active_episode_id)
-            if active_episode_id is not None:
+            if active_episode_id is not None and self._should_close_episode(result, reply_preview):
                 self.memory_service.close_active_episode(message.session_id, title=analysis.summary)
             return result
 
@@ -276,7 +276,7 @@ class FeishuWorkflowService:
             async_embed=True,
         )
         result = self._deliver_reply(message, decision.mode, reply_preview, analysis=analysis, episode_id=active_episode_id)
-        if active_episode_id is not None:
+        if active_episode_id is not None and self._should_close_episode(result, reply_preview):
             self.memory_service.close_active_episode(message.session_id, title=analysis.summary)
         return result
 
@@ -300,7 +300,7 @@ class FeishuWorkflowService:
 
         reply_preview = self._format_presentation_reply(package)
         result = self._deliver_reply(message, "slides", reply_preview, analysis=None, episode_id=active_episode_id)
-        if active_episode_id is not None:
+        if active_episode_id is not None and self._should_close_episode(result, reply_preview):
             self.memory_service.close_active_episode(message.session_id, title="slides")
         return result
 
@@ -347,6 +347,13 @@ class FeishuWorkflowService:
             "reply_sent": reply_sent,
             "reply_error": reply_error,
         }
+
+    def _should_close_episode(self, result: dict, reply_preview: str | None) -> bool:
+        if not reply_preview:
+            return True
+        if not settings.feishu_reply_enabled:
+            return True
+        return bool(result.get("reply_sent"))
 
     def _format_analysis_reply(
         self,
