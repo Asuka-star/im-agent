@@ -72,14 +72,28 @@ class FeishuWorkflowService:
         return result
 
     def _handle_mentioned_request(self, message: FeishuMessageContext) -> dict:
-        use_semantic_search = self._should_use_semantic_search(message.text)
-        workspace_context = self.memory_service.build_workspace_context(
+        base_workspace_context = self.memory_service.build_workspace_context(
             message.session_id,
             include_pending=True,
             exclude_message_id=message.message_id,
             query_text=message.text,
-            include_semantic_search=use_semantic_search,
+            include_semantic_search=False,
         )
+        workspace_context = base_workspace_context
+
+        if self.llm_service.is_configured():
+            try:
+                memory_gate = self.llm_service.should_recall_memories(base_workspace_context, message.text)
+                if bool(memory_gate.get("should_recall")):
+                    workspace_context = self.memory_service.build_workspace_context(
+                        message.session_id,
+                        include_pending=True,
+                        exclude_message_id=message.message_id,
+                        query_text=message.text,
+                        include_semantic_search=True,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Memory gate failed, continuing without semantic recall: %s", exc)
 
         if self.llm_service.is_configured():
             try:
@@ -302,26 +316,6 @@ class FeishuWorkflowService:
             "reply_sent": reply_sent,
             "reply_error": reply_error,
         }
-
-    def _should_use_semantic_search(self, query: str) -> bool:
-        normalized = query.strip()
-        if not normalized:
-            return False
-
-        recall_markers = (
-            "之前",
-            "以前",
-            "历史",
-            "还记得",
-            "为什么",
-            "当时",
-            "上次",
-            "变更",
-            "改过",
-            "调整过",
-            "原因",
-        )
-        return any(marker in normalized for marker in recall_markers)
 
     def _format_analysis_reply(
         self,

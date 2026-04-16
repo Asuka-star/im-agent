@@ -77,6 +77,28 @@ class LLMService:
         )
         return result
 
+    def should_recall_memories(self, workspace_context: str, instruction: str) -> dict[str, Any]:
+        self._ensure_configured()
+        payload = {
+            "model": self.model,
+            "temperature": 0.0,
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {"role": "system", "content": self._memory_gate_prompt()},
+                {
+                    "role": "user",
+                    "content": f"[轻量上下文]\n{workspace_context}\n\n[当前请求]\n{instruction}",
+                },
+            ],
+        }
+        result = self._chat_json(payload)
+        logger.info(
+            "LLM memory gate resolved: should_recall=%s confidence=%s",
+            result.get("should_recall"),
+            result.get("confidence"),
+        )
+        return result
+
     def generate_presentation_package(self, workspace_context: str, instruction: str) -> dict[str, Any]:
         self._ensure_configured()
         payload = {
@@ -288,5 +310,29 @@ Rules:
 - If the user asks to sync / write / update a table or Bitable, choose bitable.
 - If the user asks who owns tasks / what is pending / deadlines / progress, choose status.
 - If the user only says vague things like 'help me handle this' without enough detail, choose help.
+- All reasons must be in Simplified Chinese.
+""".strip()
+
+    def _memory_gate_prompt(self) -> str:
+        return """
+You decide whether the bot needs semantic recall from long-term memory before answering.
+You will receive:
+- a lightweight collaboration context containing recent discussion, current task snapshot, and recent summaries
+- the user's latest @bot request
+
+Return valid JSON only. No markdown, no explanation.
+
+Schema:
+{
+  "should_recall": true,
+  "confidence": 0.0,
+  "reason": "short reason in Simplified Chinese"
+}
+
+Rules:
+- should_recall=true only when the request likely depends on older historical memory, prior decisions, change reasons, or context not guaranteed to exist in the recent discussion and task snapshot.
+- should_recall=false when recent discussion + current tasks + recent summaries are already enough to answer.
+- Requests such as ordinary summary, TODO extraction, current risks, syncing current tasks, or generating a report outline from the latest discussion usually do not need long-term recall.
+- Requests asking why something changed, what was discussed earlier, previous decisions, historical adjustments, or comparing current status with older context usually need recall.
 - All reasons must be in Simplified Chinese.
 """.strip()
