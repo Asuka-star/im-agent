@@ -5,6 +5,7 @@ param(
     [string]$NetworkName = "feishu-agent-net",
     [string]$EnvFile = ".env",
     [switch]$NoCache,
+    [switch]$NoFollow,
     [int]$HostPort = 9000,
     [int]$ContainerPort = 9000
 )
@@ -63,3 +64,8 @@ docker --context $Context logs --tail 50 $ContainerName
 
 Write-Step "Done"
 Write-Host "Health check URL: http://127.0.0.1:$HostPort/api/health" -ForegroundColor Green
+
+if (-not $NoFollow) {
+    Write-Step "Following logs for '$ContainerName' (Ctrl+C to stop)"
+    docker --context $Context logs -f $ContainerName
+}
