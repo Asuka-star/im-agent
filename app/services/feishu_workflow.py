@@ -1,21 +1,29 @@
 import logging
-from typing import Any
 
 from app.agents.orchestrator import AgentOrchestrator
 from app.core.config import settings
 from app.feishu.bitable_api import FeishuBitableAPI
 from app.feishu.message_api import FeishuMessageAPI
-from app.schemas.analyze import AnalyzeRequest, AnalyzeResponse
+from app.schemas.analyze import AgentTrace, AnalyzeRequest, AnalyzeResponse
 from app.schemas.feishu_event import FeishuMessageContext
-from app.services.interaction import InteractionDecision, InteractionService
+from app.schemas.task import TaskItem
+from app.services.due_date import normalize_task_dates
+from app.services.interaction import InteractionService
 from app.services.llm import LLMService
 from app.services.memory_service import MemoryService
+from app.services.text_analysis import (
+    apply_discussion_updates,
+    build_next_actions,
+    build_summary,
+    infer_risks,
+    normalize_tasks,
+)
 
 logger = logging.getLogger(__name__)
 
 
 class FeishuWorkflowService:
-    """Handles buffered collaboration, explicit AI triggers, and reply delivery."""
+    """Handles buffered collaboration and LLM-first mentioned requests."""
 
     def __init__(self) -> None:
         self.orchestrator = AgentOrchestrator()
@@ -25,7 +33,7 @@ class FeishuWorkflowService:
         self.interaction_service = InteractionService()
         self.llm_service = LLMService()
 
-    def handle_message(self, message: FeishuMessageContext) -> dict[str, Any]:
+    def handle_message(self, message: FeishuMessageContext) -> dict:
         self.memory_service.save_user_message(
             session_id=message.session_id,
             message_id=message.message_id,
@@ -34,64 +42,195 @@ class FeishuWorkflowService:
         )
 
         if message.chat_type == "group" and not message.is_mentioned:
-            decision = InteractionDecision(mode="buffer", label="群聊普通讨论，继续旁听")
-        else:
-            decision = self._decide_interaction(message.text)
+            return self._empty_result(message.session_id, "buffer")
 
-        if decision.mode == "help":
-            reply_preview = self._format_help_reply()
-            return self._deliver_reply(message, decision.mode, reply_preview, analysis=None)
-
-        if decision.mode == "buffer":
-            return self._empty_result(message.session_id, decision.mode)
-
-        if decision.mode in {"summary", "tasks", "risks", "bitable"}:
-            result = self._handle_analysis_trigger(message, decision)
-        elif decision.mode == "status":
-            result = self._handle_status_trigger(message, decision)
-        elif decision.mode == "slides":
-            result = self._handle_slides_trigger(message, decision)
-        else:
-            result = self._empty_result(message.session_id, "buffer")
-
+        result = self._handle_mentioned_request(message)
         if result["reply_preview"]:
             self.memory_service.save_assistant_message(
                 session_id=message.session_id,
                 content=result["reply_preview"],
             )
-
         return result
 
-    def _decide_interaction(self, text: str) -> InteractionDecision:
-        fallback = self.interaction_service.decide(text)
-        if not self.llm_service.is_configured():
-            return fallback
+    def _handle_mentioned_request(self, message: FeishuMessageContext) -> dict:
+        workspace_context = self.memory_service.build_workspace_context(
+            message.session_id,
+            include_pending=True,
+            exclude_message_id=message.message_id,
+        )
 
-        try:
-            llm_result = self.llm_service.classify_intent(text)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("LLM intent classification failed, falling back to rules: %s", exc)
-            return fallback
+        if self.llm_service.is_configured():
+            try:
+                llm_result = self.llm_service.resolve_workspace_request(workspace_context, message.text)
+                return self._execute_llm_request(message, llm_result, workspace_context)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Unified workspace request failed, falling back: %s", exc)
 
+        return self._handle_fallback_request(message)
+
+    def _execute_llm_request(
+        self,
+        message: FeishuMessageContext,
+        llm_result: dict,
+        workspace_context: str,
+    ) -> dict:
         intent = str(llm_result.get("intent") or "").strip().lower()
         reason = str(llm_result.get("reason") or "").strip()
-        confidence = self._safe_confidence(llm_result.get("confidence"))
 
-        if intent in {"summary", "tasks", "risks", "status", "slides", "bitable", "help"} and confidence >= 0.55:
-            return InteractionDecision(mode=intent, label=reason or f"LLM classified intent as {intent}")
+        if intent in {"help", "unknown", ""}:
+            return self._deliver_reply(message, "help", self._format_help_reply(reason), analysis=None)
 
-        if fallback.mode != "buffer":
-            return fallback
+        if intent == "slides":
+            package = llm_result.get("slides")
+            if not isinstance(package, dict) or not package.get("slides"):
+                try:
+                    package = self.llm_service.generate_presentation_package(workspace_context, message.text)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Slide package fallback generation failed: %s", exc)
+                    package = self._build_fallback_presentation_package(message.session_id)
+            reply_preview = self._format_presentation_reply(package)
+            return self._deliver_reply(message, "slides", reply_preview, analysis=None)
 
-        return InteractionDecision(mode="help", label=reason or "意图不够明确，返回帮助提示")
+        if intent == "status":
+            status_answer = str(llm_result.get("status_answer") or "").strip()
+            if not status_answer:
+                tasks = self.memory_service.get_current_tasks(message.session_id)
+                payload = self.memory_service.load_memory_payload(message.session_id)
+                status_answer = self._format_status_reply(message.text, tasks, payload)
+            return self._deliver_reply(message, "status", status_answer, analysis=None)
 
-    def _safe_confidence(self, value: Any) -> float:
+        if intent in {"summary", "tasks", "risks", "bitable"}:
+            source_text = self.memory_service.build_discussion_block(
+                message.session_id,
+                exclude_message_id=message.message_id,
+            ) or workspace_context or message.text
+            analysis = self._build_analysis_from_llm(
+                session_id=message.session_id,
+                source_text=source_text,
+                llm_result=llm_result,
+                intent=intent,
+                reason=reason,
+            )
+            sync_lines: list[str] = []
+            if intent == "bitable":
+                sync_lines = self._sync_tasks_to_bitable(analysis, message.session_id)
+            reply_preview = self._format_analysis_reply(analysis, intent, sync_lines)
+            self.memory_service.save_round(session_id=message.session_id, analysis=analysis)
+            return self._deliver_reply(message, intent, reply_preview, analysis=analysis)
+
+        return self._deliver_reply(message, "help", self._format_help_reply(reason), analysis=None)
+
+    def _build_analysis_from_llm(
+        self,
+        *,
+        session_id: str,
+        source_text: str,
+        llm_result: dict,
+        intent: str,
+        reason: str,
+    ) -> AnalyzeResponse:
+        tasks = [
+            TaskItem.model_validate(item)
+            for item in llm_result.get("tasks", [])
+            if isinstance(item, dict)
+        ]
+        tasks = apply_discussion_updates(tasks, source_text)
+        tasks = normalize_task_dates(normalize_tasks(tasks))
+
+        summary = str(llm_result.get("summary") or "").strip() or build_summary(source_text, tasks)
+        risks = [str(item).strip() for item in llm_result.get("risks", []) if str(item).strip()]
+        if not risks:
+            risks = infer_risks(tasks)
+
+        next_actions = [str(item).strip() for item in llm_result.get("next_actions", []) if str(item).strip()]
+        if not next_actions:
+            next_actions = build_next_actions(tasks, risks)
+
+        traces = [
+            AgentTrace(
+                agent="router",
+                summary=f"LLM reviewed the full workspace context and chose mode={intent}. {reason}".strip(),
+            ),
+            AgentTrace(
+                agent="planner",
+                summary=f"LLM returned {len(tasks)} refreshed task(s) after considering the whole discussion.",
+            ),
+            AgentTrace(
+                agent="coordinator",
+                summary=f"Normalized {len(tasks)} task(s), including date cleanup and field normalization.",
+            ),
+            AgentTrace(
+                agent="reviewer",
+                summary=f"Generated {len(risks)} risk signal(s) and {len(next_actions)} next action(s).",
+            ),
+            AgentTrace(
+                agent="memory",
+                summary=f"Prepared this round for persistence: {summary}",
+            ),
+        ]
+
+        return AnalyzeResponse(
+            session_id=session_id,
+            summary=summary,
+            tasks=tasks,
+            risks=risks,
+            next_actions=next_actions[:4],
+            agent_traces=traces,
+        )
+
+    def _handle_fallback_request(self, message: FeishuMessageContext) -> dict:
+        decision = self.interaction_service.decide(message.text)
+
+        if decision.mode == "help":
+            return self._deliver_reply(message, "help", self._format_help_reply(), analysis=None)
+
+        if decision.mode == "slides":
+            return self._handle_fallback_slides(message)
+
+        if decision.mode == "status":
+            tasks = self.memory_service.get_current_tasks(message.session_id)
+            payload = self.memory_service.load_memory_payload(message.session_id)
+            reply_preview = self._format_status_reply(message.text, tasks, payload)
+            return self._deliver_reply(message, "status", reply_preview, analysis=None)
+
+        discussion_block = self.memory_service.build_discussion_block(
+            message.session_id,
+            exclude_message_id=message.message_id,
+        )
+        if not discussion_block:
+            reply = "我已经开始旁听这轮讨论了。你继续聊，等需要的时候再 @我做总结、整理待办或生成汇报大纲。"
+            return self._deliver_reply(message, "help", reply, analysis=None)
+
+        analysis = self.orchestrator.run(
+            AnalyzeRequest(session_id=message.session_id, raw_text=discussion_block)
+        )
+        sync_lines: list[str] = []
+        if decision.mode == "bitable":
+            sync_lines = self._sync_tasks_to_bitable(analysis, message.session_id)
+        reply_preview = self._format_analysis_reply(analysis, decision.mode, sync_lines)
+        self.memory_service.save_round(session_id=message.session_id, analysis=analysis)
+        return self._deliver_reply(message, decision.mode, reply_preview, analysis=analysis)
+
+    def _handle_fallback_slides(self, message: FeishuMessageContext) -> dict:
+        workspace_context = self.memory_service.build_workspace_context(
+            message.session_id,
+            include_pending=True,
+            exclude_message_id=message.message_id,
+        )
+        if not workspace_context.strip():
+            reply = "我这边还没有拿到可用的讨论素材。先在群里把目标、分工和结论聊出来，再让我生成汇报大纲会更准确。"
+            return self._deliver_reply(message, "slides", reply, analysis=None)
+
         try:
-            return float(value)
-        except (TypeError, ValueError):
-            return 0.0
+            package = self.llm_service.generate_presentation_package(workspace_context, message.text)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Slide outline generation failed, falling back to template: %s", exc)
+            package = self._build_fallback_presentation_package(message.session_id)
 
-    def _empty_result(self, session_id: str, mode: str) -> dict[str, Any]:
+        reply_preview = self._format_presentation_reply(package)
+        return self._deliver_reply(message, "slides", reply_preview, analysis=None)
+
+    def _empty_result(self, session_id: str, mode: str) -> dict:
         return {
             "session_id": session_id,
             "mode": mode,
@@ -101,74 +240,6 @@ class FeishuWorkflowService:
             "analysis": None,
         }
 
-    def _handle_analysis_trigger(
-        self,
-        message: FeishuMessageContext,
-        decision: InteractionDecision,
-    ) -> dict[str, Any]:
-        discussion_block = self.memory_service.build_discussion_block(
-            message.session_id,
-            exclude_message_id=message.message_id,
-        )
-        if not discussion_block:
-            reply = (
-                "我已经开始旁听这段群聊了，但这轮还没有积累到可整理的讨论内容。"
-                " 先继续沟通，等你发送“总结一下”“整理待办”之类的指令时，我再统一输出。"
-            )
-            return self._deliver_reply(message, decision.mode, reply, analysis=None)
-
-        analysis = self.orchestrator.run(
-            AnalyzeRequest(
-                session_id=message.session_id,
-                raw_text=discussion_block,
-            )
-        )
-        sync_lines: list[str] = []
-        if decision.mode == "bitable":
-            sync_lines = self._sync_tasks_to_bitable(analysis, message.session_id)
-
-        reply_preview = self._format_analysis_reply(analysis, decision.mode, sync_lines)
-        self.memory_service.save_round(session_id=message.session_id, analysis=analysis)
-        return self._deliver_reply(message, decision.mode, reply_preview, analysis=analysis)
-
-    def _handle_status_trigger(
-        self,
-        message: FeishuMessageContext,
-        decision: InteractionDecision,
-    ) -> dict[str, Any]:
-        tasks = self.memory_service.get_current_tasks(message.session_id)
-        payload = self.memory_service.load_memory_payload(message.session_id)
-        reply_preview = self._format_status_reply(message.text, tasks, payload)
-        return self._deliver_reply(message, decision.mode, reply_preview, analysis=None)
-
-    def _handle_slides_trigger(
-        self,
-        message: FeishuMessageContext,
-        decision: InteractionDecision,
-    ) -> dict[str, Any]:
-        workspace_context = self.memory_service.build_workspace_context(message.session_id)
-        if not workspace_context.strip():
-            reply = (
-                "我还没有拿到可用的讨论素材。"
-                " 先在群里把目标、分工和结论聊出来，再让我生成演示稿大纲会更准确。"
-            )
-            return self._deliver_reply(message, decision.mode, reply, analysis=None)
-
-        try:
-            if self.llm_service.is_configured():
-                package = self.llm_service.generate_presentation_package(
-                    workspace_context,
-                    message.text,
-                )
-            else:
-                package = self._build_fallback_presentation_package(message.session_id)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Slide outline generation failed, falling back to template: %s", exc)
-            package = self._build_fallback_presentation_package(message.session_id)
-
-        reply_preview = self._format_presentation_reply(package)
-        return self._deliver_reply(message, decision.mode, reply_preview, analysis=None)
-
     def _deliver_reply(
         self,
         message: FeishuMessageContext,
@@ -176,7 +247,7 @@ class FeishuWorkflowService:
         reply_preview: str | None,
         *,
         analysis: AnalyzeResponse | None,
-    ) -> dict[str, Any]:
+    ) -> dict:
         reply_sent = False
         reply_error: str | None = None
 
@@ -232,7 +303,7 @@ class FeishuWorkflowService:
                 for idx, risk in enumerate(analysis.risks, start=1):
                     lines.append(f"{idx}. {risk}")
             else:
-                lines.append("1. 当前没有额外识别到新的显性风险。")
+                lines.append("1. 当前没有识别到新的显性风险。")
 
         lines.append("下一步建议：")
         for idx, action in enumerate(analysis.next_actions, start=1):
@@ -259,20 +330,16 @@ class FeishuWorkflowService:
             except Exception as exc:  # noqa: BLE001
                 failed.append(f"- 《{task.title}》写入失败：{exc}")
 
-        summary = [f"- 成功写入 {created} 条任务到多维表格。"]
-        return summary + failed
+        return [f"- 成功写入 {created} 条任务到多维表格。"] + failed
 
-    def _format_status_reply(self, query: str, tasks: list, payload: dict[str, Any]) -> str:
+    def _format_status_reply(self, query: str, tasks: list, payload: dict) -> str:
         if not tasks:
-            return (
-                "我这边还没有现成的任务快照。"
-                " 你可以先让我“总结一下”或“整理待办”，我再基于那一轮结果回答状态问题。"
-            )
+            return "我这边还没有现成的任务快照。你可以先让我总结一下或整理待办，我再基于结果回答状态问题。"
 
         if "没负责人" in query or "未分配" in query:
             pending = [task for task in tasks if task.owner == "TBD"]
             if not pending:
-                return "【负责人检查】\n当前任务都已经有负责人，没有未分配项。"
+                return "【负责人检查】\n当前任务都已经有明确负责人，没有未分配项。"
             lines = ["【负责人检查】", "以下任务还没有明确负责人："]
             for idx, task in enumerate(pending, start=1):
                 lines.append(f"{idx}. {task.title} | 截止：{task.due_date}")
@@ -307,22 +374,18 @@ class FeishuWorkflowService:
                 f"- 任务总数：{len(tasks)}",
                 f"- 已完成：{completed}",
                 f"- 待确认负责人：{unassigned}",
-                "- 如需更具体输出，可以继续发：整理待办 / 看风险 / 生成演示稿大纲",
+                "- 如需更具体输出，可以继续问：谁负责什么 / 哪些任务没负责人 / 当前有什么风险。",
             ]
         )
 
-    def _format_presentation_reply(self, package: dict[str, Any]) -> str:
+    def _format_presentation_reply(self, package: dict) -> str:
         theme = str(package.get("theme") or "基于群聊讨论的协作汇报").strip()
         audience = str(package.get("audience") or "项目汇报 / 路演准备").strip()
         slides = package.get("slides") if isinstance(package.get("slides"), list) else []
         emphasis = package.get("emphasis") if isinstance(package.get("emphasis"), list) else []
         assets = package.get("assets") if isinstance(package.get("assets"), list) else []
 
-        lines = [
-            "【演示稿大纲】",
-            f"主题：{theme}",
-            f"适用场景：{audience}",
-        ]
+        lines = ["【汇报大纲】", f"主题：{theme}", f"适用场景：{audience}"]
 
         for index, slide in enumerate(slides[:7], start=1):
             if not isinstance(slide, dict):
@@ -345,7 +408,7 @@ class FeishuWorkflowService:
 
         return "\n".join(lines)
 
-    def _build_fallback_presentation_package(self, session_id: str) -> dict[str, Any]:
+    def _build_fallback_presentation_package(self, session_id: str) -> dict:
         tasks = self.memory_service.get_current_tasks(session_id)
         payload = self.memory_service.load_memory_payload(session_id)
 
@@ -369,14 +432,8 @@ class FeishuWorkflowService:
                         "这次输出服务于什么汇报或报名场景",
                     ],
                 },
-                {
-                    "title": "讨论中形成的关键结论",
-                    "bullets": task_lines[:3],
-                },
-                {
-                    "title": "任务拆解与分工",
-                    "bullets": task_lines,
-                },
+                {"title": "讨论中形成的关键结论", "bullets": task_lines[:3]},
+                {"title": "任务拆解与分工", "bullets": task_lines},
                 {
                     "title": "当前风险与待确认事项",
                     "bullets": risks[:3] or ["负责人和截止时间仍需进一步确认"],
@@ -390,22 +447,21 @@ class FeishuWorkflowService:
                 "AI 不打断日常讨论，而是在需要时统一整理和输出",
                 "协作结果可以从 IM 继续延展到文档和演示稿",
             ],
-            "assets": [
-                "最新任务清单截图",
-                "关键讨论结论摘要",
-                "时间线或里程碑信息",
-            ],
+            "assets": ["最新任务清单截图", "关键讨论结论摘要", "时间线或里程碑信息"],
         }
 
-    def _format_help_reply(self) -> str:
-        return "\n".join(
+    def _format_help_reply(self, reason: str | None = None) -> str:
+        lines = ["【我可以这样帮你】"]
+        if reason:
+            lines.append(f"提示：{reason}")
+        lines.extend(
             [
-                "【我可以这样帮你】",
-                "- @我 总结一下",
-                "- @我 整理待办",
-                "- @我 看一下风险和卡点",
-                "- @我 现在还有哪些任务没负责人？",
+                "- @我 总结一下这次讨论",
+                "- @我 帮我整理待办",
+                "- @我 看一下当前风险和卡点",
+                "- @我 现在还有哪些任务没负责人",
                 "- @我 帮我把刚才讨论同步到多维表格",
-                "- @我 给我出个演示稿 / 汇报大纲",
+                "- @我 帮我搞个汇报大纲",
             ]
         )
+        return "\n".join(lines)

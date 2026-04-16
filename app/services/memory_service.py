@@ -182,11 +182,21 @@ class MemoryService:
             lines.append(f"- {speaker}: {message.content}")
         return "\n".join(lines)
 
-    def build_workspace_context(self, session_id: str, *, include_pending: bool = True) -> str:
+    def build_workspace_context(
+        self,
+        session_id: str,
+        *,
+        include_pending: bool = True,
+        exclude_message_id: str | None = None,
+    ) -> str:
         tasks = self.get_current_tasks(session_id)
         memories = self.get_recent_memories(session_id)
         recent_messages = self.get_recent_messages(session_id)
-        pending_block = self.build_discussion_block(session_id) if include_pending else ""
+        pending_block = (
+            self.build_discussion_block(session_id, exclude_message_id=exclude_message_id)
+            if include_pending
+            else ""
+        )
 
         if not tasks and not memories and not recent_messages and not pending_block:
             return ""
@@ -197,19 +207,19 @@ class MemoryService:
             lines.append(pending_block)
 
         if tasks:
-            lines.append("当前任务快照：")
+            lines.append("[当前任务快照]")
             for task in tasks:
                 lines.append(
                     f"- {task.title} | 负责人: {task.owner} | 截止: {task.due_date} | 优先级: {task.priority} | 状态: {task.status}"
                 )
 
         if memories:
-            lines.append("最近总结：")
+            lines.append("[最近总结]")
             for memory in reversed(memories):
                 lines.append(f"- {memory.summary}")
 
         if recent_messages:
-            lines.append("最近消息：")
+            lines.append("[最近消息]")
             for message in reversed(recent_messages[-6:]):
                 role = "群成员" if message.role == "user" else "助手"
                 speaker = message.sender_id or role
