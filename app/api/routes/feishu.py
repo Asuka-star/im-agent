@@ -1,4 +1,5 @@
 import logging
+import time
 
 from fastapi import APIRouter, HTTPException, Request
 
@@ -16,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 @router.post("/events")
 async def receive_events(request: Request) -> dict:
+    started_at = time.perf_counter()
     payload = await request.json()
     envelope = event_handler.parse_event(payload)
 
@@ -62,6 +64,11 @@ async def receive_events(request: Request) -> dict:
         result["reply_sent"],
         task_count,
         result["reply_error"],
+    )
+    logger.info(
+        "Feishu callback handled: message_id=%s total_elapsed_ms=%.1f",
+        message_context.message_id,
+        (time.perf_counter() - started_at) * 1000,
     )
     return {
         "code": 0,

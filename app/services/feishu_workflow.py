@@ -1,4 +1,5 @@
 import logging
+import time
 
 from app.agents.orchestrator import AgentOrchestrator
 from app.core.config import settings
@@ -34,14 +35,26 @@ class FeishuWorkflowService:
         self.llm_service = LLMService()
 
     def handle_message(self, message: FeishuMessageContext) -> dict:
+        started_at = time.perf_counter()
         self.memory_service.save_user_message(
             session_id=message.session_id,
             message_id=message.message_id,
             sender_id=message.sender_id,
             content=message.text or message.raw_text,
+            embed=False,
+        )
+        logger.info(
+            "Workflow stage completed: message_id=%s stage=save_user_message elapsed_ms=%.1f",
+            message.message_id,
+            (time.perf_counter() - started_at) * 1000,
         )
 
         if message.chat_type == "group" and not message.is_mentioned:
+            logger.info(
+                "Workflow stage completed: message_id=%s stage=buffer_return total_elapsed_ms=%.1f",
+                message.message_id,
+                (time.perf_counter() - started_at) * 1000,
+            )
             return self._empty_result(message.session_id, "buffer")
 
         result = self._handle_mentioned_request(message)
@@ -49,7 +62,13 @@ class FeishuWorkflowService:
             self.memory_service.save_assistant_message(
                 session_id=message.session_id,
                 content=result["reply_preview"],
+                embed=False,
             )
+        logger.info(
+            "Workflow stage completed: message_id=%s stage=workflow_done total_elapsed_ms=%.1f",
+            message.message_id,
+            (time.perf_counter() - started_at) * 1000,
+        )
         return result
 
     def _handle_mentioned_request(self, message: FeishuMessageContext) -> dict:

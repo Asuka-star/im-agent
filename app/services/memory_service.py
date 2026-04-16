@@ -30,6 +30,7 @@ class MemoryService:
         message_id: str | None,
         sender_id: str | None,
         content: str,
+        embed: bool = True,
     ) -> None:
         self.ensure_session(session_id)
         with SessionLocal() as session:
@@ -57,9 +58,10 @@ class MemoryService:
             source_id=message_id,
             content=content,
             metadata={"sender_id": sender_id or "", "role": "user"},
+            embed=embed,
         )
 
-    def save_assistant_message(self, *, session_id: str, content: str) -> None:
+    def save_assistant_message(self, *, session_id: str, content: str, embed: bool = True) -> None:
         self.ensure_session(session_id)
         with SessionLocal() as session:
             session.add(
@@ -78,9 +80,10 @@ class MemoryService:
             source_id=None,
             content=content,
             metadata={"role": "assistant"},
+            embed=embed,
         )
 
-    def save_round(self, *, session_id: str, analysis: AnalyzeResponse) -> None:
+    def save_round(self, *, session_id: str, analysis: AnalyzeResponse, embed: bool = True) -> None:
         self.ensure_session(session_id)
         payload = {
             "summary": analysis.summary,
@@ -123,6 +126,7 @@ class MemoryService:
                 "next_actions": analysis.next_actions,
                 "task_count": len(analysis.tasks),
             },
+            embed=embed,
         )
 
     def save_memory_chunk(
@@ -133,12 +137,13 @@ class MemoryService:
         source_id: str | None,
         content: str,
         metadata: dict | None = None,
+        embed: bool = True,
     ) -> None:
         if not content.strip():
             return
 
         embedding = None
-        if self.embedding_service.is_configured():
+        if embed and self.embedding_service.is_configured():
             try:
                 embedding = self.embedding_service.embed_text(content)
             except Exception:
