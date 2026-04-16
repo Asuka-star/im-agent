@@ -57,6 +57,7 @@ class FeishuWorkflowService:
             message.session_id,
             include_pending=True,
             exclude_message_id=message.message_id,
+            query_text=message.text,
         )
 
         if self.llm_service.is_configured():
@@ -216,6 +217,7 @@ class FeishuWorkflowService:
             message.session_id,
             include_pending=True,
             exclude_message_id=message.message_id,
+            query_text=message.text,
         )
         if not workspace_context.strip():
             reply = "我这边还没有拿到可用的讨论素材。先在群里把目标、分工和结论聊出来，再让我生成汇报大纲会更准确。"

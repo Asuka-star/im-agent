@@ -3,12 +3,16 @@ import json
 from sqlalchemy import delete, desc, select
 
 from app.db.database import SessionLocal
-from app.db.models import Memory, Message, Session, Task
+from app.db.models import Memory, MemoryChunk, Message, Session, Task
 from app.schemas.analyze import AnalyzeResponse
+from app.services.embeddings import EmbeddingService
 
 
 class MemoryService:
-    """Stores discussion history, task snapshots, and lightweight session context."""
+    """Stores discussion history, task snapshots, and hybrid memory context."""
+
+    def __init__(self) -> None:
+        self.embedding_service = EmbeddingService()
 
     def ensure_session(self, session_id: str) -> None:
         with SessionLocal() as session:
@@ -47,6 +51,14 @@ class MemoryService:
             )
             session.commit()
 
+        self.save_memory_chunk(
+            session_id=session_id,
+            source_type="message",
+            source_id=message_id,
+            content=content,
+            metadata={"sender_id": sender_id or "", "role": "user"},
+        )
+
     def save_assistant_message(self, *, session_id: str, content: str) -> None:
         self.ensure_session(session_id)
         with SessionLocal() as session:
@@ -59,6 +71,14 @@ class MemoryService:
                 )
             )
             session.commit()
+
+        self.save_memory_chunk(
+            session_id=session_id,
+            source_type="assistant_reply",
+            source_id=None,
+            content=content,
+            metadata={"role": "assistant"},
+        )
 
     def save_round(self, *, session_id: str, analysis: AnalyzeResponse) -> None:
         self.ensure_session(session_id)
@@ -91,6 +111,50 @@ class MemoryService:
                     )
                 )
 
+            session.commit()
+
+        self.save_memory_chunk(
+            session_id=session_id,
+            source_type="summary",
+            source_id=None,
+            content=analysis.summary,
+            metadata={
+                "risks": analysis.risks,
+                "next_actions": analysis.next_actions,
+                "task_count": len(analysis.tasks),
+            },
+        )
+
+    def save_memory_chunk(
+        self,
+        *,
+        session_id: str,
+        source_type: str,
+        source_id: str | None,
+        content: str,
+        metadata: dict | None = None,
+    ) -> None:
+        if not content.strip():
+            return
+
+        embedding = None
+        if self.embedding_service.is_configured():
+            try:
+                embedding = self.embedding_service.embed_text(content)
+            except Exception:
+                embedding = None
+
+        with SessionLocal() as session:
+            session.add(
+                MemoryChunk(
+                    session_id=session_id,
+                    source_type=source_type,
+                    source_id=source_id,
+                    content=content,
+                    metadata_json=json.dumps(metadata or {}, ensure_ascii=False),
+                    embedding=embedding,
+                )
+            )
             session.commit()
 
     def get_recent_messages(self, session_id: str, limit: int = 12) -> list[Message]:
@@ -130,6 +194,29 @@ class MemoryService:
                 .scalars()
                 .all()
             )
+
+    def search_relevant_memories(
+        self,
+        session_id: str,
+        query_text: str,
+        *,
+        limit: int = 5,
+    ) -> list[MemoryChunk]:
+        if not self.embedding_service.is_configured() or not query_text.strip():
+            return []
+
+        query_embedding = self.embedding_service.embed_text(query_text)
+        with SessionLocal() as session:
+            statement = (
+                select(MemoryChunk)
+                .where(
+                    MemoryChunk.session_id == session_id,
+                    MemoryChunk.embedding.is_not(None),
+                )
+                .order_by(MemoryChunk.embedding.cosine_distance(query_embedding))
+                .limit(limit)
+            )
+            return session.execute(statement).scalars().all()
 
     def get_pending_user_messages(
         self,
@@ -188,17 +275,19 @@ class MemoryService:
         *,
         include_pending: bool = True,
         exclude_message_id: str | None = None,
+        query_text: str | None = None,
     ) -> str:
         tasks = self.get_current_tasks(session_id)
         memories = self.get_recent_memories(session_id)
         recent_messages = self.get_recent_messages(session_id)
+        retrieved_chunks = self.search_relevant_memories(session_id, query_text or "", limit=5)
         pending_block = (
             self.build_discussion_block(session_id, exclude_message_id=exclude_message_id)
             if include_pending
             else ""
         )
 
-        if not tasks and not memories and not recent_messages and not pending_block:
+        if not tasks and not memories and not recent_messages and not pending_block and not retrieved_chunks:
             return ""
 
         lines: list[str] = ["[协作上下文]"]
@@ -217,6 +306,11 @@ class MemoryService:
             lines.append("[最近总结]")
             for memory in reversed(memories):
                 lines.append(f"- {memory.summary}")
+
+        if retrieved_chunks:
+            lines.append("[相关历史记忆]")
+            for chunk in retrieved_chunks:
+                lines.append(f"- ({chunk.source_type}) {chunk.content}")
 
         if recent_messages:
             lines.append("[最近消息]")

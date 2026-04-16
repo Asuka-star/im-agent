@@ -2,6 +2,7 @@ param(
     [string]$Context = "mylinux",
     [string]$ImageName = "feishu-im-agent-mvp",
     [string]$ContainerName = "feishu-im-agent-mvp",
+    [string]$NetworkName = "feishu-agent-net",
     [string]$EnvFile = ".env",
     [int]$HostPort = 9000,
     [int]$ContainerPort = 9000
@@ -24,6 +25,12 @@ if (-not (Test-Path $resolvedEnvFile)) {
 Write-Step "Using Docker context '$Context'"
 docker --context $Context context inspect $Context | Out-Null
 
+Write-Step "Ensuring Docker network '$NetworkName' exists"
+$networkExists = docker --context $Context network ls --format "{{.Name}}" | Select-String -SimpleMatch $NetworkName
+if (-not $networkExists) {
+    docker --context $Context network create $NetworkName | Out-Null
+}
+
 Write-Step "Building image '$ImageName'"
 docker --context $Context build -t $ImageName $projectRoot
 
@@ -34,6 +41,7 @@ Write-Step "Starting new container '$ContainerName'"
 docker --context $Context run -d `
     --name $ContainerName `
     --restart unless-stopped `
+    --network $NetworkName `
     --env-file $resolvedEnvFile `
     -p "${HostPort}:${ContainerPort}" `
     $ImageName | Out-Null

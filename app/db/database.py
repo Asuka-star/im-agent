@@ -26,10 +26,19 @@ Base = declarative_base()
 
 
 def init_db() -> None:
-    from app.db.models import Message, Memory, Session, Task  # noqa: F401
+    from app.db.models import Memory, MemoryChunk, Message, Session, Task  # noqa: F401
 
+    _prepare_database_extensions()
     Base.metadata.create_all(bind=engine)
     _run_lightweight_migrations()
+
+
+def _prepare_database_extensions() -> None:
+    if not settings.database_url.startswith("postgresql"):
+        return
+
+    with engine.begin() as connection:
+        connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
 
 
 def _run_lightweight_migrations() -> None:
@@ -52,3 +61,18 @@ def _run_lightweight_migrations() -> None:
         if "payload" not in memory_columns:
             with engine.begin() as connection:
                 connection.execute(text("ALTER TABLE memories ADD COLUMN payload TEXT"))
+
+    if "memory_chunks" in tables:
+        chunk_columns = {column["name"] for column in inspector.get_columns("memory_chunks")}
+        if "metadata_json" not in chunk_columns:
+            with engine.begin() as connection:
+                connection.execute(text("ALTER TABLE memory_chunks ADD COLUMN metadata_json TEXT"))
+
+        if settings.database_url.startswith("postgresql"):
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS ix_memory_chunks_embedding_hnsw "
+                        "ON memory_chunks USING hnsw (embedding vector_cosine_ops)"
+                    )
+                )

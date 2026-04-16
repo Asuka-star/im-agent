@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     feishu_encrypt_key: str = Field(default="", alias="FEISHU_ENCRYPT_KEY")
     feishu_api_base_url: str = Field(default="https://open.feishu.cn", alias="FEISHU_API_BASE_URL")
     feishu_reply_enabled: bool = Field(default=False, alias="FEISHU_REPLY_ENABLED")
+
     feishu_bitable_enabled: bool = Field(default=False, alias="FEISHU_BITABLE_ENABLED")
     feishu_bitable_app_token: str = Field(default="", alias="FEISHU_BITABLE_APP_TOKEN")
     feishu_bitable_table_id: str = Field(default="", alias="FEISHU_BITABLE_TABLE_ID")
@@ -31,6 +32,11 @@ class Settings(BaseSettings):
     llm_api_key: str = Field(default="", alias="LLM_API_KEY")
     llm_base_url: str = Field(default="https://openrouter.ai/api/v1", alias="LLM_BASE_URL")
     llm_model: str = Field(default="deepseek/deepseek-v3.2", alias="LLM_MODEL")
+
+    embedding_api_key: str = Field(default="", alias="EMBEDDING_API_KEY")
+    embedding_base_url: str = Field(default="", alias="EMBEDDING_BASE_URL")
+    embedding_model: str = Field(default="", alias="EMBEDDING_MODEL")
+    embedding_dimensions: int = Field(default=1024, alias="EMBEDDING_DIMENSIONS")
 
     anthropic_auth_token: str = Field(default="", alias="ANTHROPIC_AUTH_TOKEN")
     anthropic_base_url: str = Field(default="", alias="ANTHROPIC_BASE_URL")

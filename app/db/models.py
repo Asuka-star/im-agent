@@ -1,5 +1,7 @@
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import Column, DateTime, Integer, String, Text, func
 
+from app.core.config import settings
 from app.db.database import Base
 
 
@@ -44,4 +46,17 @@ class Memory(Base):
     session_id = Column(String(128), nullable=False, index=True)
     summary = Column(Text, nullable=False)
     payload = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class MemoryChunk(Base):
+    __tablename__ = "memory_chunks"
+
+    id = Column(Integer, primary_key=True, index=True)
+    session_id = Column(String(128), nullable=False, index=True)
+    source_type = Column(String(32), nullable=False, default="message")
+    source_id = Column(String(128), nullable=True, index=True)
+    content = Column(Text, nullable=False)
+    metadata_json = Column(Text, nullable=True)
+    embedding = Column(Vector(settings.embedding_dimensions), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
