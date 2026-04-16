@@ -13,6 +13,18 @@ class Session(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
+class UserAlias(Base):
+    __tablename__ = "user_aliases"
+
+    id = Column(Integer, primary_key=True, index=True)
+    session_id = Column(String(128), nullable=False, index=True)
+    user_id = Column(String(128), nullable=True, index=True)
+    open_id = Column(String(128), nullable=True, index=True)
+    union_id = Column(String(128), nullable=True, index=True)
+    display_name = Column(String(128), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
 class Episode(Base):
     __tablename__ = "episodes"
 

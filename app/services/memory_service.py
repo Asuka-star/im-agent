@@ -3,11 +3,11 @@ import logging
 import threading
 from datetime import datetime, timezone
 
-from sqlalchemy import delete, desc, select
+from sqlalchemy import delete, desc, or_, select
 
 from app.core.config import settings
 from app.db.database import SessionLocal
-from app.db.models import Episode, Memory, MemoryChunk, Message, Session, Task, TaskChangeLog
+from app.db.models import Episode, Memory, MemoryChunk, Message, Session, Task, TaskChangeLog, UserAlias
 from app.schemas.analyze import AnalyzeResponse
 from app.schemas.task import TaskItem
 from app.services.embeddings import EmbeddingService
@@ -89,6 +89,8 @@ class MemoryService:
         embed: bool = True,
     ) -> None:
         self.ensure_session(session_id)
+        if mentioned_users:
+            self._upsert_user_aliases(session_id, mentioned_users)
         with SessionLocal() as session:
             if message_id:
                 existing = session.execute(
@@ -388,9 +390,13 @@ class MemoryService:
         if not messages:
             return ""
 
+        alias_map = self._build_alias_map(
+            session_id,
+            [message.sender_id for message in messages if message.sender_id],
+        )
         lines = ["[近期群聊讨论]"]
         for message in messages:
-            lines.append(self._format_message_line(message))
+            lines.append(self._format_message_line(message, alias_map=alias_map))
         return "\n".join(lines)
 
     def build_workspace_context(
@@ -458,9 +464,13 @@ class MemoryService:
                 lines.append(f"- ({chunk.source_type}) {chunk.content}")
 
         if recent_messages:
+            alias_map = self._build_alias_map(
+                session_id,
+                [message.sender_id for message in recent_messages if message.sender_id],
+            )
             lines.append("[最近消息]")
             for message in reversed(recent_messages[-6:]):
-                lines.append(self._format_message_line(message))
+                lines.append(self._format_message_line(message, alias_map=alias_map))
 
         return "\n".join(lines)
 
@@ -673,8 +683,9 @@ class MemoryService:
             "notes": task.notes or "",
         }
 
-    def _format_message_line(self, message: Message) -> str:
-        speaker = message.sender_id or ("assistant" if message.role == "assistant" else "member")
+    def _format_message_line(self, message: Message, *, alias_map: dict[str, str] | None = None) -> str:
+        speaker_id = message.sender_id or ("assistant" if message.role == "assistant" else "member")
+        speaker = alias_map.get(speaker_id, speaker_id) if alias_map else speaker_id
         mentioned_users = self._extract_message_mentions(message)
         if mentioned_users:
             return f"- 发言人: {speaker} | 提及: {', '.join(mentioned_users)} | 内容: {message.content}"
@@ -703,3 +714,86 @@ class MemoryService:
             elif user_id:
                 results.append(user_id)
         return results
+
+    def _upsert_user_aliases(self, session_id: str, mentioned_users: list[dict]) -> None:
+        valid_users = []
+        for item in mentioned_users:
+            if not isinstance(item, dict) or item.get("is_bot"):
+                continue
+            display_name = str(item.get("name") or "").strip()
+            if not display_name:
+                continue
+            valid_users.append(
+                {
+                    "user_id": str(item.get("user_id") or "").strip() or None,
+                    "open_id": str(item.get("open_id") or "").strip() or None,
+                    "union_id": str(item.get("union_id") or "").strip() or None,
+                    "display_name": display_name,
+                }
+            )
+
+        if not valid_users:
+            return
+
+        with SessionLocal() as session:
+            for item in valid_users:
+                match_conditions = [
+                    condition
+                    for condition in (
+                        UserAlias.user_id == item["user_id"] if item["user_id"] else None,
+                        UserAlias.open_id == item["open_id"] if item["open_id"] else None,
+                        UserAlias.union_id == item["union_id"] if item["union_id"] else None,
+                    )
+                    if condition is not None
+                ]
+                existing = (
+                    session.execute(
+                        select(UserAlias).where(
+                            UserAlias.session_id == session_id,
+                            or_(*match_conditions),
+                        )
+                    ).scalar_one_or_none()
+                    if match_conditions
+                    else None
+                )
+                if existing is not None:
+                    existing.display_name = item["display_name"]
+                    continue
+                session.add(
+                    UserAlias(
+                        session_id=session_id,
+                        user_id=item["user_id"],
+                        open_id=item["open_id"],
+                        union_id=item["union_id"],
+                        display_name=item["display_name"],
+                    )
+                )
+            session.commit()
+
+    def _build_alias_map(self, session_id: str, identifiers: list[str]) -> dict[str, str]:
+        unique_ids = [value for value in {identifier.strip() for identifier in identifiers if identifier and identifier.strip()}]
+        if not unique_ids:
+            return {}
+
+        with SessionLocal() as session:
+            rows = (
+                session.execute(
+                    select(UserAlias).where(
+                        UserAlias.session_id == session_id,
+                        or_(
+                            UserAlias.user_id.in_(unique_ids),
+                            UserAlias.open_id.in_(unique_ids),
+                            UserAlias.union_id.in_(unique_ids),
+                        ),
+                    )
+                )
+                .scalars()
+                .all()
+            )
+
+        alias_map: dict[str, str] = {}
+        for row in rows:
+            for key in (row.user_id, row.open_id, row.union_id):
+                if key:
+                    alias_map[key] = row.display_name
+        return alias_map
