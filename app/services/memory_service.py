@@ -3,8 +3,9 @@ import logging
 import threading
 from datetime import datetime, timezone
 
-from sqlalchemy import desc, select
+from sqlalchemy import delete, desc, select
 
+from app.core.config import settings
 from app.db.database import SessionLocal
 from app.db.models import Episode, Memory, MemoryChunk, Message, Session, Task, TaskChangeLog
 from app.schemas.analyze import AnalyzeResponse
@@ -248,6 +249,8 @@ class MemoryService:
                 )
             )
             session.commit()
+
+        self._prune_memory_chunks(session_id=session_id, source_type=source_type)
 
     def get_recent_messages(self, session_id: str, limit: int = 12) -> list[Message]:
         with SessionLocal() as session:
@@ -558,6 +561,47 @@ class MemoryService:
             for row in rows:
                 session.add(row)
             session.commit()
+
+    def _prune_memory_chunks(self, *, session_id: str, source_type: str) -> None:
+        keep_count = self._chunk_keep_count(source_type)
+        if keep_count <= 0:
+            return
+
+        with SessionLocal() as session:
+            stale_ids = (
+                session.execute(
+                    select(MemoryChunk.id)
+                    .where(
+                        MemoryChunk.session_id == session_id,
+                        MemoryChunk.source_type == source_type,
+                    )
+                    .order_by(desc(MemoryChunk.id))
+                    .offset(keep_count)
+                )
+                .scalars()
+                .all()
+            )
+            if not stale_ids:
+                return
+
+            session.execute(delete(MemoryChunk).where(MemoryChunk.id.in_(stale_ids)))
+            session.commit()
+            logger.info(
+                "Pruned stale memory chunks: session_id=%s source_type=%s removed=%s keep=%s",
+                session_id,
+                source_type,
+                len(stale_ids),
+                keep_count,
+            )
+
+    def _chunk_keep_count(self, source_type: str) -> int:
+        if source_type == "message":
+            return settings.memory_message_chunk_keep
+        if source_type == "assistant_reply":
+            return settings.memory_assistant_chunk_keep
+        if source_type == "summary":
+            return settings.memory_summary_chunk_keep
+        return settings.memory_summary_chunk_keep
 
     def _task_key(self, title: str) -> str:
         return " ".join((title or "").lower().split())

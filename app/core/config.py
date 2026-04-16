@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     embedding_base_url: str = Field(default="", alias="EMBEDDING_BASE_URL")
     embedding_model: str = Field(default="", alias="EMBEDDING_MODEL")
     embedding_dimensions: int = Field(default=1024, alias="EMBEDDING_DIMENSIONS")
+    memory_message_chunk_keep: int = Field(default=120, alias="MEMORY_MESSAGE_CHUNK_KEEP")
+    memory_assistant_chunk_keep: int = Field(default=80, alias="MEMORY_ASSISTANT_CHUNK_KEEP")
+    memory_summary_chunk_keep: int = Field(default=200, alias="MEMORY_SUMMARY_CHUNK_KEEP")
 
     anthropic_auth_token: str = Field(default="", alias="ANTHROPIC_AUTH_TOKEN")
     anthropic_base_url: str = Field(default="", alias="ANTHROPIC_BASE_URL")
