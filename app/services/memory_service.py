@@ -1,5 +1,6 @@
 import json
 import logging
+import threading
 
 from sqlalchemy import delete, desc, select
 
@@ -86,7 +87,14 @@ class MemoryService:
             embed=embed,
         )
 
-    def save_round(self, *, session_id: str, analysis: AnalyzeResponse, embed: bool = True) -> None:
+    def save_round(
+        self,
+        *,
+        session_id: str,
+        analysis: AnalyzeResponse,
+        embed: bool = True,
+        async_embed: bool = False,
+    ) -> None:
         self.ensure_session(session_id)
         payload = {
             "summary": analysis.summary,
@@ -119,18 +127,26 @@ class MemoryService:
 
             session.commit()
 
-        self.save_memory_chunk(
-            session_id=session_id,
-            source_type="summary",
-            source_id=None,
-            content=analysis.summary,
-            metadata={
+        chunk_kwargs = {
+            "session_id": session_id,
+            "source_type": "summary",
+            "source_id": None,
+            "content": analysis.summary,
+            "metadata": {
                 "risks": analysis.risks,
                 "next_actions": analysis.next_actions,
                 "task_count": len(analysis.tasks),
             },
-            embed=embed,
-        )
+            "embed": embed,
+        }
+        if async_embed and embed and self.embedding_service.is_configured():
+            threading.Thread(
+                target=self.save_memory_chunk,
+                kwargs=chunk_kwargs,
+                daemon=True,
+            ).start()
+        else:
+            self.save_memory_chunk(**chunk_kwargs)
 
     def save_memory_chunk(
         self,
@@ -289,11 +305,16 @@ class MemoryService:
         include_pending: bool = True,
         exclude_message_id: str | None = None,
         query_text: str | None = None,
+        include_semantic_search: bool = True,
     ) -> str:
         tasks = self.get_current_tasks(session_id)
         memories = self.get_recent_memories(session_id)
         recent_messages = self.get_recent_messages(session_id)
-        retrieved_chunks = self.search_relevant_memories(session_id, query_text or "", limit=5)
+        retrieved_chunks = (
+            self.search_relevant_memories(session_id, query_text or "", limit=5)
+            if include_semantic_search
+            else []
+        )
         pending_block = (
             self.build_discussion_block(session_id, exclude_message_id=exclude_message_id)
             if include_pending

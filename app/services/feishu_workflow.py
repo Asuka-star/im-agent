@@ -72,11 +72,13 @@ class FeishuWorkflowService:
         return result
 
     def _handle_mentioned_request(self, message: FeishuMessageContext) -> dict:
+        use_semantic_search = self._should_use_semantic_search(message.text)
         workspace_context = self.memory_service.build_workspace_context(
             message.session_id,
             include_pending=True,
             exclude_message_id=message.message_id,
             query_text=message.text,
+            include_semantic_search=use_semantic_search,
         )
 
         if self.llm_service.is_configured():
@@ -135,7 +137,11 @@ class FeishuWorkflowService:
             if intent == "bitable":
                 sync_lines = self._sync_tasks_to_bitable(analysis, message.session_id)
             reply_preview = self._format_analysis_reply(analysis, intent, sync_lines)
-            self.memory_service.save_round(session_id=message.session_id, analysis=analysis)
+            self.memory_service.save_round(
+                session_id=message.session_id,
+                analysis=analysis,
+                async_embed=True,
+            )
             return self._deliver_reply(message, intent, reply_preview, analysis=analysis)
 
         return self._deliver_reply(message, "help", self._format_help_reply(reason), analysis=None)
@@ -228,7 +234,11 @@ class FeishuWorkflowService:
         if decision.mode == "bitable":
             sync_lines = self._sync_tasks_to_bitable(analysis, message.session_id)
         reply_preview = self._format_analysis_reply(analysis, decision.mode, sync_lines)
-        self.memory_service.save_round(session_id=message.session_id, analysis=analysis)
+        self.memory_service.save_round(
+            session_id=message.session_id,
+            analysis=analysis,
+            async_embed=True,
+        )
         return self._deliver_reply(message, decision.mode, reply_preview, analysis=analysis)
 
     def _handle_fallback_slides(self, message: FeishuMessageContext) -> dict:
@@ -292,6 +302,26 @@ class FeishuWorkflowService:
             "reply_sent": reply_sent,
             "reply_error": reply_error,
         }
+
+    def _should_use_semantic_search(self, query: str) -> bool:
+        normalized = query.strip()
+        if not normalized:
+            return False
+
+        recall_markers = (
+            "之前",
+            "以前",
+            "历史",
+            "还记得",
+            "为什么",
+            "当时",
+            "上次",
+            "变更",
+            "改过",
+            "调整过",
+            "原因",
+        )
+        return any(marker in normalized for marker in recall_markers)
 
     def _format_analysis_reply(
         self,
