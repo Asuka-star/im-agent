@@ -74,6 +74,13 @@ In the current interaction design, ordinary discussion messages are only stored.
 - `@机器人 现在还有哪些任务没负责人？`
 - `@机器人 生成演示稿大纲`
 
+The trigger parsing is intentionally fuzzy, so natural phrasings also work, for example:
+
+- `@机器人 帮我把刚才的讨论同步到表格`
+- `@机器人 顺手整理一下任务并写到多维表格`
+- `@机器人 给我出个汇报大纲`
+- `@机器人 帮我总结一下这轮讨论`
+
 For slide drafting, the current MVP outputs a presentation package with:
 
 - theme

@@ -38,6 +38,10 @@ class FeishuWorkflowService:
         else:
             decision = self.interaction_service.decide(message.text)
 
+        if decision.mode == "help":
+            reply_preview = self._format_help_reply()
+            return self._deliver_reply(message, decision.mode, reply_preview, analysis=None)
+
         if decision.mode == "buffer":
             return self._empty_result(message.session_id, decision.mode)
 
@@ -363,3 +367,16 @@ class FeishuWorkflowService:
                 "时间线或里程碑信息",
             ],
         }
+
+    def _format_help_reply(self) -> str:
+        return "\n".join(
+            [
+                "【我可以这样帮你】",
+                "- @我 总结一下",
+                "- @我 整理待办",
+                "- @我 看一下风险和卡点",
+                "- @我 现在还有哪些任务没负责人？",
+                "- @我 帮我把刚才讨论同步到多维表格",
+                "- @我 给我出个演示稿 / 汇报大纲",
+            ]
+        )
