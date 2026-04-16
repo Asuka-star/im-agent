@@ -5,6 +5,7 @@ from typing import Any
 import httpx
 
 from app.core.config import settings
+from app.services.due_date import current_local_date
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +128,7 @@ class LLMService:
         return json.loads(candidate[start : end + 1])
 
     def _extraction_prompt(self) -> str:
+        today = current_local_date().isoformat()
         return """
 You are a Feishu collaboration assistant.
 Convert a multi-person chat discussion into structured collaboration output.
@@ -154,9 +156,11 @@ Rules:
 - If the message is mostly discussion without clear actions, return an empty tasks array.
 - If owner is unclear, use TBD.
 - If due date is unclear, use TBD.
+- Today is {today} in Asia/Shanghai.
 - If the source mentions relative time such as 今天 / 明天 / 周五前 / 下周三, convert it to an absolute date in YYYY-MM-DD format when possible.
+- Do not invent old years such as 2024 when the discussion uses relative dates.
 - All output must be Simplified Chinese.
-""".strip()
+""".strip().format(today=today)
 
     def _presentation_prompt(self) -> str:
         return """

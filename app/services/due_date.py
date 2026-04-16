@@ -31,13 +31,55 @@ WEEKDAY_MAP = {
     "sunday": 6,
 }
 
+RELATIVE_TIME_MARKERS = (
+    "今天",
+    "明天",
+    "后天",
+    "今晚",
+    "本周",
+    "这周",
+    "下周",
+    "周一",
+    "周二",
+    "周三",
+    "周四",
+    "周五",
+    "周六",
+    "周日",
+    "周天",
+    "星期一",
+    "星期二",
+    "星期三",
+    "星期四",
+    "星期五",
+    "星期六",
+    "星期日",
+    "星期天",
+    "today",
+    "tomorrow",
+    "tonight",
+    "this week",
+    "next week",
+    "monday",
+    "tuesday",
+    "wednesday",
+    "thursday",
+    "friday",
+    "saturday",
+    "sunday",
+)
+
+
+def current_local_date() -> date:
+    return datetime.now(ZoneInfo("Asia/Shanghai")).date()
+
 
 def normalize_due_date_text(text: str, *, today: date | None = None) -> str:
     candidate = (text or "").strip()
     if not candidate or candidate.upper() == "TBD":
         return "TBD"
 
-    today = today or datetime.now(ZoneInfo("Asia/Shanghai")).date()
+    today = today or current_local_date()
     parsed = (
         _parse_iso_date(candidate)
         or _parse_month_day(candidate, today)
@@ -51,13 +93,78 @@ def normalize_due_date_text(text: str, *, today: date | None = None) -> str:
     return parsed.isoformat()
 
 
-def normalize_task_dates(tasks: list[TaskItem]) -> list[TaskItem]:
+def normalize_task_dates(tasks: list[TaskItem], *, today: date | None = None) -> list[TaskItem]:
+    today = today or current_local_date()
     normalized: list[TaskItem] = []
+
     for task in tasks:
-        due_source = task.due_date if task.due_date != "TBD" else task.notes
-        normalized_due_date = normalize_due_date_text(due_source)
-        normalized.append(task.model_copy(update={"due_date": normalized_due_date}))
+        due_from_field = normalize_due_date_text(task.due_date, today=today)
+        due_from_notes = normalize_due_date_text(task.notes, today=today)
+
+        chosen_due_date = due_from_field
+        if _should_prefer_note_date(
+            task=task,
+            due_from_field=due_from_field,
+            due_from_notes=due_from_notes,
+            today=today,
+        ):
+            chosen_due_date = due_from_notes
+
+        normalized.append(task.model_copy(update={"due_date": chosen_due_date}))
+
     return normalized
+
+
+def _should_prefer_note_date(
+    *,
+    task: TaskItem,
+    due_from_field: str,
+    due_from_notes: str,
+    today: date,
+) -> bool:
+    if due_from_notes == "TBD":
+        return False
+
+    note_has_relative_time = contains_relative_time_reference(task.notes)
+    if not note_has_relative_time:
+        return False
+
+    if due_from_field == "TBD":
+        return True
+
+    if _looks_like_unreasonable_absolute_date(due_from_field, today=today):
+        return True
+
+    return False
+
+
+def contains_relative_time_reference(text: str) -> bool:
+    candidate = (text or "").strip()
+    lowered = candidate.lower()
+    return any(marker in candidate or marker in lowered for marker in RELATIVE_TIME_MARKERS)
+
+
+def _looks_like_unreasonable_absolute_date(value: str, *, today: date) -> bool:
+    parsed = _extract_iso_date(value)
+    if parsed is None:
+        return False
+
+    if parsed.year < today.year:
+        return True
+    if parsed.year > today.year + 1:
+        return True
+    return False
+
+
+def _extract_iso_date(text: str) -> date | None:
+    match = re.search(r"(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2})", text)
+    if not match:
+        return None
+    return _safe_date(
+        int(match.group("year")),
+        int(match.group("month")),
+        int(match.group("day")),
+    )
 
 
 def _parse_iso_date(text: str) -> date | None:
@@ -75,10 +182,12 @@ def _parse_month_day(text: str, today: date) -> date | None:
     match = re.search(r"(?:(?P<year>\d{4})年)?(?P<month>\d{1,2})月(?P<day>\d{1,2})[日号]?", text)
     if not match:
         return None
+
     year = int(match.group("year")) if match.group("year") else today.year
     parsed = _safe_date(year, int(match.group("month")), int(match.group("day")))
     if parsed is None:
         return None
+
     if not match.group("year") and parsed < today - timedelta(days=30):
         return _safe_date(year + 1, int(match.group("month")), int(match.group("day")))
     return parsed
