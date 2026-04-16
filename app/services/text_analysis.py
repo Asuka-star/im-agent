@@ -121,6 +121,8 @@ def infer_risks(tasks: list[TaskItem]) -> list[str]:
             risks.append(f"\u4efb\u52a1\u300a{task.title}\u300b\u4ecd\u672a\u786e\u8ba4\u8d1f\u8d23\u4eba\u3002")
         if task.due_date == "TBD":
             risks.append(f"\u4efb\u52a1\u300a{task.title}\u300b\u4ecd\u672a\u786e\u8ba4\u622a\u6b62\u65f6\u95f4\u3002")
+        if "已过期" in task.due_date:
+            risks.append(f"\u4efb\u52a1\u300a{task.title}\u300b\u7684\u622a\u6b62\u65f6\u95f4\u5df2\u8fc7\uff1a{task.due_date}\u3002")
         if len(task.title) < 8:
             risks.append(f"\u4efb\u52a1\u300a{task.title}\u300b\u63cf\u8ff0\u504f\u7b80\u7565\uff0c\u5efa\u8bae\u518d\u8865\u5145\u7ec6\u8282\u3002")
 

@@ -46,6 +46,8 @@ def normalize_due_date_text(text: str, *, today: date | None = None) -> str:
     )
     if parsed is None:
         return candidate
+    if parsed < today:
+        return _format_past_due_candidate(candidate, parsed)
     return parsed.isoformat()
 
 
@@ -115,6 +117,18 @@ def _parse_weekday(text: str, today: date) -> date | None:
 
         return week_start + timedelta(days=weekday)
     return None
+
+
+def _format_past_due_candidate(original_text: str, parsed: date) -> str:
+    suggestion = ""
+    if _contains_weekday_reference(original_text):
+        suggestion = f"，请确认是否应为 {(parsed + timedelta(days=7)).isoformat()}"
+    return f"{parsed.isoformat()}（已过期{suggestion}）"
+
+
+def _contains_weekday_reference(text: str) -> bool:
+    lowered = text.lower()
+    return any(token in text or token in lowered for token in WEEKDAY_MAP)
 
 
 def _safe_date(year: int, month: int, day: int) -> date | None:
