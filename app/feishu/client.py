@@ -21,5 +21,19 @@ class FeishuClient:
             raise RuntimeError(f"Feishu API error: {data.get('msg', 'unknown error')}")
         return data
 
+    def get_json(
+        self,
+        path: str,
+        *,
+        headers: dict | None = None,
+        params: dict | None = None,
+    ) -> dict:
+        response = self.client.get(path, headers=headers, params=params)
+        response.raise_for_status()
+        data = response.json()
+        if isinstance(data, dict) and data.get("code", 0) != 0:
+            raise RuntimeError(f"Feishu API error: {data.get('msg', 'unknown error')}")
+        return data
+
     def close(self) -> None:
         self.client.close()

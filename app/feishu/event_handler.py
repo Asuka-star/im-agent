@@ -72,6 +72,9 @@ class FeishuEventHandler:
             chat_type=message.chat_type,
             session_id=session_id,
             sender_id=sender_label,
+            sender_user_id=sender.sender_id.user_id,
+            sender_open_id=sender.sender_id.open_id,
+            sender_union_id=sender.sender_id.union_id,
             text=text,
             raw_text=raw_text,
             is_mentioned=any(user.is_bot for user in parsed_mentions),
@@ -142,4 +145,3 @@ class FeishuEventHandler:
 
         cleaned = re.sub(r"@[^\s]+\s*", " ", cleaned)
         return re.sub(r"\s+", " ", cleaned).strip()
-

@@ -30,6 +30,47 @@ class MemoryService:
                 session.add(Session(session_id=session_id))
                 session.commit()
 
+    def get_alias_display_name(self, session_id: str, identifier: str | None) -> str | None:
+        normalized = (identifier or "").strip()
+        if not normalized:
+            return None
+
+        with SessionLocal() as session:
+            row = session.execute(
+                select(UserAlias).where(
+                    UserAlias.session_id == session_id,
+                    or_(
+                        UserAlias.user_id == normalized,
+                        UserAlias.open_id == normalized,
+                        UserAlias.union_id == normalized,
+                    ),
+                )
+            ).scalar_one_or_none()
+            return row.display_name if row else None
+
+    def upsert_user_alias(
+        self,
+        session_id: str,
+        *,
+        display_name: str,
+        user_id: str | None = None,
+        open_id: str | None = None,
+        union_id: str | None = None,
+    ) -> None:
+        display_name = display_name.strip()
+        if not display_name:
+            return
+
+        payload = [
+            {
+                "user_id": user_id,
+                "open_id": open_id,
+                "union_id": union_id,
+                "display_name": display_name,
+            }
+        ]
+        self._upsert_user_aliases(session_id, payload)
+
     def get_active_episode(self, session_id: str) -> Episode | None:
         with SessionLocal() as session:
             return session.execute(

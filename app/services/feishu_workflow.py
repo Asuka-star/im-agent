@@ -5,6 +5,7 @@ from app.agents.orchestrator import AgentOrchestrator
 from app.core.config import settings
 from app.feishu.bitable_api import FeishuBitableAPI
 from app.feishu.message_api import FeishuMessageAPI
+from app.feishu.user_api import FeishuUserAPI
 from app.schemas.analyze import AgentTrace, AnalyzeRequest, AnalyzeResponse
 from app.schemas.feishu_event import FeishuMessageContext
 from app.schemas.task import TaskItem
@@ -30,6 +31,7 @@ class FeishuWorkflowService:
         self.orchestrator = AgentOrchestrator()
         self.message_api = FeishuMessageAPI()
         self.bitable_api = FeishuBitableAPI()
+        self.user_api = FeishuUserAPI()
         self.memory_service = MemoryService()
         self.interaction_service = InteractionService()
         self.llm_service = LLMService()
@@ -40,6 +42,8 @@ class FeishuWorkflowService:
         if message.chat_type == "group" and not message.is_mentioned:
             active_episode = self.memory_service.ensure_active_episode(message.session_id)
             active_episode_id = active_episode.id
+
+        self._ensure_sender_alias(message)
 
         self.memory_service.save_user_message(
             session_id=message.session_id,
@@ -78,6 +82,30 @@ class FeishuWorkflowService:
             (time.perf_counter() - started_at) * 1000,
         )
         return result
+
+    def _ensure_sender_alias(self, message: FeishuMessageContext) -> None:
+        if self.memory_service.get_alias_display_name(message.session_id, message.sender_id):
+            return
+
+        display_name = None
+        try:
+            display_name = self.user_api.get_user_display_name(
+                user_id=message.sender_user_id,
+                open_id=message.sender_open_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to resolve sender display name for %s: %s", message.sender_id, exc)
+
+        if not display_name:
+            return
+
+        self.memory_service.upsert_user_alias(
+            message.session_id,
+            display_name=display_name,
+            user_id=message.sender_user_id,
+            open_id=message.sender_open_id,
+            union_id=message.sender_union_id,
+        )
 
     def _handle_mentioned_request(self, message: FeishuMessageContext) -> dict:
         active_episode = self.memory_service.get_active_episode(message.session_id)

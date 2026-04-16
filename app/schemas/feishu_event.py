@@ -85,6 +85,9 @@ class FeishuMessageContext(BaseModel):
     chat_type: str | None = None
     session_id: str
     sender_id: str
+    sender_user_id: str | None = None
+    sender_open_id: str | None = None
+    sender_union_id: str | None = None
     text: str
     raw_text: str
     is_mentioned: bool = False
@@ -93,4 +96,3 @@ class FeishuMessageContext(BaseModel):
     @property
     def mentioned_user_names(self) -> list[str]:
         return [user.name for user in self.mentioned_users if user.name and not user.is_bot]
-
