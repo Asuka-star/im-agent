@@ -4,6 +4,7 @@ param(
     [string]$ContainerName = "feishu-im-agent-mvp",
     [string]$NetworkName = "feishu-agent-net",
     [string]$EnvFile = ".env",
+    [switch]$NoCache,
     [int]$HostPort = 9000,
     [int]$ContainerPort = 9000
 )
@@ -32,7 +33,12 @@ if (-not $networkExists) {
 }
 
 Write-Step "Building image '$ImageName'"
-docker --context $Context build -t $ImageName $projectRoot
+$buildArgs = @("--context", $Context, "build", "-t", $ImageName)
+if ($NoCache) {
+    $buildArgs += "--no-cache"
+}
+$buildArgs += $projectRoot
+docker @buildArgs
 
 Write-Step "Stopping old container if it exists"
 docker --context $Context rm -f $ContainerName 2>$null | Out-Null
@@ -48,6 +54,9 @@ docker --context $Context run -d `
 
 Write-Step "Container status"
 docker --context $Context ps --filter "name=$ContainerName"
+
+Write-Step "Container image digest"
+docker --context $Context inspect $ContainerName --format "{{.Image}}"
 
 Write-Step "Recent logs"
 docker --context $Context logs --tail 50 $ContainerName

@@ -1,4 +1,5 @@
 import json
+import logging
 
 from sqlalchemy import delete, desc, select
 
@@ -6,6 +7,8 @@ from app.db.database import SessionLocal
 from app.db.models import Memory, MemoryChunk, Message, Session, Task
 from app.schemas.analyze import AnalyzeResponse
 from app.services.embeddings import EmbeddingService
+
+logger = logging.getLogger(__name__)
 
 
 class MemoryService:
@@ -210,7 +213,12 @@ class MemoryService:
         if not self.embedding_service.is_configured() or not query_text.strip():
             return []
 
-        query_embedding = self.embedding_service.embed_text(query_text)
+        try:
+            query_embedding = self.embedding_service.embed_text(query_text)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Embedding retrieval skipped due to embedding error: %s", exc)
+            return []
+
         with SessionLocal() as session:
             statement = (
                 select(MemoryChunk)

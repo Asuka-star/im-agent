@@ -22,12 +22,15 @@ class EmbeddingService:
             "model": self.model,
             "input": text,
         }
+        if settings.embedding_dimensions:
+            payload["dimensions"] = settings.embedding_dimensions
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
 
-        with httpx.Client(timeout=60.0) as client:
+        timeout = httpx.Timeout(15.0, connect=5.0)
+        with httpx.Client(timeout=timeout) as client:
             response = client.post(
                 f"{self.base_url}/embeddings",
                 json=payload,
