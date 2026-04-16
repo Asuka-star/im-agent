@@ -3,6 +3,7 @@ from typing import Any
 
 from app.agents.orchestrator import AgentOrchestrator
 from app.core.config import settings
+from app.feishu.bitable_api import FeishuBitableAPI
 from app.feishu.message_api import FeishuMessageAPI
 from app.schemas.analyze import AnalyzeRequest, AnalyzeResponse
 from app.schemas.feishu_event import FeishuMessageContext
@@ -19,6 +20,7 @@ class FeishuWorkflowService:
     def __init__(self) -> None:
         self.orchestrator = AgentOrchestrator()
         self.message_api = FeishuMessageAPI()
+        self.bitable_api = FeishuBitableAPI()
         self.memory_service = MemoryService()
         self.interaction_service = InteractionService()
         self.llm_service = LLMService()
@@ -39,7 +41,7 @@ class FeishuWorkflowService:
         if decision.mode == "buffer":
             return self._empty_result(message.session_id, decision.mode)
 
-        if decision.mode in {"summary", "tasks", "risks"}:
+        if decision.mode in {"summary", "tasks", "risks", "bitable"}:
             result = self._handle_analysis_trigger(message, decision)
         elif decision.mode == "status":
             result = self._handle_status_trigger(message, decision)
@@ -88,7 +90,11 @@ class FeishuWorkflowService:
                 raw_text=discussion_block,
             )
         )
-        reply_preview = self._format_analysis_reply(analysis, decision.mode)
+        sync_lines: list[str] = []
+        if decision.mode == "bitable":
+            sync_lines = self._sync_tasks_to_bitable(analysis, message.session_id)
+
+        reply_preview = self._format_analysis_reply(analysis, decision.mode, sync_lines)
         self.memory_service.save_round(session_id=message.session_id, analysis=analysis)
         return self._deliver_reply(message, decision.mode, reply_preview, analysis=analysis)
 
@@ -162,16 +168,22 @@ class FeishuWorkflowService:
             "reply_error": reply_error,
         }
 
-    def _format_analysis_reply(self, analysis: AnalyzeResponse, mode: str) -> str:
+    def _format_analysis_reply(
+        self,
+        analysis: AnalyzeResponse,
+        mode: str,
+        sync_lines: list[str] | None = None,
+    ) -> str:
         header = {
             "summary": "【讨论总结】",
             "tasks": "【待办清单】",
             "risks": "【风险与卡点】",
+            "bitable": "【待办清单 + 表格同步】",
         }.get(mode, "【协作整理】")
 
         lines = [header, f"摘要：{analysis.summary}"]
 
-        if mode in {"summary", "tasks"}:
+        if mode in {"summary", "tasks", "bitable"}:
             lines.append("任务：")
             if analysis.tasks:
                 for idx, task in enumerate(analysis.tasks, start=1):
@@ -193,7 +205,29 @@ class FeishuWorkflowService:
         for idx, action in enumerate(analysis.next_actions, start=1):
             lines.append(f"{idx}. {action}")
 
+        if sync_lines:
+            lines.append("表格同步：")
+            lines.extend(sync_lines)
+
         return "\n".join(lines)
+
+    def _sync_tasks_to_bitable(self, analysis: AnalyzeResponse, session_id: str) -> list[str]:
+        if not analysis.tasks:
+            return ["- 当前没有可同步的任务记录。"]
+        if not self.bitable_api.is_configured():
+            return ["- 多维表格未配置，暂未执行写入。"]
+
+        created = 0
+        failed: list[str] = []
+        for task in analysis.tasks:
+            try:
+                self.bitable_api.create_task_record(task, session_id=session_id)
+                created += 1
+            except Exception as exc:  # noqa: BLE001
+                failed.append(f"- 《{task.title}》写入失败：{exc}")
+
+        summary = [f"- 成功写入 {created} 条任务到多维表格。"]
+        return summary + failed
 
     def _format_status_reply(self, query: str, tasks: list, payload: dict[str, Any]) -> str:
         if not tasks:

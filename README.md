@@ -69,6 +69,7 @@ In the current interaction design, ordinary discussion messages are only stored.
 
 - `@机器人 总结一下`
 - `@机器人 整理待办`
+- `@机器人 整理待办并同步表格`
 - `@机器人 看风险`
 - `@机器人 现在还有哪些任务没负责人？`
 - `@机器人 生成演示稿大纲`
@@ -80,6 +81,16 @@ For slide drafting, the current MVP outputs a presentation package with:
 - 5 to 7 slide pages
 - emphasis points for speaking
 - suggested supporting materials
+
+For Bitable sync, create a table with these default field names or override them in `.env`:
+
+- `任务`
+- `负责人`
+- `截止时间`
+- `优先级`
+- `状态`
+- `备注`
+- `会话ID`
 
 ## Available endpoints
 
@@ -125,6 +136,22 @@ Recommended values:
 - `LLM_MODEL=deepseek/deepseek-v3.2`
 
 The `ANTHROPIC_*` variables are only kept as a compatibility fallback.
+
+For Feishu Bitable sync, set:
+
+- `FEISHU_BITABLE_ENABLED=true`
+- `FEISHU_BITABLE_APP_TOKEN`
+- `FEISHU_BITABLE_TABLE_ID`
+
+Optional custom field names:
+
+- `FEISHU_BITABLE_TITLE_FIELD`
+- `FEISHU_BITABLE_OWNER_FIELD`
+- `FEISHU_BITABLE_DUE_DATE_FIELD`
+- `FEISHU_BITABLE_PRIORITY_FIELD`
+- `FEISHU_BITABLE_STATUS_FIELD`
+- `FEISHU_BITABLE_NOTES_FIELD`
+- `FEISHU_BITABLE_SESSION_FIELD`
 
 To inspect live Feishu callbacks after deployment:
 

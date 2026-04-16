@@ -53,11 +53,21 @@ class InteractionService:
         "幻灯片",
         "大纲",
     )
+    BITABLE_KEYWORDS = (
+        "同步表格",
+        "同步到表格",
+        "同步多维表格",
+        "写入表格",
+        "写入多维表格",
+        "更新表格",
+    )
 
     def decide(self, text: str) -> InteractionDecision:
         normalized = (text or "").strip()
         lowered = normalized.lower()
 
+        if self._contains_any(normalized, lowered, self.BITABLE_KEYWORDS):
+            return InteractionDecision(mode="bitable", label="整理待办并同步表格")
         if self._contains_any(normalized, lowered, self.SLIDE_KEYWORDS):
             return InteractionDecision(mode="slides", label="生成演示稿大纲")
         if self._contains_any(normalized, lowered, self.STATUS_KEYWORDS):
