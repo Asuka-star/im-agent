@@ -5,12 +5,16 @@ from app.core.config import settings
 from app.schemas.feishu_event import (
     FeishuEventEnvelope,
     FeishuEventType,
+    FeishuMention,
+    FeishuMentionedUser,
     FeishuMessageContext,
 )
 
 
 class FeishuEventHandler:
     """Parses incoming Feishu event payloads into an internal message context."""
+
+    BOT_NAME_HINTS = ("机器人", "智能助手", "assistant", "bot")
 
     def parse_event(self, payload: dict) -> FeishuEventEnvelope:
         return FeishuEventEnvelope.model_validate(payload)
@@ -40,14 +44,14 @@ class FeishuEventHandler:
 
         parsed_content = self._parse_message_content(message.content)
         raw_text = parsed_content.get("text", "").strip()
-        mentions = message.mentions or []
-        text = self._strip_mentions(raw_text, mentions)
         if not raw_text:
             return None
 
+        parsed_mentions = self._parse_mentions(message.mentions or [])
+        text = self._strip_mentions(raw_text, message.mentions or [])
+
         session_id = (
             message.chat_id
-            or message.chat_id
             or sender.sender_id.open_id
             or sender.sender_id.user_id
             or message.message_id
@@ -70,7 +74,8 @@ class FeishuEventHandler:
             sender_id=sender_label,
             text=text,
             raw_text=raw_text,
-            is_mentioned=bool(mentions),
+            is_mentioned=any(user.is_bot for user in parsed_mentions),
+            mentioned_users=parsed_mentions,
         )
 
     def _parse_message_content(self, content: str | None) -> dict:
@@ -84,7 +89,48 @@ class FeishuEventHandler:
 
         return parsed if isinstance(parsed, dict) else {"text": str(parsed)}
 
-    def _strip_mentions(self, text: str, mentions: list) -> str:
+    def _parse_mentions(self, mentions: list[FeishuMention]) -> list[FeishuMentionedUser]:
+        parsed: list[FeishuMentionedUser] = []
+        for mention in mentions:
+            mention_id = mention.id or None
+            parsed.append(
+                FeishuMentionedUser(
+                    user_id=mention_id.user_id if mention_id else None,
+                    open_id=mention_id.open_id if mention_id else None,
+                    union_id=mention_id.union_id if mention_id else None,
+                    name=mention.name,
+                    key=mention.key,
+                    is_bot=self._is_bot_mention(mention),
+                )
+            )
+        return parsed
+
+    def _is_bot_mention(self, mention: FeishuMention) -> bool:
+        mention_name = (mention.name or "").strip().lower()
+        mention_id = mention.id or None
+        candidate_ids = {
+            (settings.feishu_bot_user_id or "").strip(),
+            (settings.feishu_bot_open_id or "").strip(),
+        }
+        mention_ids = {
+            mention_id.user_id if mention_id else None,
+            mention_id.open_id if mention_id else None,
+        }
+
+        if candidate_ids.intersection({value for value in mention_ids if value}):
+            return True
+
+        configured_names = {
+            (settings.feishu_bot_name or "").strip().lower(),
+            (settings.app_name or "").strip().lower(),
+        }
+        configured_names = {name for name in configured_names if name}
+        if mention_name and mention_name in configured_names:
+            return True
+
+        return bool(mention_name and any(hint in mention_name for hint in self.BOT_NAME_HINTS))
+
+    def _strip_mentions(self, text: str, mentions: list[FeishuMention]) -> str:
         cleaned = text
         for mention in mentions:
             key = getattr(mention, "key", None)
@@ -96,3 +142,4 @@ class FeishuEventHandler:
 
         cleaned = re.sub(r"@[^\s]+\s*", " ", cleaned)
         return re.sub(r"\s+", " ", cleaned).strip()
+

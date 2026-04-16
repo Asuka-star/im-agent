@@ -51,7 +51,7 @@ class FeishuMessage(BaseModel):
     message_type: str | None = None
     content: str | None = None
     create_time: str | None = None
-    mentions: list[FeishuMention] = []
+    mentions: list[FeishuMention] = Field(default_factory=list)
 
 
 class FeishuMessageEvent(BaseModel):
@@ -68,6 +68,15 @@ class FeishuEventEnvelope(BaseModel):
     event: FeishuMessageEvent | None = None
 
 
+class FeishuMentionedUser(BaseModel):
+    user_id: str | None = None
+    open_id: str | None = None
+    union_id: str | None = None
+    name: str | None = None
+    key: str | None = None
+    is_bot: bool = False
+
+
 class FeishuMessageContext(BaseModel):
     event_id: str | None = None
     event_type: str | None = None
@@ -79,3 +88,9 @@ class FeishuMessageContext(BaseModel):
     text: str
     raw_text: str
     is_mentioned: bool = False
+    mentioned_users: list[FeishuMentionedUser] = Field(default_factory=list)
+
+    @property
+    def mentioned_user_names(self) -> list[str]:
+        return [user.name for user in self.mentioned_users if user.name and not user.is_bot]
+

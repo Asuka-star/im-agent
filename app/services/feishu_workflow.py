@@ -47,6 +47,7 @@ class FeishuWorkflowService:
             sender_id=message.sender_id,
             content=message.text or message.raw_text,
             episode_id=active_episode_id,
+            mentioned_users=[user.model_dump() for user in message.mentioned_users],
             embed=False,
         )
         logger.info(

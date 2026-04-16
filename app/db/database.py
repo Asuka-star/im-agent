@@ -55,6 +55,9 @@ def _run_lightweight_migrations() -> None:
     if "sender_id" not in columns:
         with engine.begin() as connection:
             connection.execute(text("ALTER TABLE messages ADD COLUMN sender_id VARCHAR(128)"))
+    if "mentions_json" not in columns:
+        with engine.begin() as connection:
+            connection.execute(text("ALTER TABLE messages ADD COLUMN mentions_json TEXT"))
     if "episode_id" not in columns:
         with engine.begin() as connection:
             connection.execute(text("ALTER TABLE messages ADD COLUMN episode_id INTEGER"))

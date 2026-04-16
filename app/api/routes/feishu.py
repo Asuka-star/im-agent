@@ -45,11 +45,12 @@ async def receive_events(request: Request) -> dict:
         return {"code": 0, "msg": "duplicate_ignored"}
 
     logger.info(
-        "Processing message event: message_id=%s chat_id=%s sender_id=%s mentioned=%s text=%s raw_text=%s",
+        "Processing message event: message_id=%s chat_id=%s sender_id=%s mentioned=%s mentioned_users=%s text=%s raw_text=%s",
         message_context.message_id,
         message_context.chat_id,
         message_context.sender_id,
         message_context.is_mentioned,
+        message_context.mentioned_user_names,
         message_context.text,
         message_context.raw_text,
     )

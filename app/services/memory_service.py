@@ -85,6 +85,7 @@ class MemoryService:
         sender_id: str | None,
         content: str,
         episode_id: int | None = None,
+        mentioned_users: list[dict] | None = None,
         embed: bool = True,
     ) -> None:
         self.ensure_session(session_id)
@@ -103,6 +104,7 @@ class MemoryService:
                     episode_id=episode_id,
                     role="user",
                     sender_id=sender_id,
+                    mentions_json=json.dumps(mentioned_users or [], ensure_ascii=False),
                     content=content,
                 )
             )
@@ -113,7 +115,12 @@ class MemoryService:
             source_type="message",
             source_id=message_id,
             content=content,
-            metadata={"sender_id": sender_id or "", "role": "user", "episode_id": episode_id},
+            metadata={
+                "sender_id": sender_id or "",
+                "role": "user",
+                "episode_id": episode_id,
+                "mentioned_users": mentioned_users or [],
+            },
             embed=embed,
         )
 
@@ -383,8 +390,7 @@ class MemoryService:
 
         lines = ["[近期群聊讨论]"]
         for message in messages:
-            speaker = message.sender_id or "成员"
-            lines.append(f"- {speaker}: {message.content}")
+            lines.append(self._format_message_line(message))
         return "\n".join(lines)
 
     def build_workspace_context(
@@ -454,8 +460,7 @@ class MemoryService:
         if recent_messages:
             lines.append("[最近消息]")
             for message in reversed(recent_messages[-6:]):
-                speaker = message.sender_id or ("成员" if message.role == "user" else "助手")
-                lines.append(f"- {speaker}: {message.content}")
+                lines.append(self._format_message_line(message))
 
         return "\n".join(lines)
 
@@ -667,3 +672,34 @@ class MemoryService:
             "status": task.status,
             "notes": task.notes or "",
         }
+
+    def _format_message_line(self, message: Message) -> str:
+        speaker = message.sender_id or ("assistant" if message.role == "assistant" else "member")
+        mentioned_users = self._extract_message_mentions(message)
+        if mentioned_users:
+            return f"- 发言人: {speaker} | 提及: {', '.join(mentioned_users)} | 内容: {message.content}"
+        return f"- 发言人: {speaker} | 内容: {message.content}"
+
+    def _extract_message_mentions(self, message: Message) -> list[str]:
+        if not message.mentions_json:
+            return []
+
+        try:
+            payload = json.loads(message.mentions_json)
+        except json.JSONDecodeError:
+            return []
+
+        if not isinstance(payload, list):
+            return []
+
+        results: list[str] = []
+        for item in payload:
+            if not isinstance(item, dict) or item.get("is_bot"):
+                continue
+            name = str(item.get("name") or "").strip()
+            user_id = str(item.get("user_id") or item.get("open_id") or "").strip()
+            if name:
+                results.append(name)
+            elif user_id:
+                results.append(user_id)
+        return results

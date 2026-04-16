@@ -189,6 +189,7 @@ Schema:
 
 Rules:
 - Extract only explicit actions and commitments.
+- The discussion may contain structured hints such as "发言人" and "提及". If one participant assigns work to an @mentioned teammate, prefer the mentioned teammate as the owner.
 - If the message is mostly discussion without clear actions, return an empty tasks array.
 - If owner is unclear, use TBD.
 - If due date is unclear, use TBD.
@@ -242,6 +243,9 @@ Schema:
 Rules:
 - Today is {today} in Asia/Shanghai.
 - Prefer understanding the whole discussion instead of keyword matching.
+- Recent discussion lines may include structured fields like "发言人" and "提及". Treat "提及" as a strong assignee hint in multi-person collaboration.
+- Distinguish clearly between the speaker, the mentioned teammate, and the final owner of a task.
+- When one teammate assigns work to an @mentioned teammate, prefer the mentioned teammate as the task owner unless the discussion clearly says otherwise.
 - If the latest discussion corrects or revises an earlier assignment, return the refreshed final task state instead of keeping both versions.
 - For summary/tasks/risks/bitable, return the current full task list after considering revisions.
 - For status, put the natural-language answer into status_answer. You may also return tasks if useful.
