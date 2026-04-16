@@ -1,296 +1,293 @@
 import re
-from collections import Counter
+from typing import Iterable
 
 from app.schemas.task import TaskItem
 
-OWNER_FRAGMENT = r"[A-Za-z][A-Za-z0-9_-]{0,20}|[\u4e00-\u9fff]{1,8}"
-ACTION_VERBS = (
-    "完成",
-    "准备",
-    "处理",
-    "提交",
-    "联调",
-    "跟进",
-    "整理",
-    "输出",
-    "验证",
-    "推进",
-    "修复",
-    "review",
-    "prepare",
-    "finish",
-    "verify",
-    "handle",
-    "sync",
-    "write",
-    "build",
+
+SENDER_PREFIX_RE = re.compile(r"^\s*[-*]?\s*[A-Za-z0-9_]{4,}:\s*")
+LEADING_FILLER_RE = re.compile(r"^(不对|另外|然后|还有|补充一下|补充|顺便|以及|再|那|这个|目前|近期群聊讨论)\s*[，,：:]?")
+DIALOG_OWNER_RE = re.compile(r"^(?P<owner>[\u4e00-\u9fa5A-Za-z0-9]{1,4})(?=你|同学|老师|这边)")
+ACTION_OWNER_RE = re.compile(
+    r"^(?P<owner>[\u4e00-\u9fa5A-Za-z0-9]{1,4})(?=负责|去|完成|准备|处理|搞|做|跟进|推进|这个)"
 )
-HIGH_PRIORITY_MARKERS = ("今天", "今晚", "尽快", "立即", "马上", "asap", "today", "tonight", "urgent")
-MEDIUM_PRIORITY_MARKERS = ("本周", "这周", "周", "this week", "before friday", "friday")
-INVALID_OWNER_TOKENS = {
-    "请",
-    "需要",
-    "今天",
-    "明天",
-    "后天",
-    "今晚",
-    "本周",
-    "这周",
-    "下周",
-    "周一",
-    "周二",
-    "周三",
-    "周四",
-    "周五",
-    "周六",
-    "周日",
-    "today",
-    "tomorrow",
-    "tonight",
-    "this week",
-}
+DUE_HINT_RE = re.compile(
+    r"(今天|明天|后天|今晚|本周|这周|下周(?:[一二三四五六日天])(?:前)?|"
+    r"(?:本周|这周)(?:[一二三四五六日天])(?:前)?|(?:周|星期)[一二三四五六日天](?:前)?|"
+    r"\d{4}-\d{2}-\d{2}|\d{1,2}月\d{1,2}日)"
+)
 
 
 def extract_tasks(raw_text: str) -> list[TaskItem]:
-    clauses = split_clauses(raw_text)
+    clauses = _extract_candidate_clauses(raw_text)
     tasks: list[TaskItem] = []
 
     for clause in clauses:
-        task = _extract_task_from_clause(clause)
-        if task is not None:
+        task = _parse_clause(clause)
+        if task:
             tasks.append(task)
 
-    if tasks:
-        return tasks
-
-    fallback_notes = raw_text.strip()[:200]
-    if not fallback_notes:
-        fallback_notes = "\u672a\u63d0\u4f9b\u6709\u6548\u7684\u8ba8\u8bba\u5185\u5bb9\u3002"
-
-    return [
-        TaskItem(
-            title="\u68b3\u7406\u6700\u65b0\u8ba8\u8bba\u5e76\u786e\u8ba4\u540e\u7eed\u52a8\u4f5c",
-            owner="TBD",
-            priority="low",
-            due_date="TBD",
-            status="draft",
-            notes=fallback_notes,
-        )
-    ]
-
-
-def build_summary(raw_text: str, tasks: list[TaskItem]) -> str:
-    if not tasks:
-        return "\u672c\u8f6e\u8ba8\u8bba\u4e2d\u6682\u672a\u8bc6\u522b\u51fa\u660e\u786e\u4efb\u52a1\u3002"
-
-    owner_count = len({task.owner for task in tasks if task.owner != "TBD"})
-    preview = raw_text.strip().replace("\n", " ")
-    preview = re.sub(r"\s+", " ", preview)
-    preview = preview[:80]
-    return (
-        f"\u5df2\u4ece\u6700\u65b0\u8ba8\u8bba\u4e2d\u8bc6\u522b {len(tasks)} \u9879\u4efb\u52a1\uff0c"
-        f"\u6d89\u53ca {owner_count} \u4f4d\u5df2\u660e\u786e\u8d1f\u8d23\u4eba\u3002"
-        f"\u539f\u59cb\u5185\u5bb9\u6458\u8981\uff1a{preview}"
-    )
-
-
-def build_next_actions(tasks: list[TaskItem], risks: list[str]) -> list[str]:
-    actions: list[str] = []
-
-    if any(task.owner == "TBD" for task in tasks):
-        actions.append("\u786e\u8ba4\u4ecd\u672a\u5206\u914d\u8d1f\u8d23\u4eba\u7684\u4efb\u52a1\u7531\u8c01\u63a5\u624b\u3002")
-
-    if any(task.due_date == "TBD" for task in tasks):
-        actions.append("\u786e\u8ba4\u4ecd\u672a\u660e\u786e\u622a\u6b62\u65f6\u95f4\u7684\u4efb\u52a1\u8282\u70b9\u3002")
-
-    if risks:
-        actions.append("\u5728\u98de\u4e66\u7fa4\u91cc\u518d\u786e\u8ba4\u4e00\u6b21\u9ad8\u98ce\u9669\u9879\u548c\u6a21\u7cca\u70b9\u3002")
-
-    if not actions:
-        actions.append("\u5728\u98de\u4e66\u7fa4\u91cc\u786e\u8ba4\u672c\u6b21\u751f\u6210\u7684\u4efb\u52a1\u6e05\u5355\u3002")
-
-    actions.append("\u6709\u65b0\u8fdb\u5c55\u65f6\u7ee7\u7eed\u5728\u7fa4\u91cc\u540c\u6b65\uff0c\u4ee5\u4fbf\u52a9\u624b\u5237\u65b0\u4efb\u52a1\u89c6\u56fe\u3002")
-    return actions[:4]
-
-
-def infer_risks(tasks: list[TaskItem]) -> list[str]:
-    risks: list[str] = []
-
-    for task in tasks:
-        if task.owner == "TBD":
-            risks.append(f"\u4efb\u52a1\u300a{task.title}\u300b\u4ecd\u672a\u786e\u8ba4\u8d1f\u8d23\u4eba\u3002")
-        if task.due_date == "TBD":
-            risks.append(f"\u4efb\u52a1\u300a{task.title}\u300b\u4ecd\u672a\u786e\u8ba4\u622a\u6b62\u65f6\u95f4\u3002")
-        if "已过期" in task.due_date:
-            risks.append(f"\u4efb\u52a1\u300a{task.title}\u300b\u7684\u622a\u6b62\u65f6\u95f4\u5df2\u8fc7\uff1a{task.due_date}\u3002")
-        if len(task.title) < 8:
-            risks.append(f"\u4efb\u52a1\u300a{task.title}\u300b\u63cf\u8ff0\u504f\u7b80\u7565\uff0c\u5efa\u8bae\u518d\u8865\u5145\u7ec6\u8282\u3002")
-
-    owner_counter = Counter(task.owner for task in tasks if task.owner != "TBD")
-    overloaded = [owner for owner, count in owner_counter.items() if count >= 3]
-    for owner in overloaded:
-        risks.append(f"\u8d1f\u8d23\u4eba\u300a{owner}\u300b\u5f53\u524d\u5f85\u529e\u8f83\u591a\uff0c\u53ef\u80fd\u9700\u8981\u91cd\u65b0\u5206\u914d\u3002")
-
-    if not risks:
-        risks.append("\u5f53\u524d\u4efb\u52a1\u62c6\u89e3\u57fa\u672c\u5408\u7406\uff0c\u4f46\u4ecd\u5efa\u8bae\u5728\u7fa4\u91cc\u786e\u8ba4\u8d1f\u8d23\u4eba\u548c\u65f6\u95f4\u8282\u70b9\u3002")
-
-    return risks
+    return _dedupe_tasks(tasks)
 
 
 def normalize_tasks(tasks: list[TaskItem]) -> list[TaskItem]:
     normalized: list[TaskItem] = []
     for task in tasks:
-        notes = re.sub(r"\s+", " ", task.notes).strip()
+        title = _normalize_title(task.title)
+        owner = _clean_owner(task.owner)
+        notes = " ".join((task.notes or "").split())
+        priority = task.priority if task.priority in {"high", "medium", "low"} else "medium"
+        due_date = (task.due_date or "TBD").strip() or "TBD"
+        status = (task.status or "draft").strip() or "draft"
+
         normalized.append(
-            task.model_copy(
-                update={
-                    "title": task.title.strip().rstrip("。.;,"),
-                    "owner": task.owner.strip() or "TBD",
-                    "priority": task.priority.strip() or "medium",
-                    "due_date": task.due_date.strip() or "TBD",
-                    "notes": notes,
-                }
+            TaskItem(
+                title=title or "待确认任务",
+                owner=owner or "TBD",
+                priority=priority,
+                due_date=due_date,
+                status=status,
+                notes=notes,
             )
         )
     return normalized
 
 
-def split_clauses(raw_text: str) -> list[str]:
-    normalized = raw_text.replace("\r", "\n")
-    normalized = re.sub(r"\n+", "\n", normalized)
-    chunks = re.split(r"[。\n；;]+", normalized)
+def infer_risks(tasks: list[TaskItem]) -> list[str]:
+    risks: list[str] = []
+    for task in tasks:
+        if task.owner == "TBD":
+            risks.append(f"任务《{task.title}》尚未明确负责人。")
+        if task.due_date == "TBD":
+            risks.append(f"任务《{task.title}》尚未明确截止时间。")
+        if "已过期" in task.due_date:
+            risks.append(f"任务《{task.title}》的截止时间已过期，建议立即确认新的排期。")
+        if len(task.title.strip()) <= 2 or task.title.strip() in {"搞定", "处理", "完成", "安排"}:
+            risks.append(f"任务《{task.title}》描述过于笼统，建议补充更具体的交付内容。")
+
+    return _unique(risks)
+
+
+def build_summary(raw_text: str, tasks: list[TaskItem]) -> str:
+    clauses = _extract_candidate_clauses(raw_text)
+    if not clauses and not tasks:
+        return "最近的群聊里还没有形成明确的协作任务。"
+
+    owner_count = len({task.owner for task in tasks if task.owner != "TBD"})
+    if tasks:
+        return (
+            f"已从最近一轮讨论中整理出 {len(tasks)} 项协作任务，"
+            f"涉及 {owner_count} 位已明确负责人。"
+        )
+    return f"最近讨论主要是状态沟通，共有 {len(clauses)} 条有效讨论片段，暂未抽取出明确任务。"
+
+
+def build_next_actions(tasks: list[TaskItem], risks: Iterable[str]) -> list[str]:
+    actions: list[str] = []
+    for task in tasks:
+        if task.owner == "TBD":
+            actions.append(f"尽快确认《{task.title}》的负责人。")
+        elif task.due_date == "TBD":
+            actions.append(f"请 {task.owner} 补充《{task.title}》的明确截止时间。")
+        elif "已过期" in task.due_date:
+            actions.append(f"请尽快重排《{task.title}》的时间，并同步给 {task.owner}。")
+        else:
+            actions.append(f"请 {task.owner} 按计划推进《{task.title}》，目标日期 {task.due_date}。")
+
+    if not actions:
+        actions.append("在群里继续补充任务分工、截止时间和阻塞项。")
+
+    if list(risks) and len(actions) < 3:
+        actions.append("针对当前风险项再确认一次优先级和资源安排。")
+
+    return _unique(actions)[:4]
+
+
+def _extract_candidate_clauses(raw_text: str) -> list[str]:
+    clauses: list[str] = []
+    for raw_line in (raw_text or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        line = SENDER_PREFIX_RE.sub("", line)
+        line = line.lstrip("-* ").strip()
+        line = LEADING_FILLER_RE.sub("", line).strip()
+        if not line:
+            continue
+
+        if "近期群聊讨论" in line and ":" in line:
+            line = line.split(":", 1)[1].strip()
+
+        parts = [part.strip() for part in re.split(r"[；;]", line) if part.strip()]
+        for part in parts:
+            clauses.extend(_split_multi_assignment(part))
+
+    return [clause for clause in clauses if _looks_like_action_clause(clause)]
+
+
+def _split_multi_assignment(text: str) -> list[str]:
+    segments = [segment.strip() for segment in re.split(r"[，,]", text) if segment.strip()]
+    if len(segments) <= 1:
+        return [text.strip()]
 
     clauses: list[str] = []
-    for chunk in chunks:
-        for clause in re.split(r"[，,]+", chunk):
-            cleaned = re.sub(r"\s+", " ", clause).strip()
-            if cleaned:
-                clauses.append(cleaned)
+    current = segments[0]
+    for segment in segments[1:]:
+        if _looks_like_new_owner_segment(segment):
+            clauses.append(current.strip())
+            current = segment
+        else:
+            current = f"{current}，{segment}"
+    clauses.append(current.strip())
     return clauses
 
 
-def _extract_task_from_clause(clause: str) -> TaskItem | None:
-    owner_due_patterns = [
-        re.compile(
-            rf"^(?P<owner>{OWNER_FRAGMENT})在(?P<due>[^。；;，,]{{1,20}})前(?P<action>.+)$",
-            re.IGNORECASE,
-        ),
-        re.compile(
-            rf"^(?P<owner>{OWNER_FRAGMENT})(?P<due>今天|明天|今晚|本周|这周|下周|周一|周二|周三|周四|周五|周六|周日|Friday|Monday|Tuesday|Wednesday|Thursday|Saturday|Sunday)前?(?P<action>.+)$",
-            re.IGNORECASE,
-        ),
-    ]
-    owner_action_patterns = [
-        re.compile(rf"^(?P<owner>{OWNER_FRAGMENT})负责(?P<action>.+)$", re.IGNORECASE),
-        re.compile(rf"^(?P<owner>{OWNER_FRAGMENT})(?: will | needs to | should | to )(?P<action>.+)$", re.IGNORECASE),
-        re.compile(
-            rf"^(?P<owner>{OWNER_FRAGMENT})(?P<action>(?:{'|'.join(ACTION_VERBS)}).+)$",
-            re.IGNORECASE,
-        ),
-    ]
-
-    for pattern in owner_due_patterns:
-        match = pattern.match(clause)
-        if match:
-            owner = _normalize_owner(match.group("owner"))
-            due = match.group("due")
-            action = _clean_action(match.group("action"))
-            return TaskItem(
-                title=action,
-                owner=owner,
-                priority=infer_priority(f"{due} {action}"),
-                due_date=_clean_due_date(due),
-                status="draft",
-                notes=clause,
-            )
-
-    for pattern in owner_action_patterns:
-        match = pattern.match(clause)
-        if match:
-            owner = _normalize_owner(match.group("owner"))
-            action = _clean_action(match.group("action"))
-            due_date = extract_due_date(clause)
-            return TaskItem(
-                title=action,
-                owner=owner,
-                priority=infer_priority(clause),
-                due_date=due_date,
-                status="draft",
-                notes=clause,
-            )
-
-    if _looks_like_action_clause(clause):
-        return TaskItem(
-            title=_clean_action(clause),
-            owner="TBD",
-            priority=infer_priority(clause),
-            due_date=extract_due_date(clause),
-            status="draft",
-            notes=clause,
+def _looks_like_new_owner_segment(text: str) -> bool:
+    compact = LEADING_FILLER_RE.sub("", text.strip())
+    if not compact:
+        return False
+    if any(token in compact for token in ("今天", "明天", "后天", "本周", "这周", "下周", "周", "星期", "需要", "大概", "预计")):
+        return False
+    return bool(
+        re.match(
+            r"^[\u4e00-\u9fa5A-Za-z0-9]{1,12}(?:你|同学|老师)?(?:去|负责|完成|准备|处理|搞|做|跟进|推进)",
+            compact,
         )
-
-    return None
-
-
-def extract_due_date(text: str) -> str:
-    patterns = [
-        r"(\d{4}-\d{1,2}-\d{1,2}(?:前)?)",
-        r"(\d{1,2}月\d{1,2}日(?:前)?)",
-        r"(今天|明天|后天|今晚|本周|这周|下周|月底|月末)",
-        r"(周一|周二|周三|周四|周五|周六|周日)前?",
-        r"(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)(?:\s+EOD|\s+morning|\s+afternoon)?",
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            return _clean_due_date(match.group(1))
-    return "TBD"
-
-
-def infer_priority(text: str) -> str:
-    lowered = text.lower()
-    if any(marker in lowered for marker in HIGH_PRIORITY_MARKERS):
-        return "high"
-    if any(marker in lowered for marker in MEDIUM_PRIORITY_MARKERS):
-        return "medium"
-    return "low"
-
-
-def _looks_like_action_clause(clause: str) -> bool:
-    keywords = (
-        "需要",
-        "请",
-        "确认",
-        "跟进",
-        "提交",
-        "准备",
-        "完成",
-        "联调",
-        "验证",
-        "处理",
-        "修复",
-        "review",
-        "prepare",
-        "finish",
-        "verify",
-        "handle",
     )
-    lowered = clause.lower()
-    return any(keyword in clause or keyword in lowered for keyword in keywords)
 
 
-def _clean_action(action: str) -> str:
-    cleaned = re.sub(r"\s+", " ", action).strip()
-    cleaned = cleaned.lstrip(":：- ")
-    return cleaned[:120] if cleaned else "\u68b3\u7406\u540e\u7eed\u8ddf\u8fdb\u4e8b\u9879"
+def _looks_like_action_clause(text: str) -> bool:
+    return bool(
+        re.search(r"(负责|完成|准备|处理|提交|确认|同步|推进|修复|整理|开发|联调|后端|前端|海报|材料|demo|路演)", text, re.IGNORECASE)
+        or re.search(r"(去搞|去做)", text)
+    )
 
 
-def _clean_due_date(due_date: str) -> str:
-    return re.sub(r"\s+", " ", due_date).strip().rstrip("。.;,")
+def _parse_clause(clause: str) -> TaskItem | None:
+    text = LEADING_FILLER_RE.sub("", clause.strip()).strip("，,。；; ")
+    if not text:
+        return None
+
+    owner = _extract_owner(text)
+    due_date = _extract_due_hint(text)
+    priority = "high" if any(word in text for word in ("紧急", "尽快", "马上", "立即")) else "medium"
+    title = _extract_title(text, owner, due_date)
+    notes = text
+
+    if not title:
+        return None
+
+    return TaskItem(
+        title=title,
+        owner=owner or "TBD",
+        priority=priority,
+        due_date=due_date or "TBD",
+        status="draft",
+        notes=notes,
+    )
 
 
-def _normalize_owner(owner: str) -> str:
-    cleaned = re.sub(r"\s+", " ", owner).strip()
-    if cleaned.lower() in INVALID_OWNER_TOKENS or cleaned in INVALID_OWNER_TOKENS:
+def _extract_owner(text: str) -> str:
+    match = DIALOG_OWNER_RE.match(text) or ACTION_OWNER_RE.match(text)
+    if not match:
         return "TBD"
-    return cleaned or "TBD"
+
+    owner = match.group("owner").strip()
+
+    if owner in {"今天", "明天", "后天", "本周", "这周", "下周", "需要", "大概", "预计"}:
+        return "TBD"
+    if any(token in owner for token in ("周", "今天", "明天", "后天", "需要", "大概", "预计")):
+        return "TBD"
+    return owner
+
+
+def _extract_due_hint(text: str) -> str:
+    match = DUE_HINT_RE.search(text)
+    return match.group(0) if match else "TBD"
+
+
+def _extract_title(text: str, owner: str, due_hint: str) -> str:
+    working = text
+    if owner and owner != "TBD":
+        working = re.sub(rf"^{re.escape(owner)}(?:你|同学|老师)?", "", working).strip()
+    if due_hint and due_hint != "TBD":
+        working = working.replace(due_hint, " ")
+
+    working = re.sub(r"(大概|预计|需要你|需要|尽快|马上|立即|搞定|完成|负责|去|做|搞|一下|这周|本周|下周)", " ", working)
+    working = re.sub(r"[，,。；;：:]", " ", working)
+    working = " ".join(working.split())
+    raw_working = working
+
+    keyword_map = {
+        "后端": "后端开发",
+        "前端": "前端开发",
+        "联调": "飞书联调",
+        "海报": "海报确认",
+        "报名材料": "报名材料提交",
+        "路演": "路演 Demo 准备",
+        "demo": "路演 Demo 准备",
+        "汇报": "汇报材料整理",
+        "文档": "文档整理",
+        "表格": "多维表格同步",
+    }
+    lowered = working.lower()
+    for keyword, title in keyword_map.items():
+        if keyword.lower() in lowered:
+            return title
+
+    if not re.search(r"(开发|联调|准备|提交|确认|整理|修复|同步|处理|后端|前端|海报|材料|demo|路演)", text, re.IGNORECASE):
+        return ""
+
+    working = re.sub(r"^(开发|准备|提交|确认|处理|推进|整理|同步|修复)\s*", "", working)
+    working = working.strip()
+    if not working:
+        return raw_working.strip()
+
+    if len(working) <= 8 and any(word in text for word in ("开发", "联调", "准备", "提交", "确认", "整理")):
+        suffix = next(
+            (s for s in ("开发", "联调", "准备", "提交", "确认", "整理") if s in text),
+            "",
+        )
+        if suffix and not working.endswith(suffix):
+            working = f"{working}{suffix}"
+
+    return _normalize_title(working)
+
+
+def _normalize_title(title: str) -> str:
+    value = " ".join((title or "").split()).strip("，,。；; ")
+    bad_values = {"搞定", "完成", "处理", "安排", "推进", "准备", "开发"}
+    if value in bad_values:
+        return "待确认任务"
+    return value
+
+
+def _clean_owner(owner: str) -> str:
+    value = (owner or "").strip()
+    if not value or value in {"大概下", "需要你下", "需要你在", "需要你", "这周", "下周"}:
+        return "TBD"
+    return value
+
+
+def _dedupe_tasks(tasks: list[TaskItem]) -> list[TaskItem]:
+    seen: set[tuple[str, str, str]] = set()
+    result: list[TaskItem] = []
+    for task in tasks:
+        key = (task.title, task.owner, task.notes)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(task)
+    return result
+
+
+def _unique(items: Iterable[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in items:
+        value = item.strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
