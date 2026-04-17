@@ -1,0 +1,61 @@
+import unittest
+
+from app.schemas.task import TaskItem
+from app.services.text_analysis import (
+    apply_discussion_updates,
+    build_summary,
+    extract_tasks,
+    infer_risks,
+    normalize_tasks,
+)
+
+
+class TextAnalysisTests(unittest.TestCase):
+    def test_extract_tasks_from_assignment(self) -> None:
+        tasks = normalize_tasks(extract_tasks("张三你去搞后端，大概下周四搞定"))
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(tasks[0].owner, "张三")
+        self.assertEqual(tasks[0].title, "后端开发")
+
+    def test_apply_discussion_updates_adjusts_existing_task(self) -> None:
+        tasks = [
+            TaskItem(
+                title="后端开发",
+                owner="张三",
+                priority="medium",
+                due_date="下周四",
+                status="draft",
+                notes="张三你去搞后端，大概下周四搞定",
+            )
+        ]
+        updated = apply_discussion_updates(tasks, "不对，张三这个很紧急，需要你这周五之前搞定")
+        self.assertEqual(updated[0].priority, "high")
+        self.assertEqual(updated[0].owner, "张三")
+        self.assertIn("周五", updated[0].due_date)
+
+    def test_infer_risks_for_tbd_owner_and_generic_title(self) -> None:
+        risks = infer_risks(
+            [
+                TaskItem(
+                    title="搞定",
+                    owner="TBD",
+                    priority="medium",
+                    due_date="TBD",
+                    status="draft",
+                    notes="尽快搞定",
+                )
+            ]
+        )
+        self.assertTrue(any("负责人" in risk for risk in risks))
+        self.assertTrue(any("截止时间" in risk for risk in risks))
+        self.assertTrue(any("描述偏简略" in risk for risk in risks))
+
+    def test_build_summary_uses_clean_chinese(self) -> None:
+        tasks = normalize_tasks(extract_tasks("李四你去搞前端，需要你下周三前搞定"))
+        summary = build_summary("李四你去搞前端，需要你下周三前搞定", tasks)
+        self.assertIn("最近一轮讨论", summary)
+        self.assertIn("1 项协作任务", summary)
+
+
+if __name__ == "__main__":
+    unittest.main()

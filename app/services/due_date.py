@@ -115,6 +115,12 @@ def normalize_task_dates(tasks: list[TaskItem], *, today: date | None = None) ->
     return normalized
 
 
+def contains_relative_time_reference(text: str) -> bool:
+    candidate = (text or "").strip()
+    lowered = candidate.lower()
+    return any(marker in candidate or marker in lowered for marker in RELATIVE_TIME_MARKERS)
+
+
 def _should_prefer_note_date(
     *,
     task: TaskItem,
@@ -124,58 +130,32 @@ def _should_prefer_note_date(
 ) -> bool:
     if due_from_notes == "TBD":
         return False
-
-    note_has_relative_time = contains_relative_time_reference(task.notes)
-    if not note_has_relative_time:
+    if not contains_relative_time_reference(task.notes):
         return False
-
     if due_from_field == "TBD":
         return True
-
-    if _looks_like_unreasonable_absolute_date(due_from_field, today=today):
-        return True
-
-    return False
-
-
-def contains_relative_time_reference(text: str) -> bool:
-    candidate = (text or "").strip()
-    lowered = candidate.lower()
-    return any(marker in candidate or marker in lowered for marker in RELATIVE_TIME_MARKERS)
+    return _looks_like_unreasonable_absolute_date(due_from_field, today=today)
 
 
 def _looks_like_unreasonable_absolute_date(value: str, *, today: date) -> bool:
     parsed = _extract_iso_date(value)
     if parsed is None:
         return False
-
-    if parsed.year < today.year:
-        return True
-    if parsed.year > today.year + 1:
-        return True
-    return False
+    return parsed.year < today.year or parsed.year > today.year + 1
 
 
 def _extract_iso_date(text: str) -> date | None:
     match = re.search(r"(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2})", text)
     if not match:
         return None
-    return _safe_date(
-        int(match.group("year")),
-        int(match.group("month")),
-        int(match.group("day")),
-    )
+    return _safe_date(int(match.group("year")), int(match.group("month")), int(match.group("day")))
 
 
 def _parse_iso_date(text: str) -> date | None:
     match = re.search(r"(?P<year>\d{4})[-/.](?P<month>\d{1,2})[-/.](?P<day>\d{1,2})", text)
     if not match:
         return None
-    return _safe_date(
-        int(match.group("year")),
-        int(match.group("month")),
-        int(match.group("day")),
-    )
+    return _safe_date(int(match.group("year")), int(match.group("month")), int(match.group("day")))
 
 
 def _parse_month_day(text: str, today: date) -> date | None:
