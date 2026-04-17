@@ -218,12 +218,21 @@ class FeishuWorkflowService:
         intent: str,
         reason: str,
     ) -> AnalyzeResponse:
-        tasks = [
+        llm_tasks = [
             TaskItem.model_validate(item)
             for item in llm_result.get("tasks", [])
             if isinstance(item, dict)
         ]
-        tasks = apply_discussion_updates(tasks, source_text)
+        current_tasks = self._current_task_items(session_id)
+        task_operations = llm_result.get("task_operations", [])
+
+        if isinstance(task_operations, list) and task_operations:
+            tasks = self._apply_llm_task_operations(current_tasks, task_operations)
+        elif llm_tasks:
+            tasks = llm_tasks
+        else:
+            tasks = apply_discussion_updates(current_tasks, source_text)
+
         tasks = normalize_task_dates(normalize_tasks(tasks))
 
         summary = str(llm_result.get("summary") or "").strip() or build_summary(source_text, tasks)
@@ -242,7 +251,11 @@ class FeishuWorkflowService:
             ),
             AgentTrace(
                 agent="planner",
-                summary=f"LLM returned {len(tasks)} refreshed task(s) after considering the whole discussion.",
+                summary=(
+                    f"LLM returned {len(tasks)} refreshed task(s)"
+                    f" and {len(task_operations) if isinstance(task_operations, list) else 0} task operation(s)"
+                    " after considering the whole discussion."
+                ),
             ),
             AgentTrace(
                 agent="coordinator",
@@ -266,6 +279,87 @@ class FeishuWorkflowService:
             next_actions=next_actions[:4],
             agent_traces=traces,
         )
+
+    def _current_task_items(self, session_id: str) -> list[TaskItem]:
+        rows = self.memory_service.get_current_tasks(session_id)
+        return [
+            TaskItem(
+                title=row.title,
+                owner=row.owner,
+                priority=row.priority,
+                due_date=row.due_date,
+                status=row.status,
+                notes=row.notes or "",
+            )
+            for row in rows
+        ]
+
+    def _apply_llm_task_operations(self, current_tasks: list[TaskItem], operations: list[dict]) -> list[TaskItem]:
+        refreshed = [task.model_copy(deep=True) for task in current_tasks]
+        for operation in operations:
+            if not isinstance(operation, dict):
+                continue
+            action = str(operation.get("action") or "").strip().lower()
+            match_hint = operation.get("match_hint") if isinstance(operation.get("match_hint"), dict) else {}
+            task_payload = operation.get("task") if isinstance(operation.get("task"), dict) else None
+
+            if action == "create" and task_payload:
+                refreshed.append(TaskItem.model_validate(task_payload))
+                continue
+
+            target_index = self._find_operation_target(refreshed, match_hint, task_payload)
+            if target_index is None:
+                if action == "create" and task_payload:
+                    refreshed.append(TaskItem.model_validate(task_payload))
+                continue
+
+            if action == "remove":
+                refreshed.pop(target_index)
+                continue
+
+            if action == "update" and task_payload:
+                refreshed[target_index] = TaskItem.model_validate(task_payload)
+
+        return refreshed
+
+    def _find_operation_target(
+        self,
+        tasks: list[TaskItem],
+        match_hint: dict,
+        task_payload: dict | None,
+    ) -> int | None:
+        hint_title = str(match_hint.get("title") or "").strip()
+        hint_owner = str(match_hint.get("owner") or "").strip()
+        payload_title = str(task_payload.get("title") or "").strip() if task_payload else ""
+        payload_owner = str(task_payload.get("owner") or "").strip() if task_payload else ""
+
+        def normalized(value: str) -> str:
+            return " ".join(value.lower().split())
+
+        candidates: list[tuple[str, str]] = []
+        if hint_title or hint_owner:
+            candidates.append((hint_title, hint_owner))
+        if payload_title or payload_owner:
+            candidates.append((payload_title, payload_owner))
+
+        for title, owner in candidates:
+            exact_matches = [
+                idx
+                for idx, task in enumerate(tasks)
+                if (not title or normalized(task.title) == normalized(title))
+                and (not owner or normalized(task.owner) == normalized(owner))
+            ]
+            if len(exact_matches) == 1:
+                return exact_matches[0]
+
+        for title, _ in candidates:
+            if not title:
+                continue
+            title_matches = [idx for idx, task in enumerate(tasks) if normalized(task.title) == normalized(title)]
+            if len(title_matches) == 1:
+                return title_matches[0]
+
+        return None
 
     def _handle_fallback_request(self, message: FeishuMessageContext, active_episode_id: int | None) -> dict:
         decision = self.interaction_service.decide(message.text)

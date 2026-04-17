@@ -71,9 +71,10 @@ class LLMService:
         }
         result = self._chat_json(payload)
         logger.info(
-            "LLM workspace request resolved: intent=%s tasks=%s",
+            "LLM workspace request resolved: intent=%s tasks=%s operations=%s",
             result.get("intent"),
             len(result.get("tasks", [])) if isinstance(result.get("tasks"), list) else 0,
+            len(result.get("task_operations", [])) if isinstance(result.get("task_operations"), list) else 0,
         )
         return result
 
@@ -213,6 +214,24 @@ Schema:
   "intent": "summary|tasks|risks|status|slides|bitable|help|unknown",
   "reason": "short reason in Simplified Chinese",
   "summary": "overall summary in Simplified Chinese",
+  "task_operations": [
+    {{
+      "action": "create|update|remove",
+      "match_hint": {{
+        "title": "existing task title or empty string",
+        "owner": "existing owner or TBD"
+      }},
+      "task": {{
+        "title": "task title",
+        "owner": "owner or TBD",
+        "priority": "high|medium|low",
+        "due_date": "YYYY-MM-DD or TBD",
+        "status": "draft|done|cancelled",
+        "notes": "supporting discussion snippet"
+      }},
+      "reason": "why this operation is needed"
+    }}
+  ],
   "tasks": [
     {{
       "title": "task title",
@@ -246,8 +265,10 @@ Rules:
 - Recent discussion lines may include structured fields like "发言人" and "提及". Treat "提及" as a strong assignee hint in multi-person collaboration.
 - Distinguish clearly between the speaker, the mentioned teammate, and the final owner of a task.
 - When one teammate assigns work to an @mentioned teammate, prefer the mentioned teammate as the task owner unless the discussion clearly says otherwise.
-- If the latest discussion corrects or revises an earlier assignment, return the refreshed final task state instead of keeping both versions.
-- For summary/tasks/risks/bitable, return the current full task list after considering revisions.
+- For summary/tasks/risks/bitable, prefer using task_operations to describe how the current discussion changes existing tasks.
+- Use create for new tasks, update for changes to existing tasks, and remove for tasks that are explicitly cancelled or no longer needed.
+- match_hint should point to the existing task that needs to be updated or removed, usually by title and owner from the current task snapshot.
+- You may also return tasks as a refreshed full task list. If both task_operations and tasks are present, task_operations is the primary source of truth.
 - For status, put the natural-language answer into status_answer. You may also return tasks if useful.
 - For slides, fill the slides object with 5 to 7 slides and concise bullets.
 - For bitable, return intent=bitable and include the tasks that should be synced.
