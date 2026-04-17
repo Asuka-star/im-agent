@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     feishu_bot_name: str = Field(default="", alias="FEISHU_BOT_NAME")
     feishu_bot_user_id: str = Field(default="", alias="FEISHU_BOT_USER_ID")
     feishu_bot_open_id: str = Field(default="", alias="FEISHU_BOT_OPEN_ID")
+    feishu_doc_enabled: bool = Field(default=False, alias="FEISHU_DOC_ENABLED")
+    feishu_doc_folder_token: str = Field(default="", alias="FEISHU_DOC_FOLDER_TOKEN")
+    feishu_doc_title_prefix: str = Field(default="协同产出", alias="FEISHU_DOC_TITLE_PREFIX")
 
     feishu_bitable_enabled: bool = Field(default=False, alias="FEISHU_BITABLE_ENABLED")
     feishu_bitable_app_token: str = Field(default="", alias="FEISHU_BITABLE_APP_TOKEN")

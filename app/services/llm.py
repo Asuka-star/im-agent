@@ -211,7 +211,7 @@ Return valid JSON only. No markdown, no explanation.
 
 Schema:
 {{
-  "intent": "summary|tasks|risks|status|slides|bitable|help|unknown",
+  "intent": "summary|tasks|risks|status|slides|bitable|doc|help|unknown",
   "reason": "short reason in Simplified Chinese",
   "summary": "overall summary in Simplified Chinese",
   "task_operations": [
@@ -256,6 +256,15 @@ Schema:
     ],
     "emphasis": ["important point 1"],
     "assets": ["supporting asset 1"]
+  }},
+  "doc": {{
+    "title": "document title",
+    "sections": [
+      {{
+        "heading": "section heading",
+        "paragraphs": ["paragraph 1", "paragraph 2"]
+      }}
+    ]
   }}
 }}
 
@@ -265,13 +274,15 @@ Rules:
 - Recent discussion lines may include structured fields like "发言人" and "提及". Treat "提及" as a strong assignee hint in multi-person collaboration.
 - Distinguish clearly between the speaker, the mentioned teammate, and the final owner of a task.
 - When one teammate assigns work to an @mentioned teammate, prefer the mentioned teammate as the task owner unless the discussion clearly says otherwise.
-- For summary/tasks/risks/bitable, prefer using task_operations to describe how the current discussion changes existing tasks.
+- For summary/tasks/risks/bitable/doc, prefer using task_operations to describe how the current discussion changes existing tasks.
 - Use create for new tasks, update for changes to existing tasks, and remove for tasks that are explicitly cancelled or no longer needed.
 - match_hint should point to the existing task that needs to be updated or removed, usually by title and owner from the current task snapshot.
 - You may also return tasks as a refreshed full task list. If both task_operations and tasks are present, task_operations is the primary source of truth.
 - For status, put the natural-language answer into status_answer. You may also return tasks if useful.
 - For slides, fill the slides object with 5 to 7 slides and concise bullets.
 - For bitable, return intent=bitable and include the tasks that should be synced.
+- For doc, return intent=doc and fill doc.title plus doc.sections with a Feishu-document-ready structure.
+- If the user asks for a report outline and also wants it written into a document, choose doc and fill both doc and slides when helpful.
 - If the request is too vague, return intent=help.
 - If the request cannot be safely understood, return intent=unknown.
 - Convert relative dates like 今天、明天、这周五、下周三前 into absolute YYYY-MM-DD dates whenever possible.
@@ -320,12 +331,13 @@ Available intents:
 - status: answer current project/task status questions
 - slides: create a presentation / report / PPT outline
 - bitable: sync action items into a Feishu Bitable / task table
+- doc: write the discussion or outline into a Feishu document
 - help: user asks what the bot can do, or the request is too vague and needs guidance
 - unknown: the request is too ambiguous to safely execute
 
 Schema:
 {
-  "intent": "summary|tasks|risks|status|slides|bitable|help|unknown",
+  "intent": "summary|tasks|risks|status|slides|bitable|doc|help|unknown",
   "confidence": 0.0,
   "reason": "short reason in Simplified Chinese"
 }
@@ -333,6 +345,7 @@ Schema:
 Rules:
 - If the user asks for report outline / presentation / PPT / slides, choose slides.
 - If the user asks to sync / write / update a table or Bitable, choose bitable.
+- If the user asks to整理、沉淀、同步 discussion or outline into a Feishu document, choose doc.
 - If the user asks who owns tasks / what is pending / deadlines / progress, choose status.
 - If the user only says vague things like 'help me handle this' without enough detail, choose help.
 - All reasons must be in Simplified Chinese.
@@ -357,7 +370,7 @@ Schema:
 Rules:
 - should_recall=true only when the request likely depends on older historical memory, prior decisions, change reasons, or context not guaranteed to exist in the recent discussion and task snapshot.
 - should_recall=false when recent discussion + current tasks + recent summaries are already enough to answer.
-- Requests such as ordinary summary, TODO extraction, current risks, syncing current tasks, or generating a report outline from the latest discussion usually do not need long-term recall.
+- Requests such as ordinary summary, TODO extraction, current risks, syncing current tasks, generating a report outline, or writing a current-discussion document usually do not need long-term recall.
 - Requests asking why something changed, what was discussed earlier, previous decisions, historical adjustments, or comparing current status with older context usually need recall.
 - All reasons must be in Simplified Chinese.
 """.strip()

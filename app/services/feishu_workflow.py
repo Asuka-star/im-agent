@@ -4,6 +4,7 @@ import time
 from app.agents.orchestrator import AgentOrchestrator
 from app.core.config import settings
 from app.feishu.bitable_api import FeishuBitableAPI
+from app.feishu.doc_api import FeishuDocAPI
 from app.feishu.message_api import FeishuMessageAPI
 from app.feishu.user_api import FeishuUserAPI
 from app.schemas.analyze import AgentTrace, AnalyzeRequest, AnalyzeResponse
@@ -31,6 +32,7 @@ class FeishuWorkflowService:
         self.orchestrator = AgentOrchestrator()
         self.message_api = FeishuMessageAPI()
         self.bitable_api = FeishuBitableAPI()
+        self.doc_api = FeishuDocAPI()
         self.user_api = FeishuUserAPI()
         self.memory_service = MemoryService()
         self.interaction_service = InteractionService()
@@ -169,6 +171,23 @@ class FeishuWorkflowService:
             result = self._deliver_reply(message, "slides", reply_preview, analysis=None, episode_id=active_episode_id)
             if active_episode_id is not None and self._should_close_episode(result, reply_preview):
                 self.memory_service.close_active_episode(message.session_id, title="slides")
+            return result
+
+        if intent == "doc":
+            package = llm_result.get("doc")
+            if not isinstance(package, dict) or not package.get("sections"):
+                package = self._build_document_package_from_workspace(
+                    session_id=message.session_id,
+                    instruction=message.text,
+                    llm_result=llm_result,
+                    workspace_context=workspace_context,
+                    episode_id=active_episode_id,
+                )
+            sync_lines = self._sync_package_to_doc(package)
+            reply_preview = self._format_doc_reply(package, sync_lines)
+            result = self._deliver_reply(message, "doc", reply_preview, analysis=None, episode_id=active_episode_id)
+            if active_episode_id is not None and self._should_close_episode(result, reply_preview):
+                self.memory_service.close_active_episode(message.session_id, title=str(package.get("title") or "doc"))
             return result
 
         if intent == "status":
@@ -369,6 +388,8 @@ class FeishuWorkflowService:
 
         if decision.mode == "slides":
             return self._handle_fallback_slides(message, active_episode_id)
+        if decision.mode == "doc":
+            return self._handle_fallback_doc(message, active_episode_id)
 
         if decision.mode == "status":
             tasks = self.memory_service.get_current_tasks(message.session_id)
@@ -426,6 +447,193 @@ class FeishuWorkflowService:
         if active_episode_id is not None and self._should_close_episode(result, reply_preview):
             self.memory_service.close_active_episode(message.session_id, title="slides")
         return result
+
+    def _handle_fallback_doc(self, message: FeishuMessageContext, active_episode_id: int | None) -> dict:
+        package = self._build_document_package_from_workspace(
+            session_id=message.session_id,
+            instruction=message.text,
+            llm_result={},
+            workspace_context=self.memory_service.build_workspace_context(
+                message.session_id,
+                include_pending=True,
+                exclude_message_id=message.message_id,
+                query_text=message.text,
+                episode_id=active_episode_id,
+            ),
+            episode_id=active_episode_id,
+        )
+        sync_lines = self._sync_package_to_doc(package)
+        reply_preview = self._format_doc_reply(package, sync_lines)
+        result = self._deliver_reply(message, "doc", reply_preview, analysis=None, episode_id=active_episode_id)
+        if active_episode_id is not None and self._should_close_episode(result, reply_preview):
+            self.memory_service.close_active_episode(message.session_id, title=str(package.get("title") or "doc"))
+        return result
+
+    def _build_document_package_from_workspace(
+        self,
+        *,
+        session_id: str,
+        instruction: str,
+        llm_result: dict,
+        workspace_context: str,
+        episode_id: int | None,
+    ) -> dict:
+        provided = llm_result.get("doc")
+        if isinstance(provided, dict) and isinstance(provided.get("sections"), list) and provided.get("sections"):
+            title = str(provided.get("title") or "").strip() or self._default_doc_title(instruction)
+            return {
+                "title": title,
+                "sections": provided.get("sections", []),
+            }
+
+        wants_outline = any(keyword in instruction for keyword in ("汇报", "路演", "大纲", "PPT", "ppt", "演示"))
+        if wants_outline:
+            slides = llm_result.get("slides")
+            if not isinstance(slides, dict) or not slides.get("slides"):
+                try:
+                    slides = self.llm_service.generate_presentation_package(workspace_context, instruction)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Document fallback slide generation failed: %s", exc)
+                    slides = self._build_fallback_presentation_package(session_id)
+            return self._document_from_presentation(slides, instruction)
+
+        source_text = self.memory_service.build_discussion_block(
+            session_id,
+            episode_id=episode_id,
+        ) or workspace_context or instruction
+        analysis = self._build_analysis_from_llm(
+            session_id=session_id,
+            source_text=source_text,
+            llm_result=llm_result,
+            intent="summary",
+            reason="为文档同步生成结构化沉淀",
+        )
+        return self._document_from_analysis(analysis, instruction)
+
+    def _document_from_analysis(self, analysis: AnalyzeResponse, instruction: str) -> dict:
+        sections = [
+            {
+                "heading": "讨论摘要",
+                "paragraphs": [analysis.summary],
+            }
+        ]
+        if analysis.tasks:
+            sections.append(
+                {
+                    "heading": "任务清单",
+                    "paragraphs": [
+                        f"{idx}. {task.title}｜负责人：{task.owner}｜截止：{task.due_date}｜优先级：{task.priority}"
+                        for idx, task in enumerate(analysis.tasks, start=1)
+                    ],
+                }
+            )
+        if analysis.risks:
+            sections.append(
+                {
+                    "heading": "风险与卡点",
+                    "paragraphs": [f"{idx}. {risk}" for idx, risk in enumerate(analysis.risks, start=1)],
+                }
+            )
+        if analysis.next_actions:
+            sections.append(
+                {
+                    "heading": "下一步建议",
+                    "paragraphs": [f"{idx}. {item}" for idx, item in enumerate(analysis.next_actions, start=1)],
+                }
+            )
+        return {
+            "title": self._default_doc_title(instruction),
+            "sections": sections,
+        }
+
+    def _document_from_presentation(self, package: dict, instruction: str) -> dict:
+        theme = str(package.get("theme") or "汇报大纲").strip()
+        audience = str(package.get("audience") or "团队协作汇报").strip()
+        slides = package.get("slides") if isinstance(package.get("slides"), list) else []
+        emphasis = package.get("emphasis") if isinstance(package.get("emphasis"), list) else []
+        assets = package.get("assets") if isinstance(package.get("assets"), list) else []
+
+        sections = [
+            {
+                "heading": "文档说明",
+                "paragraphs": [f"主题：{theme}", f"适用场景：{audience}"],
+            }
+        ]
+        for index, slide in enumerate(slides[:7], start=1):
+            if not isinstance(slide, dict):
+                continue
+            title = str(slide.get("title") or f"P{index}").strip()
+            bullets = slide.get("bullets") if isinstance(slide.get("bullets"), list) else []
+            sections.append(
+                {
+                    "heading": f"P{index}. {title}",
+                    "paragraphs": [str(item).strip() for item in bullets if str(item).strip()],
+                }
+            )
+        if emphasis:
+            sections.append(
+                {
+                    "heading": "演示重点",
+                    "paragraphs": [str(item).strip() for item in emphasis if str(item).strip()],
+                }
+            )
+        if assets:
+            sections.append(
+                {
+                    "heading": "建议补充素材",
+                    "paragraphs": [str(item).strip() for item in assets if str(item).strip()],
+                }
+            )
+        return {
+            "title": self._default_doc_title(instruction, fallback=theme),
+            "sections": sections,
+        }
+
+    def _sync_package_to_doc(self, package: dict) -> list[str]:
+        if not self.doc_api.is_configured():
+            return ["- 飞书文档未配置，暂未执行创建。"]
+
+        try:
+            created = self.doc_api.create_document_from_sections(
+                str(package.get("title") or "协同文档"),
+                package.get("sections") if isinstance(package.get("sections"), list) else [],
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Feishu doc sync failed: %s", exc)
+            return [f"- 文档创建失败：{exc}"]
+
+        lines = [f"- 已创建飞书文档：《{created['title']}》"]
+        if created.get("url"):
+            lines.append(f"- 文档链接：{created['url']}")
+        return lines
+
+    def _format_doc_reply(self, package: dict, sync_lines: list[str]) -> str:
+        sections = package.get("sections") if isinstance(package.get("sections"), list) else []
+        lines = ["【文档同步】", f"标题：{str(package.get('title') or '协同文档').strip()}"]
+        if sections:
+            lines.append("正文结构：")
+            for index, section in enumerate(sections[:6], start=1):
+                if not isinstance(section, dict):
+                    continue
+                heading = str(section.get("heading") or f"部分 {index}").strip()
+                paragraphs = section.get("paragraphs") if isinstance(section.get("paragraphs"), list) else []
+                lines.append(f"{index}. {heading}")
+                for paragraph in paragraphs[:2]:
+                    content = str(paragraph).strip()
+                    if content:
+                        lines.append(f"- {content}")
+        lines.append("同步结果：")
+        lines.extend(sync_lines)
+        return "\n".join(lines)
+
+    def _default_doc_title(self, instruction: str, fallback: str | None = None) -> str:
+        if fallback:
+            return f"{settings.feishu_doc_title_prefix} - {fallback.strip()}"
+        condensed = " ".join((instruction or "").split()).strip()
+        if condensed:
+            condensed = condensed[:24]
+            return f"{settings.feishu_doc_title_prefix} - {condensed}"
+        return f"{settings.feishu_doc_title_prefix} - 讨论整理"
 
     def _empty_result(self, session_id: str, mode: str) -> dict:
         return {

@@ -8,9 +8,9 @@ class InteractionDecision:
 
 
 class InteractionService:
-    """Classifies whether a chat message is passive discussion or an explicit AI trigger."""
+    """Fallback intent classifier used only when the LLM path is unavailable."""
 
-    SUMMARY_KEYWORDS = ("总结", "纪要", "梳理", "汇总", "回顾", "结论", "归纳")
+    SUMMARY_KEYWORDS = ("总结", "纪要", "梳理", "回顾", "结论", "归纳")
     TASK_KEYWORDS = ("待办", "任务清单", "任务列表", "action items", "todo", "to-do")
     RISK_KEYWORDS = ("风险", "阻塞", "卡点", "问题点", "风险项")
     STATUS_KEYWORDS = (
@@ -43,6 +43,8 @@ class InteractionService:
 
         if self._is_bitable_request(normalized, lowered):
             return InteractionDecision(mode="bitable", label="整理待办并同步表格")
+        if self._is_doc_request(normalized, lowered):
+            return InteractionDecision(mode="doc", label="整理讨论并同步文档")
         if self._is_slide_request(normalized, lowered):
             return InteractionDecision(mode="slides", label="生成演示稿大纲")
         if self._contains_any(normalized, lowered, self.STATUS_KEYWORDS):
@@ -66,6 +68,13 @@ class InteractionService:
         return (mentions_table and (mentions_sync or mentions_tasks)) or (
             mentions_sync and "多维表格" in text
         )
+
+    def _is_doc_request(self, text: str, lowered: str) -> bool:
+        mentions_doc = self._contains_any(text, lowered, self.DOC_KEYWORDS)
+        mentions_sync = self._contains_any(text, lowered, self.SYNC_KEYWORDS)
+        mentions_summary = self._contains_any(text, lowered, self.SUMMARY_KEYWORDS) or "整理" in text
+        mentions_report = "汇报" in text or "路演" in text or "演示" in text or "大纲" in text
+        return mentions_doc and (mentions_sync or mentions_summary or mentions_report)
 
     def _is_slide_request(self, text: str, lowered: str) -> bool:
         if self._contains_any(text, lowered, self.SLIDE_KEYWORDS):
