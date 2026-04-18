@@ -1,5 +1,6 @@
 import json
 import logging
+import time
 from typing import Any
 
 import httpx
@@ -32,7 +33,7 @@ class LLMService:
                 {"role": "user", "content": raw_text},
             ],
         }
-        result = self._chat_json(payload)
+        result = self._chat_json(payload, request_name="extract_collaboration", timeout_seconds=settings.llm_timeout_seconds)
         logger.info("LLM extraction succeeded with %s task(s)", len(result.get("tasks", [])))
         return result
 
@@ -47,7 +48,7 @@ class LLMService:
                 {"role": "user", "content": user_text},
             ],
         }
-        result = self._chat_json(payload)
+        result = self._chat_json(payload, request_name="classify_intent", timeout_seconds=settings.llm_timeout_seconds)
         logger.info(
             "LLM intent classification succeeded: intent=%s confidence=%s",
             result.get("intent"),
@@ -69,7 +70,7 @@ class LLMService:
                 },
             ],
         }
-        result = self._chat_json(payload)
+        result = self._chat_json(payload, request_name="resolve_workspace_request", timeout_seconds=settings.llm_timeout_seconds)
         logger.info(
             "LLM workspace request resolved: intent=%s tasks=%s operations=%s",
             result.get("intent"),
@@ -92,7 +93,11 @@ class LLMService:
                 },
             ],
         }
-        result = self._chat_json(payload)
+        result = self._chat_json(
+            payload,
+            request_name="should_recall_memories",
+            timeout_seconds=settings.llm_memory_gate_timeout_seconds,
+        )
         logger.info(
             "LLM memory gate resolved: should_recall=%s confidence=%s",
             result.get("should_recall"),
@@ -114,30 +119,43 @@ class LLMService:
                 },
             ],
         }
-        return self._chat_json(payload)
+        return self._chat_json(
+            payload,
+            request_name="generate_presentation_package",
+            timeout_seconds=settings.llm_timeout_seconds,
+        )
 
     def _ensure_configured(self) -> None:
         if not self.is_configured():
             raise RuntimeError("LLM config is incomplete.")
 
-    def _chat_json(self, payload: dict[str, Any]) -> dict[str, Any]:
-        data = self._post_chat_completion(payload)
+    def _chat_json(self, payload: dict[str, Any], *, request_name: str, timeout_seconds: float) -> dict[str, Any]:
+        data = self._post_chat_completion(payload, request_name=request_name, timeout_seconds=timeout_seconds)
         text = self._extract_text(data)
         return self._parse_json(text)
 
-    def _post_chat_completion(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def _post_chat_completion(self, payload: dict[str, Any], *, request_name: str, timeout_seconds: float) -> dict[str, Any]:
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
-        with httpx.Client(timeout=60.0) as client:
+        timeout = httpx.Timeout(timeout_seconds, connect=10.0)
+        started_at = time.perf_counter()
+        with httpx.Client(timeout=timeout) as client:
             response = client.post(
                 f"{self.base_url}/chat/completions",
                 json=payload,
                 headers=headers,
             )
             response.raise_for_status()
-            return response.json()
+            data = response.json()
+        logger.info(
+            "LLM request completed: request=%s elapsed_ms=%.1f model=%s",
+            request_name,
+            (time.perf_counter() - started_at) * 1000,
+            payload.get("model"),
+        )
+        return data
 
     def _extract_text(self, payload: dict[str, Any]) -> str:
         choices = payload.get("choices", [])
@@ -211,7 +229,7 @@ Return valid JSON only. No markdown, no explanation.
 
 Schema:
 {{
-  "intent": "summary|tasks|risks|status|slides|bitable|doc|help|unknown",
+  "intent": "summary|tasks|risks|status|slides|doc|help|unknown",
   "reason": "short reason in Simplified Chinese",
   "summary": "overall summary in Simplified Chinese",
   "task_operations": [
@@ -271,16 +289,18 @@ Schema:
 Rules:
 - Today is {today} in Asia/Shanghai.
 - Prefer understanding the whole discussion instead of keyword matching.
+- The current discussion block is the primary source of truth for this round. Treat older summaries and task snapshots as background state, not as instructions to rewrite everything.
 - Recent discussion lines may include structured fields like "发言人" and "提及". Treat "提及" as a strong assignee hint in multi-person collaboration.
 - Distinguish clearly between the speaker, the mentioned teammate, and the final owner of a task.
 - When one teammate assigns work to an @mentioned teammate, prefer the mentioned teammate as the task owner unless the discussion clearly says otherwise.
-- For summary/tasks/risks/bitable/doc, prefer using task_operations to describe how the current discussion changes existing tasks.
+- For summary/tasks/risks/doc, prefer using task_operations to describe how the current discussion changes existing tasks.
+- If the current round adds one more assignment, create or update only the related tasks. Do not delete or rewrite unrelated existing tasks.
+- If an existing task remains valid and the current round does not explicitly change it, preserve it.
 - Use create for new tasks, update for changes to existing tasks, and remove for tasks that are explicitly cancelled or no longer needed.
 - match_hint should point to the existing task that needs to be updated or removed, usually by title and owner from the current task snapshot.
 - You may also return tasks as a refreshed full task list. If both task_operations and tasks are present, task_operations is the primary source of truth.
 - For status, put the natural-language answer into status_answer. You may also return tasks if useful.
 - For slides, fill the slides object with 5 to 7 slides and concise bullets.
-- For bitable, return intent=bitable and include the tasks that should be synced.
 - For doc, return intent=doc and fill doc.title plus doc.sections with a Feishu-document-ready structure.
 - If the user asks for a report outline and also wants it written into a document, choose doc and fill both doc and slides when helpful.
 - If the request is too vague, return intent=help.
@@ -330,21 +350,19 @@ Available intents:
 - risks: identify risks / blockers
 - status: answer current project/task status questions
 - slides: create a presentation / report / PPT outline
-- bitable: sync action items into a Feishu Bitable / task table
 - doc: write the discussion or outline into a Feishu document
 - help: user asks what the bot can do, or the request is too vague and needs guidance
 - unknown: the request is too ambiguous to safely execute
 
 Schema:
 {
-  "intent": "summary|tasks|risks|status|slides|bitable|doc|help|unknown",
+  "intent": "summary|tasks|risks|status|slides|doc|help|unknown",
   "confidence": 0.0,
   "reason": "short reason in Simplified Chinese"
 }
 
 Rules:
 - If the user asks for report outline / presentation / PPT / slides, choose slides.
-- If the user asks to sync / write / update a table or Bitable, choose bitable.
 - If the user asks to整理、沉淀、同步 discussion or outline into a Feishu document, choose doc.
 - If the user asks who owns tasks / what is pending / deadlines / progress, choose status.
 - If the user only says vague things like 'help me handle this' without enough detail, choose help.

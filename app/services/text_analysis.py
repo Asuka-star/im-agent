@@ -34,12 +34,14 @@ TASK_KEYWORDS = (
     "demo",
     "路演",
     "文档",
-    "表格",
     "搞",
     "做",
 )
 
 GENERIC_TITLES = {"搞定", "完成", "处理", "安排", "推进", "准备", "开发"}
+REQUEST_PREFIXES = ("帮我", "麻烦", "请", "可以", "能不能", "帮忙", "顺手")
+SINK_TARGET_KEYWORDS = ("文档", "飞书文档", "表格", "多维表格")
+SINK_ACTION_KEYWORDS = ("同步", "写入", "写到", "记录", "存到", "放到", "放进", "落到")
 
 
 def extract_tasks(raw_text: str) -> list[TaskItem]:
@@ -210,6 +212,8 @@ def _parse_clause(clause: str) -> TaskItem | None:
     text = LEADING_FILLER_RE.sub("", clause.strip()).strip("，。；; ")
     if not text:
         return None
+    if _looks_like_sink_request(text):
+        return None
 
     owner = _extract_owner(text)
     due_date = _extract_due_hint(text)
@@ -323,7 +327,6 @@ def _extract_title(text: str, owner: str, due_hint: str) -> str:
         "demo": "路演 Demo 准备",
         "汇报": "汇报材料整理",
         "文档": "文档整理",
-        "表格": "多维表格同步",
     }
     lowered = working.lower()
     for keyword, title in keyword_map.items():
@@ -371,6 +374,15 @@ def _dedupe_tasks(tasks: list[TaskItem]) -> list[TaskItem]:
         seen.add(key)
         result.append(task)
     return result
+
+
+def _looks_like_sink_request(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped.startswith(REQUEST_PREFIXES):
+        return False
+    mentions_sink_target = any(keyword in stripped for keyword in SINK_TARGET_KEYWORDS)
+    mentions_sink_action = any(keyword in stripped for keyword in SINK_ACTION_KEYWORDS)
+    return mentions_sink_target and mentions_sink_action
 
 
 def _unique(items: Iterable[str]) -> list[str]:

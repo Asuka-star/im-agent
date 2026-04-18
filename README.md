@@ -5,7 +5,7 @@
 这个项目的核心目标不是“每条消息都回复”，而是：
 - 平时在群里旁听并积累讨论上下文
 - 只有在 `@机器人` 时，才做总结、待办整理、风险分析、汇报大纲生成等动作
-- 把 IM 讨论进一步沉淀到多维表格、长期记忆和任务状态里
+- 把 IM 讨论进一步沉淀到飞书文档、长期记忆和任务状态里
 
 ## 当前能力
 
@@ -19,7 +19,7 @@
   - 识别风险与卡点
   - 回答当前状态问题
   - 生成汇报 / 路演大纲
-  - 同步任务到飞书多维表格
+  - 同步讨论到飞书文档
 - 支持：
   - Postgres + pgvector 长期记忆骨架
   - discussion episode
@@ -61,39 +61,25 @@ PowerShell 重新部署：
 - `@机器人 帮我整理一下待办`
 - `@机器人 看下当前有什么风险`
 - `@机器人 现在还有哪些任务没负责人`
-- `@机器人 帮我把刚才讨论同步到表格`
+- `@机器人 帮我把刚才讨论整理到文档里`
 - `@机器人 帮我搞个汇报大纲`
 - `@机器人 为什么之前把张三的截止时间改了`
 
 如果说法太模糊，机器人会回一条简短帮助提示。
 
-## 多维表格同步
+## 飞书文档同步
 
 在 `.env` 里配置：
 
-- `FEISHU_BITABLE_ENABLED=true`
-- `FEISHU_BITABLE_APP_TOKEN`
-- `FEISHU_BITABLE_TABLE_ID`
+- `FEISHU_DOC_ENABLED=true`
+- `FEISHU_DOC_TITLE_PREFIX`
 
-默认字段名：
+可选目录策略：
 
-- `任务`
-- `负责人`
-- `截止时间`
-- `优先级`
-- `状态`
-- `备注`
-- `会话ID`
-
-如果你的表字段名不同，可以覆盖这些配置：
-
-- `FEISHU_BITABLE_TITLE_FIELD`
-- `FEISHU_BITABLE_OWNER_FIELD`
-- `FEISHU_BITABLE_DUE_DATE_FIELD`
-- `FEISHU_BITABLE_PRIORITY_FIELD`
-- `FEISHU_BITABLE_STATUS_FIELD`
-- `FEISHU_BITABLE_NOTES_FIELD`
-- `FEISHU_BITABLE_SESSION_FIELD`
+- `FEISHU_DOC_FOLDER_TOKEN`
+  说明：手工指定一个已有目录。若该目录对应用不可写，系统会自动回退到默认位置创建文档。
+- `FEISHU_DOC_AUTO_FOLDER_NAME`
+  说明：未指定 `FEISHU_DOC_FOLDER_TOKEN` 时，系统会自动创建并复用一个应用托管目录。
 
 ## LLM 配置
 

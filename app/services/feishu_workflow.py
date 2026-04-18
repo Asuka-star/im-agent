@@ -1,9 +1,10 @@
 import logging
 import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from app.agents.orchestrator import AgentOrchestrator
 from app.core.config import settings
-from app.feishu.bitable_api import FeishuBitableAPI
 from app.feishu.doc_api import FeishuDocAPI
 from app.feishu.message_api import FeishuMessageAPI
 from app.feishu.user_api import FeishuUserAPI
@@ -18,6 +19,7 @@ from app.services.text_analysis import (
     apply_discussion_updates,
     build_next_actions,
     build_summary,
+    extract_tasks,
     infer_risks,
     normalize_tasks,
 )
@@ -31,7 +33,6 @@ class FeishuWorkflowService:
     def __init__(self) -> None:
         self.orchestrator = AgentOrchestrator()
         self.message_api = FeishuMessageAPI()
-        self.bitable_api = FeishuBitableAPI()
         self.doc_api = FeishuDocAPI()
         self.user_api = FeishuUserAPI()
         self.memory_service = MemoryService()
@@ -174,18 +175,22 @@ class FeishuWorkflowService:
             return result
 
         if intent == "doc":
-            package = llm_result.get("doc")
-            if not isinstance(package, dict) or not package.get("sections"):
-                package = self._build_document_package_from_workspace(
-                    session_id=message.session_id,
-                    instruction=message.text,
-                    llm_result=llm_result,
-                    workspace_context=workspace_context,
-                    episode_id=active_episode_id,
-                )
+            package, analysis = self._build_doc_response_package(
+                session_id=message.session_id,
+                instruction=message.text,
+                llm_result=llm_result,
+                workspace_context=workspace_context,
+                episode_id=active_episode_id,
+                reason=reason,
+                source_message_id=message.message_id,
+            )
+            package["title"] = self._compose_doc_title(
+                str(package.get("title") or "协同文档"),
+                stats_as_of=str(package.get("stats_as_of") or "").strip() or None,
+            )
             sync_lines = self._sync_package_to_doc(package)
             reply_preview = self._format_doc_reply(package, sync_lines)
-            result = self._deliver_reply(message, "doc", reply_preview, analysis=None, episode_id=active_episode_id)
+            result = self._deliver_reply(message, "doc", reply_preview, analysis=analysis, episode_id=active_episode_id)
             if active_episode_id is not None and self._should_close_episode(result, reply_preview):
                 self.memory_service.close_active_episode(message.session_id, title=str(package.get("title") or "doc"))
             return result
@@ -198,7 +203,7 @@ class FeishuWorkflowService:
                 status_answer = self._format_status_reply(message.text, tasks, payload)
             return self._deliver_reply(message, "status", status_answer, analysis=None)
 
-        if intent in {"summary", "tasks", "risks", "bitable"}:
+        if intent in {"summary", "tasks", "risks"}:
             source_text = self.memory_service.build_discussion_block(
                 message.session_id,
                 episode_id=active_episode_id,
@@ -211,15 +216,13 @@ class FeishuWorkflowService:
                 intent=intent,
                 reason=reason,
             )
-            sync_lines: list[str] = []
-            if intent == "bitable":
-                sync_lines = self._sync_tasks_to_bitable(analysis, message.session_id)
-            reply_preview = self._format_analysis_reply(analysis, intent, sync_lines)
+            reply_preview = self._format_analysis_reply(analysis, intent)
             self.memory_service.save_round(
                 session_id=message.session_id,
                 analysis=analysis,
                 episode_id=active_episode_id,
                 async_embed=True,
+                preserve_unmatched_previous=False,
             )
             result = self._deliver_reply(message, intent, reply_preview, analysis=analysis, episode_id=active_episode_id)
             if active_episode_id is not None and self._should_close_episode(result, reply_preview):
@@ -247,8 +250,10 @@ class FeishuWorkflowService:
 
         if isinstance(task_operations, list) and task_operations:
             tasks = self._apply_llm_task_operations(current_tasks, task_operations)
+        elif current_tasks:
+            tasks = self._update_current_tasks_from_discussion(current_tasks, source_text, llm_tasks)
         elif llm_tasks:
-            tasks = llm_tasks
+            tasks = self._merge_task_items(current_tasks, llm_tasks)
         else:
             tasks = apply_discussion_updates(current_tasks, source_text)
 
@@ -341,6 +346,58 @@ class FeishuWorkflowService:
 
         return refreshed
 
+    def _merge_task_items(self, current_tasks: list[TaskItem], refreshed_tasks: list[TaskItem]) -> list[TaskItem]:
+        if not current_tasks:
+            return [task.model_copy(deep=True) for task in refreshed_tasks]
+
+        merged = [task.model_copy(deep=True) for task in current_tasks]
+        for task in refreshed_tasks:
+            target_index = self._find_merge_target(merged, task)
+            if target_index is None:
+                merged.append(task.model_copy(deep=True))
+                continue
+            merged[target_index] = task.model_copy(deep=True)
+        return merged
+
+    def _update_current_tasks_from_discussion(
+        self,
+        current_tasks: list[TaskItem],
+        source_text: str,
+        llm_tasks: list[TaskItem],
+    ) -> list[TaskItem]:
+        updated = apply_discussion_updates(current_tasks, source_text)
+        explicit_tasks = normalize_tasks(extract_tasks(source_text))
+        if explicit_tasks:
+            return self._merge_task_items(updated, explicit_tasks)
+        if llm_tasks:
+            return self._merge_task_items(updated, llm_tasks)
+        return updated
+
+    def _find_merge_target(self, tasks: list[TaskItem], incoming_task: TaskItem) -> int | None:
+        incoming_title = " ".join((incoming_task.title or "").lower().split())
+        incoming_owner = " ".join((incoming_task.owner or "").lower().split())
+
+        exact_matches = [
+            idx
+            for idx, task in enumerate(tasks)
+            if " ".join((task.title or "").lower().split()) == incoming_title
+            and " ".join((task.owner or "").lower().split()) == incoming_owner
+        ]
+        if len(exact_matches) == 1:
+            return exact_matches[0]
+
+        owner_missing = incoming_owner in {"", "tbd"}
+        if owner_missing:
+            title_matches = [
+                idx
+                for idx, task in enumerate(tasks)
+                if " ".join((task.title or "").lower().split()) == incoming_title
+            ]
+            if len(title_matches) == 1:
+                return title_matches[0]
+
+        return None
+
     def _find_operation_target(
         self,
         tasks: list[TaskItem],
@@ -409,10 +466,7 @@ class FeishuWorkflowService:
         analysis = self.orchestrator.run(
             AnalyzeRequest(session_id=message.session_id, raw_text=discussion_block)
         )
-        sync_lines: list[str] = []
-        if decision.mode == "bitable":
-            sync_lines = self._sync_tasks_to_bitable(analysis, message.session_id)
-        reply_preview = self._format_analysis_reply(analysis, decision.mode, sync_lines)
+        reply_preview = self._format_analysis_reply(analysis, decision.mode)
         self.memory_service.save_round(
             session_id=message.session_id,
             analysis=analysis,
@@ -449,22 +503,25 @@ class FeishuWorkflowService:
         return result
 
     def _handle_fallback_doc(self, message: FeishuMessageContext, active_episode_id: int | None) -> dict:
-        package = self._build_document_package_from_workspace(
+        workspace_context = self.memory_service.build_workspace_context(
+            message.session_id,
+            include_pending=True,
+            exclude_message_id=message.message_id,
+            query_text=message.text,
+            episode_id=active_episode_id,
+        )
+        package, analysis = self._build_doc_response_package(
             session_id=message.session_id,
             instruction=message.text,
             llm_result={},
-            workspace_context=self.memory_service.build_workspace_context(
-                message.session_id,
-                include_pending=True,
-                exclude_message_id=message.message_id,
-                query_text=message.text,
-                episode_id=active_episode_id,
-            ),
+            workspace_context=workspace_context,
             episode_id=active_episode_id,
+            reason="为文档同步生成结构化沉淀",
+            source_message_id=message.message_id,
         )
         sync_lines = self._sync_package_to_doc(package)
         reply_preview = self._format_doc_reply(package, sync_lines)
-        result = self._deliver_reply(message, "doc", reply_preview, analysis=None, episode_id=active_episode_id)
+        result = self._deliver_reply(message, "doc", reply_preview, analysis=analysis, episode_id=active_episode_id)
         if active_episode_id is not None and self._should_close_episode(result, reply_preview):
             self.memory_service.close_active_episode(message.session_id, title=str(package.get("title") or "doc"))
         return result
@@ -478,11 +535,13 @@ class FeishuWorkflowService:
         workspace_context: str,
         episode_id: int | None,
     ) -> dict:
+        stats_as_of = self._resolve_doc_stats_as_of(session_id, episode_id=episode_id)
         provided = llm_result.get("doc")
         if isinstance(provided, dict) and isinstance(provided.get("sections"), list) and provided.get("sections"):
-            title = str(provided.get("title") or "").strip() or self._default_doc_title(instruction)
+            base_title = str(provided.get("title") or "").strip() or self._default_doc_title(instruction, stats_as_of=stats_as_of)
             return {
-                "title": title,
+                "title": self._compose_doc_title(base_title, stats_as_of=stats_as_of),
+                "stats_as_of": stats_as_of,
                 "sections": provided.get("sections", []),
             }
 
@@ -495,7 +554,7 @@ class FeishuWorkflowService:
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("Document fallback slide generation failed: %s", exc)
                     slides = self._build_fallback_presentation_package(session_id)
-            return self._document_from_presentation(slides, instruction)
+            return self._document_from_presentation(slides, instruction, stats_as_of=stats_as_of)
 
         source_text = self.memory_service.build_discussion_block(
             session_id,
@@ -508,9 +567,56 @@ class FeishuWorkflowService:
             intent="summary",
             reason="为文档同步生成结构化沉淀",
         )
-        return self._document_from_analysis(analysis, instruction)
+        return self._document_from_analysis(analysis, instruction, stats_as_of=stats_as_of)
 
-    def _document_from_analysis(self, analysis: AnalyzeResponse, instruction: str) -> dict:
+    def _build_doc_response_package(
+        self,
+        *,
+        session_id: str,
+        instruction: str,
+        llm_result: dict,
+        workspace_context: str,
+        episode_id: int | None,
+        reason: str,
+        source_message_id: str | None,
+    ) -> tuple[dict, AnalyzeResponse | None]:
+        if self._is_outline_request(instruction):
+            package = self._build_document_package_from_workspace(
+                session_id=session_id,
+                instruction=instruction,
+                llm_result=llm_result,
+                workspace_context=workspace_context,
+                episode_id=episode_id,
+            )
+            return package, None
+
+        source_text = self.memory_service.build_discussion_block(
+            session_id,
+            episode_id=episode_id,
+            exclude_message_id=source_message_id,
+        ) or workspace_context or instruction
+        analysis = self._build_analysis_from_llm(
+            session_id=session_id,
+            source_text=source_text,
+            llm_result=llm_result,
+            intent="summary",
+            reason=reason or "为文档同步生成结构化沉淀",
+        )
+        self.memory_service.save_round(
+            session_id=session_id,
+            analysis=analysis,
+            episode_id=episode_id,
+            async_embed=True,
+            preserve_unmatched_previous=False,
+        )
+        stats_as_of = self._resolve_doc_stats_as_of(session_id, episode_id=episode_id)
+        package = self._document_from_analysis(analysis, instruction, stats_as_of=stats_as_of)
+        return package, analysis
+
+    def _is_outline_request(self, instruction: str) -> bool:
+        return any(keyword in instruction for keyword in ("汇报", "路演", "大纲", "PPT", "ppt", "演示"))
+
+    def _document_from_analysis(self, analysis: AnalyzeResponse, instruction: str, *, stats_as_of: str | None = None) -> dict:
         sections = [
             {
                 "heading": "讨论摘要",
@@ -542,11 +648,12 @@ class FeishuWorkflowService:
                 }
             )
         return {
-            "title": self._default_doc_title(instruction),
+            "title": self._default_doc_title(instruction, stats_as_of=stats_as_of),
+            "stats_as_of": stats_as_of,
             "sections": sections,
         }
 
-    def _document_from_presentation(self, package: dict, instruction: str) -> dict:
+    def _document_from_presentation(self, package: dict, instruction: str, *, stats_as_of: str | None = None) -> dict:
         theme = str(package.get("theme") or "汇报大纲").strip()
         audience = str(package.get("audience") or "团队协作汇报").strip()
         slides = package.get("slides") if isinstance(package.get("slides"), list) else []
@@ -585,13 +692,15 @@ class FeishuWorkflowService:
                 }
             )
         return {
-            "title": self._default_doc_title(instruction, fallback=theme),
+            "title": self._default_doc_title(instruction, fallback=theme, stats_as_of=stats_as_of),
+            "stats_as_of": stats_as_of,
             "sections": sections,
         }
 
     def _sync_package_to_doc(self, package: dict) -> list[str]:
         if not self.doc_api.is_configured():
-            return ["- 飞书文档未配置，暂未执行创建。"]
+            logger.warning("Feishu doc sync skipped because FEISHU_DOC_ENABLED is not enabled.")
+            return ["- 飞书文档未启用，请先在环境变量里设置 FEISHU_DOC_ENABLED=true。"]
 
         try:
             created = self.doc_api.create_document_from_sections(
@@ -605,6 +714,12 @@ class FeishuWorkflowService:
         lines = [f"- 已创建飞书文档：《{created['title']}》"]
         if created.get("url"):
             lines.append(f"- 文档链接：{created['url']}")
+        folder_scope = str(created.get("folder_scope") or "").strip()
+        if folder_scope == "explicit" and created.get("folder_url"):
+            lines.append(f"- 产出目录：{created['folder_url']}")
+        folder_note = str(created.get("folder_note") or "").strip()
+        if folder_note:
+            lines.append(f"- {folder_note}")
         return lines
 
     def _format_doc_reply(self, package: dict, sync_lines: list[str]) -> str:
@@ -626,14 +741,36 @@ class FeishuWorkflowService:
         lines.extend(sync_lines)
         return "\n".join(lines)
 
-    def _default_doc_title(self, instruction: str, fallback: str | None = None) -> str:
+    def _default_doc_title(self, instruction: str, fallback: str | None = None, stats_as_of: str | None = None) -> str:
+        timestamp = stats_as_of or self._doc_title_timestamp()
         if fallback:
-            return f"{settings.feishu_doc_title_prefix} - {fallback.strip()}"
+            return self._compose_doc_title(f"{settings.feishu_doc_title_prefix} - {fallback.strip()}", stats_as_of=timestamp)
         condensed = " ".join((instruction or "").split()).strip()
         if condensed:
             condensed = condensed[:24]
-            return f"{settings.feishu_doc_title_prefix} - {condensed}"
-        return f"{settings.feishu_doc_title_prefix} - 讨论整理"
+            return self._compose_doc_title(f"{settings.feishu_doc_title_prefix} - {condensed}", stats_as_of=timestamp)
+        return self._compose_doc_title(f"{settings.feishu_doc_title_prefix} - 讨论整理", stats_as_of=timestamp)
+
+    def _doc_title_timestamp(self) -> str:
+        return datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M")
+
+    def _resolve_doc_stats_as_of(self, session_id: str, *, episode_id: int | None) -> str | None:
+        cutoff_at = self.memory_service.get_discussion_cutoff_at(session_id, episode_id=episode_id)
+        if cutoff_at is None:
+            return None
+        if cutoff_at.tzinfo is None:
+            cutoff_at = cutoff_at.replace(tzinfo=ZoneInfo("UTC"))
+        return cutoff_at.astimezone(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M")
+
+    def _compose_doc_title(self, base_title: str, *, stats_as_of: str | None) -> str:
+        title = base_title.strip()
+        if not title:
+            title = settings.feishu_doc_title_prefix
+        if "统计至" in title:
+            return title
+        if stats_as_of:
+            return f"{title} - 统计至{stats_as_of}"
+        return title
 
     def _empty_result(self, session_id: str, mode: str) -> dict:
         return {
@@ -690,18 +827,16 @@ class FeishuWorkflowService:
         self,
         analysis: AnalyzeResponse,
         mode: str,
-        sync_lines: list[str] | None = None,
     ) -> str:
         header = {
             "summary": "【讨论总结】",
             "tasks": "【待办清单】",
             "risks": "【风险与卡点】",
-            "bitable": "【待办清单 + 表格同步】",
         }.get(mode, "【协作整理】")
 
         lines = [header, f"摘要：{analysis.summary}"]
 
-        if mode in {"summary", "tasks", "bitable"}:
+        if mode in {"summary", "tasks"}:
             lines.append("任务：")
             if analysis.tasks:
                 for idx, task in enumerate(analysis.tasks, start=1):
@@ -723,28 +858,7 @@ class FeishuWorkflowService:
         for idx, action in enumerate(analysis.next_actions, start=1):
             lines.append(f"{idx}. {action}")
 
-        if sync_lines:
-            lines.append("表格同步：")
-            lines.extend(sync_lines)
-
         return "\n".join(lines)
-
-    def _sync_tasks_to_bitable(self, analysis: AnalyzeResponse, session_id: str) -> list[str]:
-        if not analysis.tasks:
-            return ["- 当前没有可同步的任务记录。"]
-        if not self.bitable_api.is_configured():
-            return ["- 多维表格未配置，暂未执行写入。"]
-
-        created = 0
-        failed: list[str] = []
-        for task in analysis.tasks:
-            try:
-                self.bitable_api.create_task_record(task, session_id=session_id)
-                created += 1
-            except Exception as exc:  # noqa: BLE001
-                failed.append(f"- 《{task.title}》写入失败：{exc}")
-
-        return [f"- 成功写入 {created} 条任务到多维表格。"] + failed
 
     def _format_status_reply(self, query: str, tasks: list, payload: dict) -> str:
         if not tasks:
@@ -874,7 +988,6 @@ class FeishuWorkflowService:
                 "- @我 帮我整理待办",
                 "- @我 看一下当前风险和卡点",
                 "- @我 现在还有哪些任务没负责人",
-                "- @我 帮我把刚才讨论同步到多维表格",
                 "- @我 帮我搞个汇报大纲",
             ]
         )

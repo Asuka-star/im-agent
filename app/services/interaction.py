@@ -26,7 +26,6 @@ class InteractionService:
     )
     SLIDE_KEYWORDS = ("演示稿", "汇报稿", "路演稿", "演讲稿", "ppt", "PPT", "幻灯片", "大纲")
     DOC_KEYWORDS = ("文档", "飞书文档", "文稿", "稿子")
-    TABLE_KEYWORDS = ("表格", "多维表格", "任务表", "表里")
     SYNC_KEYWORDS = ("同步", "写入", "写到", "更新", "记录", "存到", "放到", "放进", "落到")
     HELP_KEYWORDS = ("怎么用", "你能做什么", "能做什么", "help", "帮助")
     REQUEST_PREFIXES = ("帮我", "麻烦", "请", "可以", "能不能", "帮忙", "顺手")
@@ -41,8 +40,6 @@ class InteractionService:
         if self._contains_any(normalized, lowered, self.HELP_KEYWORDS):
             return InteractionDecision(mode="help", label="展示可用能力")
 
-        if self._is_bitable_request(normalized, lowered):
-            return InteractionDecision(mode="bitable", label="整理待办并同步表格")
         if self._is_doc_request(normalized, lowered):
             return InteractionDecision(mode="doc", label="整理讨论并同步文档")
         if self._is_slide_request(normalized, lowered):
@@ -60,14 +57,6 @@ class InteractionService:
             return InteractionDecision(mode="help", label="展示可用能力")
 
         return InteractionDecision(mode="buffer", label="继续积累群聊讨论")
-
-    def _is_bitable_request(self, text: str, lowered: str) -> bool:
-        mentions_table = self._contains_any(text, lowered, self.TABLE_KEYWORDS)
-        mentions_sync = self._contains_any(text, lowered, self.SYNC_KEYWORDS)
-        mentions_tasks = self._contains_any(text, lowered, self.TASK_KEYWORDS) or "待办" in text
-        return (mentions_table and (mentions_sync or mentions_tasks)) or (
-            mentions_sync and "多维表格" in text
-        )
 
     def _is_doc_request(self, text: str, lowered: str) -> bool:
         mentions_doc = self._contains_any(text, lowered, self.DOC_KEYWORDS)

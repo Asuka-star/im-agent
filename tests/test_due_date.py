@@ -27,6 +27,18 @@ class DueDateTests(unittest.TestCase):
         normalized = normalize_task_dates([task], today=date(2026, 4, 17))
         self.assertEqual(normalized[0].due_date, "2026-04-23")
 
+    def test_month_day_in_notes_can_override_stale_due_date(self) -> None:
+        task = TaskItem(
+            title="后端开发",
+            owner="张三",
+            priority="medium",
+            due_date="2024-04-30",
+            status="draft",
+            notes="张三4月30号之前搞定后端",
+        )
+        normalized = normalize_task_dates([task], today=date(2026, 4, 17))
+        self.assertEqual(normalized[0].due_date, "2026-04-30")
+
 
 if __name__ == "__main__":
     unittest.main()

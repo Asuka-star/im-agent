@@ -26,7 +26,7 @@ Base = declarative_base()
 
 
 def init_db() -> None:
-    from app.db.models import Episode, Memory, MemoryChunk, Message, Session, Task, TaskChangeLog, UserAlias  # noqa: F401
+    from app.db.models import AppSetting, Episode, Memory, MemoryChunk, Message, Session, Task, TaskChangeLog, UserAlias  # noqa: F401
 
     _prepare_database_extensions()
     Base.metadata.create_all(bind=engine)

@@ -56,6 +56,10 @@ class TextAnalysisTests(unittest.TestCase):
         self.assertIn("最近一轮讨论", summary)
         self.assertIn("1 项协作任务", summary)
 
+    def test_extract_tasks_ignores_sink_request_to_table(self) -> None:
+        tasks = normalize_tasks(extract_tasks("帮我把刚才讨论同步到表格"))
+        self.assertEqual(tasks, [])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -205,10 +205,15 @@ class MemoryService:
         episode_id: int | None = None,
         embed: bool = True,
         async_embed: bool = False,
+        preserve_unmatched_previous: bool = True,
     ) -> None:
         self.ensure_session(session_id)
         previous_tasks = self.get_current_tasks(session_id)
-        merged_tasks = self._merge_current_tasks(previous_tasks, analysis.tasks)
+        merged_tasks = self._merge_current_tasks(
+            previous_tasks,
+            analysis.tasks,
+            preserve_unmatched_previous=preserve_unmatched_previous,
+        )
         payload = {
             "summary": analysis.summary,
             "risks": analysis.risks,
@@ -247,6 +252,7 @@ class MemoryService:
             previous_tasks=previous_tasks,
             current_tasks=merged_tasks,
             reason=analysis.summary,
+            preserve_unmatched_previous=preserve_unmatched_previous,
         )
 
         chunk_kwargs = {
@@ -440,6 +446,36 @@ class MemoryService:
             lines.append(self._format_message_line(message, alias_map=alias_map))
         return "\n".join(lines)
 
+    def get_discussion_cutoff_at(
+        self,
+        session_id: str,
+        *,
+        episode_id: int | None = None,
+        exclude_message_id: str | None = None,
+    ) -> datetime | None:
+        target_episode_id = episode_id
+        if target_episode_id is None:
+            active_episode = self.get_active_episode(session_id)
+            target_episode_id = active_episode.id if active_episode else None
+
+        if target_episode_id is None:
+            return None
+
+        with SessionLocal() as session:
+            statement = (
+                select(Message.created_at)
+                .where(
+                    Message.session_id == session_id,
+                    Message.role == "user",
+                    Message.episode_id == target_episode_id,
+                )
+                .order_by(desc(Message.created_at), desc(Message.id))
+                .limit(1)
+            )
+            if exclude_message_id:
+                statement = statement.where(Message.message_id != exclude_message_id)
+            return session.execute(statement).scalar_one_or_none()
+
     def build_workspace_context(
         self,
         session_id: str,
@@ -453,7 +489,6 @@ class MemoryService:
         tasks = self.get_current_tasks(session_id)
         memories = self.get_recent_memories(session_id)
         task_changes = self.get_recent_task_changes(session_id)
-        recent_messages = self.get_recent_messages(session_id)
         retrieved_chunks = (
             self.search_relevant_memories(session_id, query_text or "", limit=5)
             if include_semantic_search
@@ -469,7 +504,7 @@ class MemoryService:
             else ""
         )
 
-        if not tasks and not memories and not task_changes and not recent_messages and not pending_block and not retrieved_chunks:
+        if not tasks and not memories and not task_changes and not pending_block and not retrieved_chunks:
             return ""
 
         lines: list[str] = ["[协作上下文]"]
@@ -504,15 +539,6 @@ class MemoryService:
             for chunk in retrieved_chunks:
                 lines.append(f"- ({chunk.source_type}) {chunk.content}")
 
-        if recent_messages:
-            alias_map = self._build_alias_map(
-                session_id,
-                [message.sender_id for message in recent_messages if message.sender_id],
-            )
-            lines.append("[最近消息]")
-            for message in reversed(recent_messages[-6:]):
-                lines.append(self._format_message_line(message, alias_map=alias_map))
-
         return "\n".join(lines)
 
     def load_memory_payload(self, session_id: str) -> dict:
@@ -535,6 +561,7 @@ class MemoryService:
         previous_tasks: list[Task],
         current_tasks: list[TaskItem],
         reason: str,
+        preserve_unmatched_previous: bool,
     ) -> None:
         matched_pairs, unmatched_previous, unmatched_current = self._match_task_pairs(previous_tasks, current_tasks)
         rows: list[TaskChangeLog] = []
@@ -584,13 +611,31 @@ class MemoryService:
                 )
             )
 
-        for before in unmatched_previous:
-            logger.debug(
-                "Retaining previous task without changes: session_id=%s title=%s owner=%s",
-                session_id,
-                before.title,
-                before.owner,
-            )
+        if preserve_unmatched_previous:
+            for before in unmatched_previous:
+                logger.debug(
+                    "Retaining previous task without changes: session_id=%s title=%s owner=%s",
+                    session_id,
+                    before.title,
+                    before.owner,
+                )
+        else:
+            for before in unmatched_previous:
+                rows.append(
+                    TaskChangeLog(
+                        session_id=session_id,
+                        episode_id=episode_id,
+                        action="removed",
+                        title=before.title,
+                        owner=before.owner,
+                        priority=before.priority,
+                        due_date=before.due_date,
+                        status=before.status,
+                        notes=before.notes,
+                        reason=reason,
+                        details_json=json.dumps({"before": self._task_snapshot(before), "after": None}, ensure_ascii=False),
+                    )
+                )
 
         if not rows:
             return
@@ -600,11 +645,18 @@ class MemoryService:
                 session.add(row)
             session.commit()
 
-    def _merge_current_tasks(self, previous_tasks: list[Task], current_tasks: list[TaskItem]) -> list[TaskItem]:
+    def _merge_current_tasks(
+        self,
+        previous_tasks: list[Task],
+        current_tasks: list[TaskItem],
+        *,
+        preserve_unmatched_previous: bool = True,
+    ) -> list[TaskItem]:
         matched_pairs, unmatched_previous, unmatched_current = self._match_task_pairs(previous_tasks, current_tasks)
         merged: list[TaskItem] = [after for _, after in matched_pairs]
         merged.extend(unmatched_current)
-        merged.extend(self._task_item_from_row(task) for task in unmatched_previous)
+        if preserve_unmatched_previous:
+            merged.extend(self._task_item_from_row(task) for task in unmatched_previous)
         return merged
 
     def _match_task_pairs(
@@ -761,7 +813,7 @@ class MemoryService:
         for item in mentioned_users:
             if not isinstance(item, dict) or item.get("is_bot"):
                 continue
-            display_name = str(item.get("name") or "").strip()
+            display_name = str(item.get("display_name") or item.get("name") or "").strip()
             if not display_name:
                 continue
             valid_users.append(

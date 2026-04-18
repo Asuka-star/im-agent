@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     feishu_doc_enabled: bool = Field(default=False, alias="FEISHU_DOC_ENABLED")
     feishu_doc_folder_token: str = Field(default="", alias="FEISHU_DOC_FOLDER_TOKEN")
     feishu_doc_title_prefix: str = Field(default="协同产出", alias="FEISHU_DOC_TITLE_PREFIX")
+    feishu_doc_auto_folder_name: str = Field(default="AI协作产出", alias="FEISHU_DOC_AUTO_FOLDER_NAME")
 
     feishu_bitable_enabled: bool = Field(default=False, alias="FEISHU_BITABLE_ENABLED")
     feishu_bitable_app_token: str = Field(default="", alias="FEISHU_BITABLE_APP_TOKEN")
@@ -38,6 +39,8 @@ class Settings(BaseSettings):
     llm_api_key: str = Field(default="", alias="LLM_API_KEY")
     llm_base_url: str = Field(default="https://openrouter.ai/api/v1", alias="LLM_BASE_URL")
     llm_model: str = Field(default="deepseek/deepseek-v3.2", alias="LLM_MODEL")
+    llm_timeout_seconds: float = Field(default=45.0, alias="LLM_TIMEOUT_SECONDS")
+    llm_memory_gate_timeout_seconds: float = Field(default=12.0, alias="LLM_MEMORY_GATE_TIMEOUT_SECONDS")
 
     embedding_api_key: str = Field(default="", alias="EMBEDDING_API_KEY")
     embedding_base_url: str = Field(default="", alias="EMBEDDING_BASE_URL")

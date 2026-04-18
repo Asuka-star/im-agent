@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 from app.schemas.task import TaskItem
 from app.services.feishu_workflow import FeishuWorkflowService
@@ -81,6 +82,48 @@ class LLMTaskOperationTests(unittest.TestCase):
         result = self.service._apply_llm_task_operations(current_tasks, operations)
         self.assertEqual(len(result), 2)
         self.assertTrue(any(task.title == "前端开发" and task.owner == "李四" for task in result))
+
+    def test_llm_summary_path_saves_exact_snapshot(self) -> None:
+        analysis = TaskItem(
+            title="前端开发",
+            owner="李四",
+            priority="medium",
+            due_date="2026-04-22",
+            status="draft",
+            notes="新增任务",
+        )
+        with patch.object(self.service, "_build_analysis_from_llm") as build_analysis, patch.object(
+            self.service.memory_service,
+            "build_discussion_block",
+            return_value="李四4月22号之前搞定前端",
+        ), patch.object(self.service.memory_service, "save_round") as save_round, patch.object(
+            self.service,
+            "_deliver_reply",
+            return_value={"reply_preview": "ok", "reply_sent": False},
+        ):
+            build_analysis.return_value = type(
+                "FakeAnalysis",
+                (),
+                {
+                    "summary": "ok",
+                    "tasks": [analysis],
+                    "risks": [],
+                    "next_actions": ["ok"],
+                },
+            )()
+            self.service._execute_llm_request(
+                type(
+                    "FakeMessage",
+                    (),
+                    {"session_id": "s1", "message_id": "m1", "text": "总结一下", "chat_id": "c1"},
+                )(),
+                {"intent": "summary", "reason": "测试"},
+                "[协作上下文]",
+                1,
+            )
+
+        self.assertTrue(save_round.called)
+        self.assertFalse(save_round.call_args.kwargs["preserve_unmatched_previous"])
 
 
 if __name__ == "__main__":

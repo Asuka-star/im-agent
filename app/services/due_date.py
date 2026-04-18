@@ -69,6 +69,8 @@ RELATIVE_TIME_MARKERS = (
     "sunday",
 )
 
+MONTH_DAY_RE = re.compile(r"(?:(?P<year>\d{4})年)?(?P<month>\d{1,2})月(?P<day>\d{1,2})[日号]?")
+
 
 def current_local_date() -> date:
     return datetime.now(ZoneInfo("Asia/Shanghai")).date()
@@ -118,7 +120,7 @@ def normalize_task_dates(tasks: list[TaskItem], *, today: date | None = None) ->
 def contains_relative_time_reference(text: str) -> bool:
     candidate = (text or "").strip()
     lowered = candidate.lower()
-    return any(marker in candidate or marker in lowered for marker in RELATIVE_TIME_MARKERS)
+    return any(marker in candidate or marker in lowered for marker in RELATIVE_TIME_MARKERS) or bool(MONTH_DAY_RE.search(candidate))
 
 
 def _should_prefer_note_date(
@@ -159,7 +161,7 @@ def _parse_iso_date(text: str) -> date | None:
 
 
 def _parse_month_day(text: str, today: date) -> date | None:
-    match = re.search(r"(?:(?P<year>\d{4})年)?(?P<month>\d{1,2})月(?P<day>\d{1,2})[日号]?", text)
+    match = MONTH_DAY_RE.search(text)
     if not match:
         return None
 
