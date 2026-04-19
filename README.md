@@ -1,123 +1,193 @@
 # Feishu IM Agent MVP
 
-面向飞书群聊协作场景的 AI 助手 MVP。
+一个面向飞书群聊协作场景的 AI Agent 原型。
 
-这个项目的核心目标不是“每条消息都回复”，而是：
-- 平时在群里旁听并积累讨论上下文
-- 只有在 `@机器人` 时，才做总结、待办整理、风险分析、汇报大纲生成等动作
-- 把 IM 讨论进一步沉淀到飞书文档、长期记忆和任务状态里
+项目目标不是“每条消息都自动回复”，而是把它做成一个真正能嵌入办公讨论流程的协同助手：
+- 平时在群里旁听并缓冲讨论
+- 只有在 `@机器人` 时再统一理解上下文并执行动作
+- 将讨论结果沉淀为任务状态、历史变更、飞书文档等可复用资产
 
-## 当前能力
+## 项目能力
 
-- 接收飞书群消息
-- 仅在 `@机器人` 时触发回复
-- 缓冲普通讨论，不打断群聊
-- 用 LLM 统一理解请求，而不是只靠硬编码命令
-- 支持：
-  - 总结讨论
-  - 整理待办
-  - 识别风险与卡点
-  - 回答当前状态问题
-  - 生成汇报 / 路演大纲
-  - 同步讨论到飞书文档
-- 支持：
-  - Postgres + pgvector 长期记忆骨架
+当前已经支持：
+- 接收飞书群聊消息事件
+- 仅在 `@机器人` 时触发处理
+- 缓冲普通群聊，不打断日常讨论
+- 基于 LLM 统一理解整段讨论，而不是只靠硬编码命令
+- 提取和维护：
+  - 讨论摘要
+  - 待办任务
+  - 负责人
+  - 截止时间
+  - 风险与下一步建议
+- 支持任务的新增、更新、删除
+- 支持历史追问，例如：
+  - 为什么之前改了某个截止时间
+  - 当前还有哪些任务没负责人
+- 生成汇报/PPT 大纲
+- 同步讨论结果到飞书文档
+- 支持长期记忆骨架：
+  - Postgres
+  - pgvector
   - discussion episode
   - task change history
-  - 去重与重试保护
+- 支持去重与重试保护，避免飞书重复投递导致重复回复
 
-## 运行
+## 核心设计
 
-本地开发：
+项目采用分层记忆结构，而不是只靠“最近几条聊天记录”：
+
+- 当前讨论回合：保留一轮群聊里的最新上下文
+- 当前任务快照：保存项目当前真相
+- 历史变更记录：记录任务为什么被改、怎么被改
+- 向量记忆：在需要时召回更早的讨论背景
+
+这样可以分别处理：
+- `@机器人 总结一下`
+- `@机器人 现在还有哪些任务没负责人`
+- `@机器人 为什么之前把张三的截止时间改了`
+
+## 典型用法
+
+群里正常讨论若干句后，可以这样调用：
+
+- `@机器人 总结一下这次讨论`
+- `@机器人 帮我整理一下待办`
+- `@机器人 看下当前有什么风险`
+- `@机器人 现在还有哪些任务没负责人`
+- `@机器人 帮我搞个汇报大纲`
+- `@机器人 把这轮讨论整理成文档`
+
+如果说法比较模糊，机器人会返回简短帮助提示。
+
+## 运行方式
+
+### 本地开发
 
 ```bash
 uvicorn app.main:app --reload
 ```
 
-Docker：
+### Docker
 
 ```bash
 docker build -t feishu-im-agent-mvp .
 docker run --name feishu-im-agent-mvp --env-file .env -p 9000:9000 feishu-im-agent-mvp
 ```
 
-PowerShell 重新部署：
+### PowerShell 重部署
 
 ```powershell
 .\scripts\redeploy.ps1
 ```
 
-强制无缓存重部署：
+无缓存重部署：
 
 ```powershell
 .\scripts\redeploy.ps1 -NoCache
 ```
 
-## 常用交互
-
-下面这些自然表达都可以：
-
-- `@机器人 总结一下这次讨论`
-- `@机器人 帮我整理一下待办`
-- `@机器人 看下当前有什么风险`
-- `@机器人 现在还有哪些任务没负责人`
-- `@机器人 帮我把刚才讨论整理到文档里`
-- `@机器人 帮我搞个汇报大纲`
-- `@机器人 为什么之前把张三的截止时间改了`
-
-如果说法太模糊，机器人会回一条简短帮助提示。
-
-## 飞书文档同步
-
-在 `.env` 里配置：
-
-- `FEISHU_DOC_ENABLED=true`
-- `FEISHU_DOC_TITLE_PREFIX`
-
-可选目录策略：
-
-- `FEISHU_DOC_FOLDER_TOKEN`
-  说明：手工指定一个已有目录。若该目录对应用不可写，系统会自动回退到默认位置创建文档。
-- `FEISHU_DOC_AUTO_FOLDER_NAME`
-  说明：未指定 `FEISHU_DOC_FOLDER_TOKEN` 时，系统会自动创建并复用一个应用托管目录。
-
-## LLM 配置
-
-当前默认按 OpenRouter 兼容接口接入：
-
-- `LLM_API_KEY`
-- `LLM_BASE_URL=https://openrouter.ai/api/v1`
-- `LLM_MODEL=deepseek/deepseek-v3.2`
-
-## Embedding 配置
-
-如果你要启用向量记忆，补这些：
-
-- `EMBEDDING_API_KEY`
-- `EMBEDDING_BASE_URL`
-- `EMBEDDING_MODEL`
-- `EMBEDDING_DIMENSIONS`
-
-如果 embedding 服务异常，系统会降级，不应直接打断主流程。
-
 ## 关键环境变量
 
-基础飞书配置：
+### 基础应用配置
+
+- `APP_NAME`
+- `APP_ENV`
+- `APP_HOST`
+- `APP_PORT`
+- `LOG_LEVEL`
+
+### 数据库
+
+- `DATABASE_URL`
+
+默认推荐：
+
+```env
+DATABASE_URL=postgresql+psycopg://feishu:feishu123@feishu-agent-pg:5432/feishu_agent
+```
+
+### 飞书接入
 
 - `FEISHU_APP_ID`
 - `FEISHU_APP_SECRET`
 - `FEISHU_VERIFICATION_TOKEN`
+- `FEISHU_ENCRYPT_KEY`
+- `FEISHU_API_BASE_URL`
 - `FEISHU_REPLY_ENABLED`
 
-机器人身份识别：
+### 机器人身份识别
 
 - `FEISHU_BOT_NAME`
 - `FEISHU_BOT_USER_ID`
 - `FEISHU_BOT_OPEN_ID`
 
-数据库：
+### 飞书文档同步
 
-- `DATABASE_URL`
+- `FEISHU_DOC_ENABLED`
+- `FEISHU_DOC_FOLDER_TOKEN`
+- `FEISHU_DOC_TITLE_PREFIX`
+- `FEISHU_DOC_AUTO_FOLDER_NAME`
+
+说明：
+- 如果配置了 `FEISHU_DOC_FOLDER_TOKEN`，文档会优先创建到指定文件夹
+- 如果未配置，系统会自动创建并复用一个应用托管目录
+
+### 飞书多维表格（可选）
+
+- `FEISHU_BITABLE_ENABLED`
+- `FEISHU_BITABLE_APP_TOKEN`
+- `FEISHU_BITABLE_TABLE_ID`
+- `FEISHU_BITABLE_TITLE_FIELD`
+- `FEISHU_BITABLE_OWNER_FIELD`
+- `FEISHU_BITABLE_DUE_DATE_FIELD`
+- `FEISHU_BITABLE_PRIORITY_FIELD`
+- `FEISHU_BITABLE_STATUS_FIELD`
+- `FEISHU_BITABLE_NOTES_FIELD`
+- `FEISHU_BITABLE_SESSION_FIELD`
+
+### LLM 配置
+
+- `LLM_API_KEY`
+- `LLM_BASE_URL`
+- `LLM_MODEL`
+- `LLM_TIMEOUT_SECONDS`
+- `LLM_MEMORY_GATE_TIMEOUT_SECONDS`
+
+当前默认是 OpenRouter 兼容接法，例如：
+
+```env
+LLM_BASE_URL=https://openrouter.ai/api/v1
+LLM_MODEL=deepseek/deepseek-v3.2
+```
+
+### Embedding 配置
+
+- `EMBEDDING_API_KEY`
+- `EMBEDDING_BASE_URL`
+- `EMBEDDING_MODEL`
+- `EMBEDDING_DIMENSIONS`
+- `MEMORY_MESSAGE_CHUNK_KEEP`
+- `MEMORY_ASSISTANT_CHUNK_KEEP`
+- `MEMORY_SUMMARY_CHUNK_KEEP`
+
+如果 embedding 服务异常，系统会降级，不应直接打断主流程。
+
+## 主要目录结构
+
+```text
+app/
+  agents/         # 协作分析代理
+  api/            # FastAPI 路由
+  core/           # 配置与日志
+  db/             # 数据库模型与初始化
+  feishu/         # 飞书 API 封装
+  schemas/        # Pydantic 数据结构
+  services/       # 工作流、LLM、记忆、规则兜底
+scripts/
+  redeploy.ps1    # 重部署脚本
+tests/            # 最小回归测试
+```
 
 ## 调试
 
@@ -127,11 +197,20 @@ PowerShell 重新部署：
 docker logs -f feishu-im-agent-mvp
 ```
 
-如果你使用脚本部署，默认会自动跟随日志。
+如果你使用了重部署脚本，默认会自动跟随日志。
 
-## 当前设计原则
+运行测试：
 
-- 普通群聊只缓存，不打断
-- `@机器人` 时再做统一理解与输出
-- 当前状态、讨论回合、历史变更分层存储
-- 向量记忆只做补充，不代替当前任务真相
+```bash
+python -m unittest discover -s tests -v
+```
+
+## 当前定位
+
+这个项目目前更接近一个“可运行、可演示、真实接入飞书”的协同助手原型，重点体现：
+- IM 讨论入口
+- LLM 驱动的协作理解
+- 任务状态与历史追踪
+- 文档沉淀与汇报材料生成
+
+它不是一个完整的企业级项目管理平台，但已经具备了从群聊讨论走向结构化协作输出的核心链路。

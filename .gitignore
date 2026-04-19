@@ -3,3 +3,5 @@ __pycache__/
 *.pyc
 .env
 data/
+bitable-setup.md
+feishu-integrated-mvp-plan.md
