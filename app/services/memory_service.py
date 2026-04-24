@@ -30,6 +30,80 @@ class MemoryService:
                 session.add(Session(session_id=session_id))
                 session.commit()
 
+    def clear_session_memory(self, session_id: str, *, keep_aliases: bool = True) -> dict:
+        """Clear persisted memory for one discussion session.
+
+        This is useful before recording a demo so the bot behaves like a fresh project thread.
+        """
+        normalized = (session_id or "").strip()
+        if not normalized:
+            raise ValueError("session_id is required")
+
+        deleted: dict[str, int] = {}
+        with SessionLocal() as session:
+            deleted["messages"] = (
+                session.query(Message).filter(Message.session_id == normalized).delete(synchronize_session=False)
+            )
+            deleted["tasks"] = session.query(Task).filter(Task.session_id == normalized).delete(synchronize_session=False)
+            deleted["task_change_logs"] = (
+                session.query(TaskChangeLog).filter(TaskChangeLog.session_id == normalized).delete(synchronize_session=False)
+            )
+            deleted["memories"] = (
+                session.query(Memory).filter(Memory.session_id == normalized).delete(synchronize_session=False)
+            )
+            deleted["memory_chunks"] = (
+                session.query(MemoryChunk).filter(MemoryChunk.session_id == normalized).delete(synchronize_session=False)
+            )
+            deleted["episodes"] = (
+                session.query(Episode).filter(Episode.session_id == normalized).delete(synchronize_session=False)
+            )
+            if keep_aliases:
+                deleted["user_aliases"] = 0
+            else:
+                deleted["user_aliases"] = (
+                    session.query(UserAlias)
+                    .filter(UserAlias.session_id == normalized)
+                    .delete(synchronize_session=False)
+                )
+            session.commit()
+
+        logger.info(
+            "Cleared session memory: session_id=%s deleted=%s keep_aliases=%s",
+            normalized,
+            deleted,
+            keep_aliases,
+        )
+        return {
+            "scope": "session",
+            "session_id": normalized,
+            "keep_aliases": keep_aliases,
+            "deleted": deleted,
+        }
+
+    def clear_all_memory(self, *, keep_aliases: bool = True) -> dict:
+        """Clear all persisted demo memory across sessions."""
+        deleted: dict[str, int] = {}
+        with SessionLocal() as session:
+            deleted["messages"] = session.query(Message).delete(synchronize_session=False)
+            deleted["tasks"] = session.query(Task).delete(synchronize_session=False)
+            deleted["task_change_logs"] = session.query(TaskChangeLog).delete(synchronize_session=False)
+            deleted["memories"] = session.query(Memory).delete(synchronize_session=False)
+            deleted["memory_chunks"] = session.query(MemoryChunk).delete(synchronize_session=False)
+            deleted["episodes"] = session.query(Episode).delete(synchronize_session=False)
+            if keep_aliases:
+                deleted["user_aliases"] = 0
+            else:
+                deleted["user_aliases"] = session.query(UserAlias).delete(synchronize_session=False)
+            deleted["sessions"] = session.query(Session).delete(synchronize_session=False)
+            session.commit()
+
+        logger.info("Cleared all persisted memory: deleted=%s keep_aliases=%s", deleted, keep_aliases)
+        return {
+            "scope": "all",
+            "keep_aliases": keep_aliases,
+            "deleted": deleted,
+        }
+
     def get_alias_display_name(self, session_id: str, identifier: str | None) -> str | None:
         normalized = (identifier or "").strip()
         if not normalized:

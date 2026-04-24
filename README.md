@@ -87,6 +87,28 @@ docker run --name feishu-im-agent-mvp --env-file .env -p 9000:9000 feishu-im-age
 .\scripts\redeploy.ps1 -NoCache
 ```
 
+### 演示前清空记忆
+
+如果你要录制 demo，建议先清空当前群聊的历史记忆，避免机器人带出之前的上下文。
+
+按当前群聊 `session_id/chat_id` 清空：
+
+```powershell
+.\scripts\clear-memory.ps1 -SessionId oc_xxx
+```
+
+清空所有 demo 记忆：
+
+```powershell
+.\scripts\clear-memory.ps1 -All
+```
+
+默认会保留当前群聊里已经解析过的用户昵称映射；如果你连这些也想一起清掉，可以加：
+
+```powershell
+.\scripts\clear-memory.ps1 -SessionId oc_xxx -DropAliases
+```
+
 ## 关键环境变量
 
 ### 基础应用配置
