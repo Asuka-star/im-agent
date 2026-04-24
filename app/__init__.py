@@ -1,1 +1,1 @@
-"""Application package for the Feishu IM Agent MVP."""
+"""Application package for im-agent."""

@@ -1,6 +1,6 @@
 param(
-    [string]$Context = "mylinux",
-    [string]$ContainerName = "feishu-im-agent-mvp",
+    [string]$Context = "",
+    [string]$ContainerName = "im-agent",
     [string]$SessionId,
     [switch]$All,
     [switch]$DropAliases
@@ -13,8 +13,27 @@ function Write-Step {
     Write-Host "`n==> $Message" -ForegroundColor Cyan
 }
 
+function Get-DockerArgs {
+    if ([string]::IsNullOrWhiteSpace($Context)) {
+        return @()
+    }
+
+    return @("--context", $Context)
+}
+
 if (-not $All -and [string]::IsNullOrWhiteSpace($SessionId)) {
     throw "Please provide -SessionId <chat_id/session_id>, or use -All to clear every stored session."
+}
+
+$dockerArgs = Get-DockerArgs
+
+if ([string]::IsNullOrWhiteSpace($Context)) {
+    $currentContext = docker context show
+    Write-Step "Using current Docker context '$currentContext'"
+}
+else {
+    Write-Step "Using Docker context '$Context'"
+    docker @dockerArgs context inspect $Context | Out-Null
 }
 
 $keepAliases = if ($DropAliases) { "False" } else { "True" }
@@ -41,7 +60,7 @@ print(json.dumps(result, ensure_ascii=False))
 "@
 }
 
-docker --context $Context exec $ContainerName python -c $pythonCode
+docker @dockerArgs exec $ContainerName python -c $pythonCode
 
 Write-Step "Done"
 if ($All) {

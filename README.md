@@ -1,4 +1,4 @@
-# Feishu IM Agent MVP
+# im-agent
 
 一个面向飞书群聊协作场景的 AI Agent 原型。
 
@@ -71,8 +71,8 @@ uvicorn app.main:app --reload
 ### Docker
 
 ```bash
-docker build -t feishu-im-agent-mvp .
-docker run --name feishu-im-agent-mvp --env-file .env -p 9000:9000 feishu-im-agent-mvp
+docker build -t im-agent .
+docker run --name im-agent --env-file .env -p 9000:9000 im-agent
 ```
 
 ### PowerShell 重部署
@@ -216,7 +216,7 @@ tests/            # 最小回归测试
 查看容器实时日志：
 
 ```bash
-docker logs -f feishu-im-agent-mvp
+docker logs -f im-agent
 ```
 
 如果你使用了重部署脚本，默认会自动跟随日志。
