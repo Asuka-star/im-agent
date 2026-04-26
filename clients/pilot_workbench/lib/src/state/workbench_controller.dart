@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:pilot_workbench/src/config/app_config.dart';
 import 'package:pilot_workbench/src/models/task_run_models.dart';
@@ -30,6 +32,10 @@ class WorkbenchController extends ChangeNotifier {
 
   SocketConnection? _sessionConnection;
   SocketConnection? _taskConnection;
+  Timer? _sessionReconnectTimer;
+  Timer? _taskReconnectTimer;
+  String? _activeSessionSocketId;
+  String? _activeTaskSocketId;
 
   Future<void> initialize() async {
     await refreshTaskRuns(keepSelection: false);
@@ -64,6 +70,10 @@ class WorkbenchController extends ChangeNotifier {
           selectedTaskRun = null;
           taskConnectionState = 'idle';
         }
+      } else if (runs.isEmpty) {
+        await _closeTaskSocket();
+        selectedTaskRun = null;
+        taskConnectionState = 'idle';
       } else if (runs.isNotEmpty) {
         await selectTaskRun(runs.first.taskRunId, quiet: true);
       }
@@ -116,17 +126,37 @@ class WorkbenchController extends ChangeNotifier {
         confirmationId: confirmationId,
         answerValue: answerValue,
       );
-      await selectTaskRun(taskRunId, quiet: true);
+      await refreshTaskRuns(keepSelection: true);
     } catch (error) {
       errorMessage = error.toString();
+      rethrow;
     } finally {
       isSubmittingConfirmation = false;
       notifyListeners();
     }
   }
 
+  void clearError() {
+    if (errorMessage == null) {
+      return;
+    }
+    errorMessage = null;
+    notifyListeners();
+  }
+
+  Future<void> retryCurrentView() async {
+    if (selectedTaskRun != null) {
+      await selectTaskRun(selectedTaskRun!.taskRunId, quiet: false);
+      return;
+    }
+    await refreshTaskRuns(keepSelection: false);
+  }
+
   Future<void> _bindSessionSocket(String sessionId) async {
+    _sessionReconnectTimer?.cancel();
     final current = _sessionConnection;
+    _sessionConnection = null;
+    _activeSessionSocketId = null;
     if (current != null) {
       await current.close();
     }
@@ -134,17 +164,26 @@ class WorkbenchController extends ChangeNotifier {
     sessionConnectionState = 'connecting';
     notifyListeners();
 
+    _activeSessionSocketId = sessionId;
     _sessionConnection = _socket.connect(
       uri: AppConfig.sessionSocketUri(sessionId),
       onEvent: _handleSessionEvent,
       onClosed: () {
+        if (_activeSessionSocketId != sessionId) {
+          return;
+        }
         sessionConnectionState = 'closed';
         notifyListeners();
+        _scheduleSessionReconnect(sessionId);
       },
       onError: (error) {
+        if (_activeSessionSocketId != sessionId) {
+          return;
+        }
         sessionConnectionState = 'error';
         errorMessage = error.toString();
         notifyListeners();
+        _scheduleSessionReconnect(sessionId);
       },
     );
 
@@ -154,7 +193,10 @@ class WorkbenchController extends ChangeNotifier {
   }
 
   Future<void> _bindTaskSocket(String taskRunId) async {
+    _taskReconnectTimer?.cancel();
     final current = _taskConnection;
+    _taskConnection = null;
+    _activeTaskSocketId = null;
     if (current != null) {
       await current.close();
     }
@@ -162,17 +204,26 @@ class WorkbenchController extends ChangeNotifier {
     taskConnectionState = 'connecting';
     notifyListeners();
 
+    _activeTaskSocketId = taskRunId;
     _taskConnection = _socket.connect(
       uri: AppConfig.taskRunSocketUri(taskRunId),
       onEvent: _handleTaskRunEvent,
       onClosed: () {
+        if (_activeTaskSocketId != taskRunId) {
+          return;
+        }
         taskConnectionState = 'closed';
         notifyListeners();
+        _scheduleTaskReconnect(taskRunId);
       },
       onError: (error) {
+        if (_activeTaskSocketId != taskRunId) {
+          return;
+        }
         taskConnectionState = 'error';
         errorMessage = error.toString();
         notifyListeners();
+        _scheduleTaskReconnect(taskRunId);
       },
     );
 
@@ -182,6 +233,9 @@ class WorkbenchController extends ChangeNotifier {
   }
 
   Future<void> _closeSessionSocket() async {
+    _sessionReconnectTimer?.cancel();
+    _sessionReconnectTimer = null;
+    _activeSessionSocketId = null;
     final connection = _sessionConnection;
     _sessionConnection = null;
     if (connection != null) {
@@ -191,12 +245,40 @@ class WorkbenchController extends ChangeNotifier {
   }
 
   Future<void> _closeTaskSocket() async {
+    _taskReconnectTimer?.cancel();
+    _taskReconnectTimer = null;
+    _activeTaskSocketId = null;
     final connection = _taskConnection;
     _taskConnection = null;
     if (connection != null) {
       await connection.close();
     }
     taskConnectionState = 'idle';
+  }
+
+  void _scheduleSessionReconnect(String sessionId) {
+    if (sessionId.isEmpty || sessionFilter != sessionId) {
+      return;
+    }
+    _sessionReconnectTimer?.cancel();
+    _sessionReconnectTimer = Timer(const Duration(seconds: 3), () {
+      if (sessionFilter == sessionId) {
+        _bindSessionSocket(sessionId);
+      }
+    });
+  }
+
+  void _scheduleTaskReconnect(String taskRunId) {
+    final selectedId = selectedTaskRun?.taskRunId;
+    if (selectedId == null || selectedId != taskRunId) {
+      return;
+    }
+    _taskReconnectTimer?.cancel();
+    _taskReconnectTimer = Timer(const Duration(seconds: 3), () {
+      if (selectedTaskRun?.taskRunId == taskRunId) {
+        _bindTaskSocket(taskRunId);
+      }
+    });
   }
 
   void _handleSessionEvent(Map<String, dynamic> event) {
@@ -259,6 +341,8 @@ class WorkbenchController extends ChangeNotifier {
 
   @override
   void dispose() {
+    _sessionReconnectTimer?.cancel();
+    _taskReconnectTimer?.cancel();
     _closeSessionSocket();
     _closeTaskSocket();
     super.dispose();
