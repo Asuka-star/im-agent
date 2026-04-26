@@ -1,7 +1,9 @@
+import json
 import logging
 import re
 import time
 from datetime import datetime
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 from app.agents.orchestrator import AgentOrchestrator
@@ -142,12 +144,15 @@ class FeishuWorkflowService:
             if result.get("analysis") is not None
             else self._condense_text(result.get("reply_preview"))
         )
+        response_step_status = str(result.get("response_step_status") or "done")
+        final_stage = str(result.get("task_run_stage") or "delivered")
+        final_status = str(result.get("task_run_status") or "completed")
         self.task_run_service.upsert_step(
             task_run.task_run_id,
             step_key="response_generated",
             title="生成处理结果",
             step_type="workflow",
-            status="done",
+            status=response_step_status,
             output_payload={
                 "mode": result["mode"],
                 "reply_preview": result["reply_preview"],
@@ -167,8 +172,8 @@ class FeishuWorkflowService:
             task_run.task_run_id,
             intent=result["mode"],
             title=self._task_run_title(message.text, result["mode"]),
-            stage="delivered",
-            status="completed",
+            stage=final_stage,
+            status=final_status,
             latest_summary=summary_text,
             latest_reply_preview=result.get("reply_preview"),
             latest_error=result.get("reply_error"),
@@ -303,8 +308,27 @@ class FeishuWorkflowService:
                 stage=f"{intent or 'help'}_processing",
             )
 
+        plan_artifact = self._build_plan_artifact(intent=intent, reason=reason, llm_result=llm_result)
+        clarification = self._extract_clarification_request(llm_result)
+        if clarification and clarification["blocking"]:
+            return self._pause_for_clarification(
+                message,
+                intent=intent,
+                clarification=clarification,
+                active_episode_id=active_episode_id,
+                task_run_id=task_run_id,
+                workspace_context=workspace_context,
+                artifacts=[plan_artifact] if plan_artifact else None,
+            )
+
         if intent in {"help", "unknown", ""}:
-            return self._deliver_reply(message, "help", self._format_help_reply(reason), analysis=None)
+            return self._deliver_reply(
+                message,
+                "help",
+                self._format_help_reply(reason),
+                analysis=None,
+                artifacts=[plan_artifact] if plan_artifact else None,
+            )
 
         if intent == "slides":
             package = llm_result.get("slides")
@@ -321,14 +345,15 @@ class FeishuWorkflowService:
                 reply_preview,
                 analysis=None,
                 episode_id=active_episode_id,
-                artifacts=[
+                artifacts=self._append_artifacts(
+                    [plan_artifact] if plan_artifact else None,
                     {
                         "artifact_type": "slides_package",
                         "provider": "llm",
                         "title": str(package.get("theme") or "演示稿"),
                         "preview": package,
-                    }
-                ],
+                    },
+                ),
             )
             if active_episode_id is not None and self._should_close_episode(result, reply_preview):
                 self.memory_service.close_active_episode(message.session_id, title="slides")
@@ -356,15 +381,16 @@ class FeishuWorkflowService:
                 reply_preview,
                 analysis=analysis,
                 episode_id=active_episode_id,
-                artifacts=[
+                artifacts=self._append_artifacts(
+                    [plan_artifact] if plan_artifact else None,
                     {
                         "artifact_type": "document",
                         "provider": "feishu_doc" if any("文档链接" in line for line in sync_lines) else "local",
                         "title": str(package.get("title") or "协同文档"),
                         "url": self._extract_first_url(sync_lines),
                         "preview": package,
-                    }
-                ],
+                    },
+                ),
             )
             if active_episode_id is not None and self._should_close_episode(result, reply_preview):
                 self.memory_service.close_active_episode(message.session_id, title=str(package.get("title") or "doc"))
@@ -376,7 +402,13 @@ class FeishuWorkflowService:
                 tasks = self.memory_service.get_current_tasks(message.session_id)
                 payload = self.memory_service.load_memory_payload(message.session_id)
                 status_answer = self._format_status_reply(message.text, tasks, payload)
-            return self._deliver_reply(message, "status", status_answer, analysis=None)
+            return self._deliver_reply(
+                message,
+                "status",
+                status_answer,
+                analysis=None,
+                artifacts=[plan_artifact] if plan_artifact else None,
+            )
 
         if intent in {"summary", "tasks", "risks"}:
             source_text = self.memory_service.build_discussion_block(
@@ -399,12 +431,322 @@ class FeishuWorkflowService:
                 async_embed=True,
                 preserve_unmatched_previous=False,
             )
-            result = self._deliver_reply(message, intent, reply_preview, analysis=analysis, episode_id=active_episode_id)
+            result = self._deliver_reply(
+                message,
+                intent,
+                reply_preview,
+                analysis=analysis,
+                episode_id=active_episode_id,
+                artifacts=[plan_artifact] if plan_artifact else None,
+            )
             if active_episode_id is not None and self._should_close_episode(result, reply_preview):
                 self.memory_service.close_active_episode(message.session_id, title=analysis.summary)
             return result
 
-        return self._deliver_reply(message, "help", self._format_help_reply(reason), analysis=None)
+        return self._deliver_reply(
+            message,
+            "help",
+            self._format_help_reply(reason),
+            analysis=None,
+            artifacts=[plan_artifact] if plan_artifact else None,
+        )
+
+    def _extract_clarification_request(self, llm_result: dict) -> dict | None:
+        raw = llm_result.get("clarification")
+        if not isinstance(raw, dict) or not bool(raw.get("needed")):
+            return None
+
+        question = str(raw.get("question") or "").strip()
+        if not question:
+            return None
+
+        options = (
+            [str(item).strip() for item in raw.get("options", []) if str(item).strip()][:4]
+            if isinstance(raw.get("options"), list)
+            else []
+        )
+        reason = str(raw.get("reason") or "").strip()
+        blocking = raw.get("blocking")
+        return {
+            "question": question,
+            "reason": reason,
+            "options": options,
+            "blocking": True if blocking is None else bool(blocking),
+        }
+
+    def _build_plan_artifact(self, *, intent: str, reason: str, llm_result: dict) -> dict | None:
+        next_actions = (
+            [str(item).strip() for item in llm_result.get("next_actions", []) if str(item).strip()]
+            if isinstance(llm_result.get("next_actions"), list)
+            else []
+        )
+        clarification = self._extract_clarification_request(llm_result)
+        preview = {
+            "intent": intent or "unknown",
+            "reason": reason,
+            "next_actions": next_actions[:4],
+            "task_operation_count": len(llm_result.get("task_operations", []))
+            if isinstance(llm_result.get("task_operations"), list)
+            else 0,
+            "risk_count": len(llm_result.get("risks", []))
+            if isinstance(llm_result.get("risks"), list)
+            else 0,
+        }
+        if clarification:
+            preview["clarification"] = clarification
+
+        if not any(preview.values()):
+            return None
+
+        return {
+            "artifact_type": "agent_plan",
+            "provider": "llm",
+            "title": "Agent 执行规划",
+            "status": "needs_confirmation" if clarification and clarification["blocking"] else "ready",
+            "preview": preview,
+        }
+
+    def _append_artifacts(self, base: list[dict] | None, *extra: dict | None) -> list[dict]:
+        combined = list(base or [])
+        for item in extra:
+            if item:
+                combined.append(item)
+        return combined
+
+    def _pause_for_clarification(
+        self,
+        message: FeishuMessageContext,
+        *,
+        intent: str,
+        clarification: dict,
+        active_episode_id: int | None,
+        task_run_id: str | None,
+        workspace_context: str | None = None,
+        artifacts: list[dict] | None = None,
+    ) -> dict:
+        confirmation_id: str | None = None
+        if task_run_id:
+            self.task_run_service.update_task_run(
+                task_run_id,
+                stage="awaiting_user_confirmation",
+                status="waiting_confirmation",
+            )
+            self.task_run_service.upsert_step(
+                task_run_id,
+                step_key="user_confirmation",
+                title="等待用户确认",
+                step_type="confirmation",
+                status="pending",
+                output_payload={
+                    "question": clarification["question"],
+                    "reason": clarification["reason"],
+                    "options": clarification["options"],
+                },
+            )
+            confirmation = self.task_run_service.create_confirmation(
+                task_run_id,
+                prompt=clarification["question"],
+                options=clarification["options"],
+            )
+            confirmation_id = confirmation.confirmation_id
+            self.task_run_service.merge_task_run_metadata(
+                task_run_id,
+                {
+                    "resume_after_confirmation": {
+                        "intent": intent,
+                        "instruction": message.text,
+                        "workspace_context": workspace_context or "",
+                        "active_episode_id": active_episode_id,
+                        "question": clarification["question"],
+                        "reason": clarification["reason"],
+                        "options": clarification["options"],
+                        "confirmation_id": confirmation_id,
+                    }
+                },
+            )
+
+        reply_preview = self._format_clarification_reply(intent=intent, clarification=clarification)
+        result = self._deliver_reply(
+            message,
+            intent or "help",
+            reply_preview,
+            analysis=None,
+            episode_id=active_episode_id,
+            artifacts=artifacts,
+        )
+        result["pending_confirmation"] = True
+        if confirmation_id:
+            result["confirmation_id"] = confirmation_id
+        result["response_step_status"] = "pending"
+        result["task_run_status"] = "waiting_confirmation"
+        result["task_run_stage"] = "awaiting_user_confirmation"
+        return result
+
+    def _format_clarification_reply(self, *, intent: str, clarification: dict) -> str:
+        label = {
+            "doc": "文档",
+            "slides": "演示稿",
+            "summary": "讨论总结",
+            "tasks": "任务整理",
+            "risks": "风险判断",
+            "status": "状态回答",
+        }.get(intent, "协作处理")
+        lines = [f"【Agent 需要再确认一下】({label})", clarification["question"]]
+        reason = str(clarification.get("reason") or "").strip()
+        if reason:
+            lines.append(f"原因：{reason}")
+        options = clarification.get("options") or []
+        if options:
+            lines.append("可选方案：")
+            for index, option in enumerate(options, start=1):
+                lines.append(f"{index}. {option}")
+        lines.append("你可以在工作台里直接确认，或继续回复我更具体的要求。")
+        return "\n".join(lines)
+
+    def resume_task_run_after_confirmation(
+        self,
+        task_run_id: str,
+        *,
+        confirmation_id: str,
+        answer_value: str,
+        answered_by: str = "user",
+    ) -> dict | None:
+        detail = self.task_run_service.get_task_run(task_run_id)
+        if detail is None:
+            return None
+
+        metadata = self.task_run_service.get_task_run_metadata(task_run_id)
+        resume_payload = metadata.get("resume_after_confirmation")
+        if not isinstance(resume_payload, dict):
+            return None
+
+        expected_confirmation_id = str(resume_payload.get("confirmation_id") or "").strip()
+        if expected_confirmation_id and expected_confirmation_id != confirmation_id:
+            return None
+
+        instruction = str(resume_payload.get("instruction") or "").strip()
+        workspace_context = str(resume_payload.get("workspace_context") or "")
+        active_episode_id = resume_payload.get("active_episode_id")
+        if not isinstance(active_episode_id, int):
+            active_episode_id = None
+
+        resumed_instruction = self._build_confirmation_resume_instruction(instruction, answer_value)
+        self.task_run_service.upsert_step(
+            task_run_id,
+            step_key="user_confirmation",
+            title="等待用户确认",
+            step_type="confirmation",
+            status="done",
+            output_payload={
+                "question": resume_payload.get("question"),
+                "reason": resume_payload.get("reason"),
+                "options": resume_payload.get("options"),
+                "answer_value": answer_value,
+                "answered_by": answered_by,
+            },
+        )
+        self.task_run_service.update_task_run(task_run_id, stage="confirmation_replanning", status="running")
+
+        metadata.pop("resume_after_confirmation", None)
+        metadata["last_confirmation"] = {
+            "confirmation_id": confirmation_id,
+            "answer_value": answer_value,
+            "answered_by": answered_by,
+        }
+        self.task_run_service.update_task_run(task_run_id, metadata=metadata)
+
+        if not self.llm_service.is_configured():
+            result = {
+                "session_id": detail.session_id,
+                "episode_id": active_episode_id,
+                "mode": str(resume_payload.get("intent") or "status"),
+                "analysis": None,
+                "reply_preview": f"已记录确认：{answer_value}。当前未配置可继续自动执行的 LLM，请稍后重新发起一次请求。",
+                "reply_sent": False,
+                "reply_error": None,
+                "artifacts": [],
+            }
+            self._persist_task_run_result(task_run_id, message_text=resumed_instruction, result=result, session_id=detail.session_id)
+            return result
+
+        llm_result = self.llm_service.resolve_workspace_request(workspace_context, resumed_instruction)
+        synthetic_message = SimpleNamespace(
+            session_id=detail.session_id,
+            message_id=detail.trigger_message_id or confirmation_id,
+            text=resumed_instruction,
+            chat_id=None,
+        )
+        result = self._execute_llm_request(
+            synthetic_message,
+            llm_result,
+            workspace_context,
+            active_episode_id,
+            task_run_id=task_run_id,
+        )
+        self._persist_task_run_result(task_run_id, message_text=resumed_instruction, result=result, session_id=detail.session_id)
+        return result
+
+    def _build_confirmation_resume_instruction(self, instruction: str, answer_value: str) -> str:
+        base = instruction.strip() or "继续刚才的任务"
+        return f"{base}\n\n[用户刚刚确认]\n{answer_value}"
+
+    def _persist_task_run_result(self, task_run_id: str, *, message_text: str, result: dict, session_id: str) -> None:
+        if result["reply_preview"]:
+            self.memory_service.save_assistant_message(
+                session_id=session_id,
+                content=result["reply_preview"],
+                episode_id=result.get("episode_id"),
+                embed=False,
+            )
+        for artifact in result.get("artifacts", []):
+            self.task_run_service.create_artifact(
+                task_run_id,
+                artifact_type=str(artifact.get("artifact_type") or "note"),
+                title=str(artifact.get("title") or "协作产物"),
+                provider=str(artifact.get("provider") or "local"),
+                status=str(artifact.get("status") or "ready"),
+                url=str(artifact.get("url") or "").strip() or None,
+                preview=artifact.get("preview") if isinstance(artifact.get("preview"), dict) else None,
+            )
+        summary_text = (
+            result["analysis"].summary
+            if result.get("analysis") is not None
+            else self._condense_text(result.get("reply_preview"))
+        )
+        response_step_status = str(result.get("response_step_status") or "done")
+        final_stage = str(result.get("task_run_stage") or "delivered")
+        final_status = str(result.get("task_run_status") or "completed")
+        self.task_run_service.upsert_step(
+            task_run_id,
+            step_key="response_generated",
+            title="生成处理结果",
+            step_type="workflow",
+            status=response_step_status,
+            output_payload={
+                "mode": result["mode"],
+                "reply_preview": result["reply_preview"],
+                "artifact_count": len(result.get("artifacts", [])),
+            },
+        )
+        if result.get("artifacts"):
+            self.task_run_service.upsert_step(
+                task_run_id,
+                step_key="artifact_persisted",
+                title="记录协作产物",
+                step_type="artifact",
+                status="done",
+                output_payload={"artifact_count": len(result["artifacts"])},
+            )
+        self.task_run_service.update_task_run(
+            task_run_id,
+            intent=result["mode"],
+            title=self._task_run_title(message_text, result["mode"]),
+            stage=final_stage,
+            status=final_status,
+            latest_summary=summary_text,
+            latest_reply_preview=result.get("reply_preview"),
+            latest_error=result.get("reply_error"),
+        )
 
     def _build_analysis_from_llm(
         self,

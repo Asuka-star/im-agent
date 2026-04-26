@@ -1,11 +1,16 @@
+import logging
+
 from fastapi import APIRouter, HTTPException, Query
 
 from app.schemas.task_run import ConfirmationAnswerRequest, ConfirmationAnswerResponse, TaskRunDetail, TaskRunSummary
+from app.services.feishu_workflow import FeishuWorkflowService
 from app.services.task_run_service import TaskRunService
 
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 task_run_service = TaskRunService()
+workflow_service = FeishuWorkflowService()
 
 
 @router.get("/", response_model=list[TaskRunSummary])
@@ -35,4 +40,13 @@ async def confirm_task_run(task_run_id: str, payload: ConfirmationAnswerRequest)
     )
     if record is None:
         raise HTTPException(status_code=404, detail="Confirmation request not found")
+    try:
+        workflow_service.resume_task_run_after_confirmation(
+            task_run_id,
+            confirmation_id=payload.confirmation_id,
+            answer_value=payload.answer_value,
+            answered_by=payload.answered_by,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to resume task run after confirmation: %s", exc)
     return record

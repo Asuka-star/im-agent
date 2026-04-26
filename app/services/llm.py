@@ -231,6 +231,13 @@ Schema:
 {{
   "intent": "summary|tasks|risks|status|slides|doc|help|unknown",
   "reason": "short reason in Simplified Chinese",
+  "clarification": {{
+    "needed": false,
+    "question": "question to ask the user when clarification is needed",
+    "reason": "why clarification is needed",
+    "options": ["option 1", "option 2"],
+    "blocking": true
+  }},
   "summary": "overall summary in Simplified Chinese",
   "task_operations": [
     {{
@@ -290,6 +297,9 @@ Rules:
 - Today is {today} in Asia/Shanghai.
 - Prefer understanding the whole discussion instead of keyword matching.
 - The current discussion block is the primary source of truth for this round. Treat older summaries and task snapshots as background state, not as instructions to rewrite everything.
+- Use clarification.needed=true when key execution facts are missing or there are multiple materially different paths that require the user's choice first.
+- Typical clarification cases include: the target output format is unclear, the user refers to an ambiguous previous decision, or critical owners / deadlines / audience are missing for a deliverable.
+- When clarification.needed=true, still choose the most likely intent, write a short clarification.question in Simplified Chinese, provide 2 to 4 concise options when possible, and set clarification.blocking=true if execution should pause before continuing.
 - Recent discussion lines may include structured fields like "发言人" and "提及". Treat "提及" as a strong assignee hint in multi-person collaboration.
 - Distinguish clearly between the speaker, the mentioned teammate, and the final owner of a task.
 - When one teammate assigns work to an @mentioned teammate, prefer the mentioned teammate as the task owner unless the discussion clearly says otherwise.

@@ -147,6 +147,21 @@ class TaskRunService:
         self._publish_task_run_event(task_run_id, event_type="task_run.updated")
         return summary
 
+    def get_task_run_metadata(self, task_run_id: str) -> dict:
+        detail = self.get_task_run(task_run_id)
+        if detail is None or not detail.metadata_json:
+            return {}
+        try:
+            parsed = json.loads(detail.metadata_json)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
+    def merge_task_run_metadata(self, task_run_id: str, patch: dict) -> TaskRunSummary | None:
+        current = self.get_task_run_metadata(task_run_id)
+        current.update(patch)
+        return self.update_task_run(task_run_id, metadata=current)
+
     def upsert_step(
         self,
         task_run_id: str,
