@@ -113,3 +113,77 @@ class MemoryChunk(Base):
     metadata_json = Column(Text, nullable=True)
     embedding = Column(Vector(settings.embedding_dimensions), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class TaskRun(Base):
+    __tablename__ = "task_runs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    task_run_id = Column(String(64), unique=True, nullable=False, index=True)
+    session_id = Column(String(128), nullable=False, index=True)
+    source_type = Column(String(32), nullable=False, default="group", index=True)
+    source_ref = Column(String(128), nullable=True, index=True)
+    trigger_message_id = Column(String(128), nullable=True, index=True)
+    intent = Column(String(64), nullable=True, index=True)
+    title = Column(String(255), nullable=False)
+    stage = Column(String(64), nullable=False, default="queued", index=True)
+    status = Column(String(64), nullable=False, default="queued", index=True)
+    latest_summary = Column(Text, nullable=True)
+    latest_reply_preview = Column(Text, nullable=True)
+    latest_error = Column(Text, nullable=True)
+    metadata_json = Column(Text, nullable=True)
+    created_by = Column(String(128), nullable=True, index=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class TaskRunStep(Base):
+    __tablename__ = "task_run_steps"
+
+    id = Column(Integer, primary_key=True, index=True)
+    task_run_id = Column(String(64), nullable=False, index=True)
+    step_key = Column(String(64), nullable=False, index=True)
+    title = Column(String(255), nullable=False)
+    step_type = Column(String(64), nullable=False, default="system", index=True)
+    status = Column(String(64), nullable=False, default="pending", index=True)
+    input_json = Column(Text, nullable=True)
+    output_json = Column(Text, nullable=True)
+    error = Column(Text, nullable=True)
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    finished_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class Artifact(Base):
+    __tablename__ = "artifacts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    artifact_id = Column(String(64), unique=True, nullable=False, index=True)
+    task_run_id = Column(String(64), nullable=False, index=True)
+    artifact_type = Column(String(64), nullable=False, index=True)
+    provider = Column(String(64), nullable=False, default="local", index=True)
+    title = Column(String(255), nullable=False)
+    status = Column(String(64), nullable=False, default="ready", index=True)
+    url = Column(Text, nullable=True)
+    version = Column(Integer, nullable=False, default=1)
+    preview_json = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class ConfirmationRequest(Base):
+    __tablename__ = "confirmation_requests"
+
+    id = Column(Integer, primary_key=True, index=True)
+    confirmation_id = Column(String(64), unique=True, nullable=False, index=True)
+    task_run_id = Column(String(64), nullable=False, index=True)
+    prompt = Column(Text, nullable=False)
+    options_json = Column(Text, nullable=True)
+    status = Column(String(64), nullable=False, default="pending", index=True)
+    answer_value = Column(Text, nullable=True)
+    answered_by = Column(String(128), nullable=True)
+    answered_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)

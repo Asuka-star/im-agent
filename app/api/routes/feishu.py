@@ -76,6 +76,7 @@ async def receive_events(request: Request) -> dict:
         "msg": "ok",
         "data": {
             "session_id": result["session_id"],
+            "task_run_id": result.get("task_run_id"),
             "mode": result["mode"],
             "reply_preview": result["reply_preview"],
             "reply_sent": result["reply_sent"],

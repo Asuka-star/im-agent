@@ -1,4 +1,5 @@
 import logging
+import re
 import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -15,6 +16,7 @@ from app.services.due_date import normalize_task_dates
 from app.services.interaction import InteractionService
 from app.services.llm import LLMService
 from app.services.memory_service import MemoryService
+from app.services.task_run_service import TaskRunService
 from app.services.text_analysis import (
     apply_discussion_updates,
     build_next_actions,
@@ -36,6 +38,7 @@ class FeishuWorkflowService:
         self.doc_api = FeishuDocAPI()
         self.user_api = FeishuUserAPI()
         self.memory_service = MemoryService()
+        self.task_run_service = TaskRunService()
         self.interaction_service = InteractionService()
         self.llm_service = LLMService()
 
@@ -71,7 +74,52 @@ class FeishuWorkflowService:
             )
             return self._empty_result(message.session_id, "buffer")
 
-        result = self._handle_mentioned_request(message)
+        task_run = self.task_run_service.create_task_run(
+            session_id=message.session_id,
+            title=self._task_run_title(message.text),
+            source_type=message.chat_type or "unknown",
+            source_ref=message.chat_id,
+            trigger_message_id=message.message_id,
+            created_by=message.sender_id,
+            metadata={
+                "event_id": message.event_id,
+                "chat_id": message.chat_id,
+                "is_mentioned": message.is_mentioned,
+            },
+        )
+        self.task_run_service.upsert_step(
+            task_run.task_run_id,
+            step_key="request_received",
+            title="接收用户请求",
+            step_type="input",
+            status="done",
+            input_payload={
+                "message_id": message.message_id,
+                "text": message.text,
+                "chat_type": message.chat_type,
+            },
+        )
+        self.task_run_service.update_task_run(task_run.task_run_id, status="running", stage="building_context")
+
+        try:
+            result = self._handle_mentioned_request(message, task_run_id=task_run.task_run_id)
+        except Exception as exc:  # noqa: BLE001
+            self.task_run_service.update_task_run(
+                task_run.task_run_id,
+                status="failed",
+                stage="failed",
+                latest_error=str(exc),
+            )
+            self.task_run_service.upsert_step(
+                task_run.task_run_id,
+                step_key="response_generated",
+                title="生成处理结果",
+                step_type="workflow",
+                status="failed",
+                error=str(exc),
+            )
+            raise
+
         if result["reply_preview"]:
             self.memory_service.save_assistant_message(
                 session_id=message.session_id,
@@ -79,6 +127,53 @@ class FeishuWorkflowService:
                 episode_id=result.get("episode_id"),
                 embed=False,
             )
+        for artifact in result.get("artifacts", []):
+            self.task_run_service.create_artifact(
+                task_run.task_run_id,
+                artifact_type=str(artifact.get("artifact_type") or "note"),
+                title=str(artifact.get("title") or "协作产物"),
+                provider=str(artifact.get("provider") or "local"),
+                status=str(artifact.get("status") or "ready"),
+                url=str(artifact.get("url") or "").strip() or None,
+                preview=artifact.get("preview") if isinstance(artifact.get("preview"), dict) else None,
+            )
+        summary_text = (
+            result["analysis"].summary
+            if result.get("analysis") is not None
+            else self._condense_text(result.get("reply_preview"))
+        )
+        self.task_run_service.upsert_step(
+            task_run.task_run_id,
+            step_key="response_generated",
+            title="生成处理结果",
+            step_type="workflow",
+            status="done",
+            output_payload={
+                "mode": result["mode"],
+                "reply_preview": result["reply_preview"],
+                "artifact_count": len(result.get("artifacts", [])),
+            },
+        )
+        if result.get("artifacts"):
+            self.task_run_service.upsert_step(
+                task_run.task_run_id,
+                step_key="artifact_persisted",
+                title="记录协作产物",
+                step_type="artifact",
+                status="done",
+                output_payload={"artifact_count": len(result["artifacts"])},
+            )
+        self.task_run_service.update_task_run(
+            task_run.task_run_id,
+            intent=result["mode"],
+            title=self._task_run_title(message.text, result["mode"]),
+            stage="delivered",
+            status="completed",
+            latest_summary=summary_text,
+            latest_reply_preview=result.get("reply_preview"),
+            latest_error=result.get("reply_error"),
+        )
+        result["task_run_id"] = task_run.task_run_id
         logger.info(
             "Workflow stage completed: message_id=%s stage=workflow_done total_elapsed_ms=%.1f",
             message.message_id,
@@ -110,7 +205,7 @@ class FeishuWorkflowService:
             union_id=message.sender_union_id,
         )
 
-    def _handle_mentioned_request(self, message: FeishuMessageContext) -> dict:
+    def _handle_mentioned_request(self, message: FeishuMessageContext, *, task_run_id: str | None = None) -> dict:
         active_episode = self.memory_service.get_active_episode(message.session_id)
         active_episode_id = active_episode.id if active_episode else None
         base_workspace_context = self.memory_service.build_workspace_context(
@@ -122,6 +217,15 @@ class FeishuWorkflowService:
             episode_id=active_episode_id,
         )
         workspace_context = base_workspace_context
+        if task_run_id:
+            self.task_run_service.upsert_step(
+                task_run_id,
+                step_key="workspace_context",
+                title="构建协作上下文",
+                step_type="context",
+                status="done",
+                output_payload={"context_length": len(base_workspace_context)},
+            )
 
         if self.llm_service.is_configured():
             try:
@@ -135,17 +239,50 @@ class FeishuWorkflowService:
                         include_semantic_search=True,
                         episode_id=active_episode_id,
                     )
+                    if task_run_id:
+                        self.task_run_service.update_task_run(task_run_id, stage="semantic_recall")
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Memory gate failed, continuing without semantic recall: %s", exc)
 
         if self.llm_service.is_configured():
             try:
+                if task_run_id:
+                    self.task_run_service.update_task_run(task_run_id, stage="intent_resolution")
                 llm_result = self.llm_service.resolve_workspace_request(workspace_context, message.text)
-                return self._execute_llm_request(message, llm_result, workspace_context, active_episode_id)
+                if task_run_id:
+                    self.task_run_service.upsert_step(
+                        task_run_id,
+                        step_key="intent_resolution",
+                        title="识别任务意图",
+                        step_type="intent",
+                        status="done",
+                        output_payload={
+                            "intent": llm_result.get("intent"),
+                            "reason": llm_result.get("reason"),
+                        },
+                    )
+                return self._execute_llm_request(
+                    message,
+                    llm_result,
+                    workspace_context,
+                    active_episode_id,
+                    task_run_id=task_run_id,
+                )
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Unified workspace request failed, falling back: %s", exc)
+                if task_run_id:
+                    self.task_run_service.upsert_step(
+                        task_run_id,
+                        step_key="intent_resolution",
+                        title="识别任务意图",
+                        step_type="intent",
+                        status="failed",
+                        error=str(exc),
+                    )
 
-        return self._handle_fallback_request(message, active_episode_id)
+        if task_run_id:
+            self.task_run_service.update_task_run(task_run_id, stage="fallback")
+        return self._handle_fallback_request(message, active_episode_id, task_run_id=task_run_id)
 
     def _execute_llm_request(
         self,
@@ -153,9 +290,18 @@ class FeishuWorkflowService:
         llm_result: dict,
         workspace_context: str,
         active_episode_id: int | None,
+        *,
+        task_run_id: str | None = None,
     ) -> dict:
         intent = str(llm_result.get("intent") or "").strip().lower()
         reason = str(llm_result.get("reason") or "").strip()
+        if task_run_id:
+            self.task_run_service.update_task_run(
+                task_run_id,
+                intent=intent or None,
+                title=self._task_run_title(message.text, intent or None),
+                stage=f"{intent or 'help'}_processing",
+            )
 
         if intent in {"help", "unknown", ""}:
             return self._deliver_reply(message, "help", self._format_help_reply(reason), analysis=None)
@@ -169,7 +315,21 @@ class FeishuWorkflowService:
                     logger.warning("Slide package fallback generation failed: %s", exc)
                     package = self._build_fallback_presentation_package(message.session_id)
             reply_preview = self._format_presentation_reply(package)
-            result = self._deliver_reply(message, "slides", reply_preview, analysis=None, episode_id=active_episode_id)
+            result = self._deliver_reply(
+                message,
+                "slides",
+                reply_preview,
+                analysis=None,
+                episode_id=active_episode_id,
+                artifacts=[
+                    {
+                        "artifact_type": "slides_package",
+                        "provider": "llm",
+                        "title": str(package.get("theme") or "演示稿"),
+                        "preview": package,
+                    }
+                ],
+            )
             if active_episode_id is not None and self._should_close_episode(result, reply_preview):
                 self.memory_service.close_active_episode(message.session_id, title="slides")
             return result
@@ -190,7 +350,22 @@ class FeishuWorkflowService:
             )
             sync_lines = self._sync_package_to_doc(package)
             reply_preview = self._format_doc_reply(package, sync_lines)
-            result = self._deliver_reply(message, "doc", reply_preview, analysis=analysis, episode_id=active_episode_id)
+            result = self._deliver_reply(
+                message,
+                "doc",
+                reply_preview,
+                analysis=analysis,
+                episode_id=active_episode_id,
+                artifacts=[
+                    {
+                        "artifact_type": "document",
+                        "provider": "feishu_doc" if any("文档链接" in line for line in sync_lines) else "local",
+                        "title": str(package.get("title") or "协同文档"),
+                        "url": self._extract_first_url(sync_lines),
+                        "preview": package,
+                    }
+                ],
+            )
             if active_episode_id is not None and self._should_close_episode(result, reply_preview):
                 self.memory_service.close_active_episode(message.session_id, title=str(package.get("title") or "doc"))
             return result
@@ -437,16 +612,29 @@ class FeishuWorkflowService:
 
         return None
 
-    def _handle_fallback_request(self, message: FeishuMessageContext, active_episode_id: int | None) -> dict:
+    def _handle_fallback_request(
+        self,
+        message: FeishuMessageContext,
+        active_episode_id: int | None,
+        *,
+        task_run_id: str | None = None,
+    ) -> dict:
         decision = self.interaction_service.decide(message.text)
+        if task_run_id:
+            self.task_run_service.update_task_run(
+                task_run_id,
+                intent=decision.mode,
+                title=self._task_run_title(message.text, decision.mode),
+                stage=f"{decision.mode}_fallback",
+            )
 
         if decision.mode == "help":
             return self._deliver_reply(message, "help", self._format_help_reply(), analysis=None)
 
         if decision.mode == "slides":
-            return self._handle_fallback_slides(message, active_episode_id)
+            return self._handle_fallback_slides(message, active_episode_id, task_run_id=task_run_id)
         if decision.mode == "doc":
-            return self._handle_fallback_doc(message, active_episode_id)
+            return self._handle_fallback_doc(message, active_episode_id, task_run_id=task_run_id)
 
         if decision.mode == "status":
             tasks = self.memory_service.get_current_tasks(message.session_id)
@@ -478,7 +666,13 @@ class FeishuWorkflowService:
             self.memory_service.close_active_episode(message.session_id, title=analysis.summary)
         return result
 
-    def _handle_fallback_slides(self, message: FeishuMessageContext, active_episode_id: int | None) -> dict:
+    def _handle_fallback_slides(
+        self,
+        message: FeishuMessageContext,
+        active_episode_id: int | None,
+        *,
+        task_run_id: str | None = None,
+    ) -> dict:
         workspace_context = self.memory_service.build_workspace_context(
             message.session_id,
             include_pending=True,
@@ -497,12 +691,32 @@ class FeishuWorkflowService:
             package = self._build_fallback_presentation_package(message.session_id)
 
         reply_preview = self._format_presentation_reply(package)
-        result = self._deliver_reply(message, "slides", reply_preview, analysis=None, episode_id=active_episode_id)
+        result = self._deliver_reply(
+            message,
+            "slides",
+            reply_preview,
+            analysis=None,
+            episode_id=active_episode_id,
+            artifacts=[
+                {
+                    "artifact_type": "slides_package",
+                    "provider": "fallback",
+                    "title": str(package.get("theme") or "演示稿"),
+                    "preview": package,
+                }
+            ],
+        )
         if active_episode_id is not None and self._should_close_episode(result, reply_preview):
             self.memory_service.close_active_episode(message.session_id, title="slides")
         return result
 
-    def _handle_fallback_doc(self, message: FeishuMessageContext, active_episode_id: int | None) -> dict:
+    def _handle_fallback_doc(
+        self,
+        message: FeishuMessageContext,
+        active_episode_id: int | None,
+        *,
+        task_run_id: str | None = None,
+    ) -> dict:
         workspace_context = self.memory_service.build_workspace_context(
             message.session_id,
             include_pending=True,
@@ -521,7 +735,22 @@ class FeishuWorkflowService:
         )
         sync_lines = self._sync_package_to_doc(package)
         reply_preview = self._format_doc_reply(package, sync_lines)
-        result = self._deliver_reply(message, "doc", reply_preview, analysis=analysis, episode_id=active_episode_id)
+        result = self._deliver_reply(
+            message,
+            "doc",
+            reply_preview,
+            analysis=analysis,
+            episode_id=active_episode_id,
+            artifacts=[
+                {
+                    "artifact_type": "document",
+                    "provider": "feishu_doc" if any("文档链接" in line for line in sync_lines) else "fallback",
+                    "title": str(package.get("title") or "协同文档"),
+                    "url": self._extract_first_url(sync_lines),
+                    "preview": package,
+                }
+            ],
+        )
         if active_episode_id is not None and self._should_close_episode(result, reply_preview):
             self.memory_service.close_active_episode(message.session_id, title=str(package.get("title") or "doc"))
         return result
@@ -780,6 +1009,7 @@ class FeishuWorkflowService:
             "reply_sent": False,
             "reply_error": None,
             "analysis": None,
+            "artifacts": [],
         }
 
     def _deliver_reply(
@@ -790,6 +1020,7 @@ class FeishuWorkflowService:
         *,
         analysis: AnalyzeResponse | None,
         episode_id: int | None = None,
+        artifacts: list[dict] | None = None,
     ) -> dict:
         reply_sent = False
         reply_error: str | None = None
@@ -814,7 +1045,30 @@ class FeishuWorkflowService:
             "reply_preview": reply_preview,
             "reply_sent": reply_sent,
             "reply_error": reply_error,
+            "artifacts": artifacts or [],
         }
+
+    def _task_run_title(self, text: str, mode: str | None = None) -> str:
+        candidate = " ".join((text or "").split()).strip()
+        if candidate:
+            candidate = candidate[:40]
+        else:
+            candidate = "协作任务"
+        if mode:
+            return f"{candidate} [{mode}]"
+        return candidate
+
+    def _condense_text(self, value: str | None) -> str | None:
+        candidate = " ".join((value or "").split()).strip()
+        return candidate[:200] if candidate else None
+
+    def _extract_first_url(self, lines: list[str]) -> str | None:
+        pattern = re.compile(r"https?://\S+")
+        for line in lines:
+            match = pattern.search(line)
+            if match:
+                return match.group(0)
+        return None
 
     def _should_close_episode(self, result: dict, reply_preview: str | None) -> bool:
         if not reply_preview:
