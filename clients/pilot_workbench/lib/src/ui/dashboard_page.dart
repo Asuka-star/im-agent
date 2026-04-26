@@ -1,4 +1,7 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:pilot_workbench/src/config/app_config.dart';
 import 'package:pilot_workbench/src/models/task_run_models.dart';
 import 'package:pilot_workbench/src/state/workbench_controller.dart';
@@ -573,6 +576,7 @@ class _ArtifactTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final preview = artifact.preview;
+    final previewBody = _buildArtifactPreview(context, artifact, preview);
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(16),
@@ -604,34 +608,496 @@ class _ArtifactTile extends StatelessWidget {
                   color: const Color(0xFF72808A),
                 ),
           ),
+          const SizedBox(height: 12),
+          previewBody,
           if ((artifact.url ?? '').isNotEmpty) ...[
-            const SizedBox(height: 10),
-            SelectableText(
-              artifact.url!,
-              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                    color: const Color(0xFF116A7B),
-                  ),
+            const SizedBox(height: 12),
+            _ActionStrip(
+              actions: [
+                _InlineAction(
+                  icon: Icons.copy_rounded,
+                  label: '复制链接',
+                  onPressed: () async {
+                    await Clipboard.setData(ClipboardData(text: artifact.url!));
+                    if (context.mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('产物链接已复制')),
+                      );
+                    }
+                  },
+                ),
+              ],
             ),
           ],
           if (preview != null && preview.isNotEmpty) ...[
             const SizedBox(height: 12),
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: const Color(0xFFF8FBFC),
-                borderRadius: BorderRadius.circular(16),
-              ),
-              child: Text(
-                preview.entries.take(4).map((entry) => '${entry.key}: ${entry.value}').join('\n'),
-                style: Theme.of(context).textTheme.bodyMedium?.copyWith(height: 1.45),
-              ),
+            _ActionStrip(
+              actions: [
+                _InlineAction(
+                  icon: Icons.unfold_more_rounded,
+                  label: '查看原始预览',
+                  onPressed: () => _showRawPreview(context, artifact, preview),
+                ),
+                _InlineAction(
+                  icon: Icons.copy_all_rounded,
+                  label: '复制预览 JSON',
+                  onPressed: () async {
+                    await Clipboard.setData(
+                      ClipboardData(text: const JsonEncoder.withIndent('  ').convert(preview)),
+                    );
+                    if (context.mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('预览 JSON 已复制')),
+                      );
+                    }
+                  },
+                ),
+              ],
             ),
           ],
         ],
       ),
     );
   }
+
+  Widget _buildArtifactPreview(
+    BuildContext context,
+    ArtifactRecord artifact,
+    Map<String, dynamic>? preview,
+  ) {
+    if (preview == null || preview.isEmpty) {
+      if ((artifact.url ?? '').isNotEmpty) {
+        return SelectableText(
+          artifact.url!,
+          style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                color: const Color(0xFF116A7B),
+              ),
+        );
+      }
+      return Text(
+        '当前没有可预览的结构化内容。',
+        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+              color: const Color(0xFF72808A),
+            ),
+      );
+    }
+
+    switch (artifact.artifactType) {
+      case 'document':
+        return _DocumentPreview(preview: preview, url: artifact.url);
+      case 'slides_package':
+        return _SlidesPreview(preview: preview);
+      default:
+        return _GenericPreview(preview: preview);
+    }
+  }
+
+  void _showRawPreview(
+    BuildContext context,
+    ArtifactRecord artifact,
+    Map<String, dynamic> preview,
+  ) {
+    final prettyJson = const JsonEncoder.withIndent('  ').convert(preview);
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFFFFFCF6),
+      builder: (context) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(20, 18, 20, 20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        '${artifact.title} · 原始预览',
+                        style: Theme.of(context).textTheme.titleLarge,
+                      ),
+                    ),
+                    IconButton(
+                      onPressed: () => Navigator.of(context).pop(),
+                      icon: const Icon(Icons.close_rounded),
+                    ),
+                  ],
+                ),
+                Flexible(
+                  child: Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFF7F8FA),
+                      borderRadius: BorderRadius.circular(18),
+                    ),
+                    child: SingleChildScrollView(
+                      child: SelectableText(
+                        prettyJson,
+                        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                              fontFamily: 'Consolas',
+                              height: 1.5,
+                            ),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _DocumentPreview extends StatelessWidget {
+  const _DocumentPreview({
+    required this.preview,
+    required this.url,
+  });
+
+  final Map<String, dynamic> preview;
+  final String? url;
+
+  @override
+  Widget build(BuildContext context) {
+    final sections = (preview['sections'] as List?)
+            ?.whereType<Map<String, dynamic>>()
+            .toList() ??
+        const <Map<String, dynamic>>[];
+    final title = (preview['title'] as String?)?.trim();
+    final statsAsOf = (preview['stats_as_of'] as String?)?.trim();
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF8FBFC),
+        borderRadius: BorderRadius.circular(18),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if ((title ?? '').isNotEmpty)
+            Text(
+              title!,
+              style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.w700,
+                  ),
+            ),
+          if ((statsAsOf ?? '').isNotEmpty) ...[
+            const SizedBox(height: 6),
+            Text(
+              '统计截至 $statsAsOf',
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: const Color(0xFF72808A),
+                  ),
+            ),
+          ],
+          if ((url ?? '').isNotEmpty) ...[
+            const SizedBox(height: 10),
+            SelectableText(
+              url!,
+              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                    color: const Color(0xFF116A7B),
+                  ),
+            ),
+          ],
+          if (sections.isNotEmpty) ...[
+            const SizedBox(height: 14),
+            ...sections.take(4).map(
+              (section) => Padding(
+                padding: const EdgeInsets.only(bottom: 10),
+                child: _DocSectionTile(section: section),
+              ),
+            ),
+            if (sections.length > 4)
+              Text(
+                '还有 ${sections.length - 4} 个章节未展开',
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: const Color(0xFF72808A),
+                    ),
+              ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _DocSectionTile extends StatelessWidget {
+  const _DocSectionTile({required this.section});
+
+  final Map<String, dynamic> section;
+
+  @override
+  Widget build(BuildContext context) {
+    final heading = (section['heading'] as String?)?.trim();
+    final paragraphs = (section['paragraphs'] as List?)
+            ?.map((item) => item.toString().trim())
+            .where((item) => item.isNotEmpty)
+            .toList() ??
+        const <String>[];
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: const Color(0xFFD9E3E8)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            (heading ?? '').isNotEmpty ? heading! : '未命名章节',
+            style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                  fontWeight: FontWeight.w700,
+                ),
+          ),
+          const SizedBox(height: 8),
+          ...paragraphs.take(2).map(
+            (paragraph) => Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: Text(
+                paragraph,
+                style: Theme.of(context).textTheme.bodyMedium?.copyWith(height: 1.45),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _SlidesPreview extends StatelessWidget {
+  const _SlidesPreview({required this.preview});
+
+  final Map<String, dynamic> preview;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = (preview['theme'] as String?)?.trim();
+    final audience = (preview['audience'] as String?)?.trim();
+    final slides = (preview['slides'] as List?)
+            ?.whereType<Map<String, dynamic>>()
+            .toList() ??
+        const <Map<String, dynamic>>[];
+    final emphasis = (preview['emphasis'] as List?)
+            ?.map((item) => item.toString().trim())
+            .where((item) => item.isNotEmpty)
+            .toList() ??
+        const <String>[];
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+          colors: [Color(0xFF213848), Color(0xFF305B6B)],
+        ),
+        borderRadius: BorderRadius.circular(18),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if ((theme ?? '').isNotEmpty)
+            Text(
+              theme!,
+              style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                    color: Colors.white,
+                  ),
+            ),
+          if ((audience ?? '').isNotEmpty) ...[
+            const SizedBox(height: 6),
+            Text(
+              '适用场景：$audience',
+              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                    color: Colors.white.withValues(alpha: 0.82),
+                  ),
+            ),
+          ],
+          if (slides.isNotEmpty) ...[
+            const SizedBox(height: 14),
+            SizedBox(
+              height: 182,
+              child: ListView.separated(
+                scrollDirection: Axis.horizontal,
+                itemCount: slides.length.clamp(0, 5),
+                separatorBuilder: (context, index) => const SizedBox(width: 10),
+                itemBuilder: (context, index) {
+                  return _SlideCard(
+                    index: index,
+                    slide: slides[index],
+                  );
+                },
+              ),
+            ),
+          ],
+          if (emphasis.isNotEmpty) ...[
+            const SizedBox(height: 14),
+            Text(
+              '演示重点',
+              style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w700,
+                  ),
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: emphasis
+                  .take(4)
+                  .map(
+                    (item) => Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                      decoration: BoxDecoration(
+                        color: Colors.white.withValues(alpha: 0.1),
+                        borderRadius: BorderRadius.circular(999),
+                      ),
+                      child: Text(
+                        item,
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                              color: Colors.white.withValues(alpha: 0.9),
+                            ),
+                      ),
+                    ),
+                  )
+                  .toList(),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _SlideCard extends StatelessWidget {
+  const _SlideCard({
+    required this.index,
+    required this.slide,
+  });
+
+  final int index;
+  final Map<String, dynamic> slide;
+
+  @override
+  Widget build(BuildContext context) {
+    final title = (slide['title'] as String?)?.trim();
+    final bullets = (slide['bullets'] as List?)
+            ?.map((item) => item.toString().trim())
+            .where((item) => item.isNotEmpty)
+            .toList() ??
+        const <String>[];
+
+    return Container(
+      width: 220,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(18),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'P${index + 1}',
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: const Color(0xFF72808A),
+                ),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            (title ?? '').isNotEmpty ? title! : '未命名页面',
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                  fontWeight: FontWeight.w700,
+                ),
+          ),
+          const SizedBox(height: 10),
+          ...bullets.take(4).map(
+            (bullet) => Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: Text(
+                '• $bullet',
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(height: 1.45),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _GenericPreview extends StatelessWidget {
+  const _GenericPreview({required this.preview});
+
+  final Map<String, dynamic> preview;
+
+  @override
+  Widget build(BuildContext context) {
+    final lines = preview.entries
+        .take(6)
+        .map((entry) => '${entry.key}: ${_stringifyPreviewValue(entry.value)}')
+        .toList();
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF8FBFC),
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Text(
+        lines.join('\n'),
+        style: Theme.of(context).textTheme.bodyMedium?.copyWith(height: 1.45),
+      ),
+    );
+  }
+}
+
+class _ActionStrip extends StatelessWidget {
+  const _ActionStrip({required this.actions});
+
+  final List<_InlineAction> actions;
+
+  @override
+  Widget build(BuildContext context) {
+    return Wrap(
+      spacing: 10,
+      runSpacing: 10,
+      children: actions
+          .map(
+            (action) => OutlinedButton.icon(
+              onPressed: action.onPressed,
+              icon: Icon(action.icon, size: 18),
+              label: Text(action.label),
+            ),
+          )
+          .toList(),
+    );
+  }
+}
+
+class _InlineAction {
+  const _InlineAction({
+    required this.icon,
+    required this.label,
+    required this.onPressed,
+  });
+
+  final IconData icon;
+  final String label;
+  final VoidCallback onPressed;
 }
 
 class _ConfirmationTile extends StatelessWidget {
@@ -985,4 +1451,14 @@ String _formatDateTime(DateTime? value) {
   final hour = local.hour.toString().padLeft(2, '0');
   final minute = local.minute.toString().padLeft(2, '0');
   return '$month-$day $hour:$minute';
+}
+
+String _stringifyPreviewValue(Object? value) {
+  if (value is List) {
+    return '列表(${value.length})';
+  }
+  if (value is Map) {
+    return '对象(${value.length})';
+  }
+  return value?.toString() ?? '-';
 }
