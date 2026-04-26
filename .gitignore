@@ -2,6 +2,6 @@
 __pycache__/
 *.pyc
 .env
-data/
+doc/
 bitable-setup.md
 feishu-integrated-mvp-plan.md
