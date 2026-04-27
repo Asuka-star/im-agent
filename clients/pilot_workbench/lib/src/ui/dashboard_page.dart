@@ -388,102 +388,100 @@ class _TaskListPanel extends StatelessWidget {
                       title: '当前筛选下没有结果',
                       message: '试试清空搜索词、切换状态筛选，或者查看其他会话。',
                     )
-              : Column(
-                  children: [
-                    _TaskQuickStats(items: controller.taskRuns),
-                    const SizedBox(height: 14),
-                    _SessionOverview(
-                      sessionSummaries: sessionSummaries,
-                      activeSessionId: sessionController.text.trim(),
-                      onSelectSession: onSelectSession,
-                    ),
-                    const SizedBox(height: 14),
-                    _TaskFilterBar(
-                      searchController: searchController,
-                      statusOptions: statusOptions,
-                      activeStatus: statusFilter,
-                      onSearchChanged: onSearchChanged,
-                      onStatusChanged: onStatusFilterChanged,
-                    ),
-                    const SizedBox(height: 14),
-                    Expanded(
-                      child: ListView.separated(
-                        itemCount: items.length,
-                        separatorBuilder: (context, index) => const SizedBox(height: 12),
-                        itemBuilder: (context, index) {
-                          final item = items[index];
-                          final isSelected = controller.selectedTaskRun?.taskRunId == item.taskRunId;
-                          return InkWell(
-                            borderRadius: BorderRadius.circular(20),
-                            onTap: () => controller.selectTaskRun(item.taskRunId),
-                            child: AnimatedContainer(
-                              duration: const Duration(milliseconds: 180),
-                              padding: const EdgeInsets.all(18),
-                              decoration: BoxDecoration(
-                                color: isSelected ? const Color(0xFFEAF5FB) : Colors.white,
-                                borderRadius: BorderRadius.circular(20),
-                                border: Border.all(
-                                  color: isSelected ? const Color(0xFF116A7B) : const Color(0xFFD9E3E8),
-                                  width: isSelected ? 1.5 : 1,
+              : ListView.separated(
+                  itemCount: items.length + 3,
+                  separatorBuilder: (context, index) => const SizedBox(height: 14),
+                  itemBuilder: (context, index) {
+                    if (index == 0) {
+                      return _TaskQuickStats(items: controller.taskRuns);
+                    }
+                    if (index == 1) {
+                      return _SessionOverview(
+                        sessionSummaries: sessionSummaries,
+                        activeSessionId: sessionController.text.trim(),
+                        onSelectSession: onSelectSession,
+                      );
+                    }
+                    if (index == 2) {
+                      return _TaskFilterBar(
+                        searchController: searchController,
+                        statusOptions: statusOptions,
+                        activeStatus: statusFilter,
+                        onSearchChanged: onSearchChanged,
+                        onStatusChanged: onStatusFilterChanged,
+                      );
+                    }
+
+                    final item = items[index - 3];
+                    final isSelected = controller.selectedTaskRun?.taskRunId == item.taskRunId;
+                    return InkWell(
+                      borderRadius: BorderRadius.circular(20),
+                      onTap: () => controller.selectTaskRun(item.taskRunId),
+                      child: AnimatedContainer(
+                        duration: const Duration(milliseconds: 180),
+                        padding: const EdgeInsets.all(18),
+                        decoration: BoxDecoration(
+                          color: isSelected ? const Color(0xFFEAF5FB) : Colors.white,
+                          borderRadius: BorderRadius.circular(20),
+                          border: Border.all(
+                            color: isSelected ? const Color(0xFF116A7B) : const Color(0xFFD9E3E8),
+                            width: isSelected ? 1.5 : 1,
+                          ),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                Expanded(
+                                  child: Text(
+                                    item.title,
+                                    style: Theme.of(context).textTheme.titleLarge,
+                                  ),
                                 ),
-                              ),
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Row(
-                                    children: [
-                                      Expanded(
-                                        child: Text(
-                                          item.title,
-                                          style: Theme.of(context).textTheme.titleLarge,
-                                        ),
-                                      ),
-                                      _Badge(
-                                        label: item.status,
-                                        color: _statusColor(item.status),
-                                      ),
-                                    ],
-                                  ),
-                                  const SizedBox(height: 10),
-                                  Wrap(
-                                    spacing: 8,
-                                    runSpacing: 8,
-                                    children: [
-                                      _Badge(label: item.stage, color: const Color(0xFF213848)),
-                                      _Badge(label: item.sourceType, color: const Color(0xFF8B5E34)),
-                                      if ((item.intent ?? '').isNotEmpty)
-                                        _Badge(label: item.intent!, color: const Color(0xFF116A7B)),
-                                    ],
-                                  ),
-                                  const SizedBox(height: 12),
-                                  Text(
-                                    item.latestSummary?.trim().isNotEmpty == true
-                                        ? item.latestSummary!
-                                        : item.latestReplyPreview?.trim().isNotEmpty == true
-                                            ? item.latestReplyPreview!
-                                            : '等待更多上下文…',
-                                    maxLines: 3,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                                          color: const Color(0xFF5B6770),
-                                          height: 1.5,
-                                        ),
-                                  ),
-                                  const SizedBox(height: 12),
-                                  Text(
-                                    'session: ${item.sessionId} · 更新于 ${_formatDateTime(item.updatedAt ?? item.createdAt)}',
-                                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                                          color: const Color(0xFF72808A),
-                                        ),
-                                  ),
-                                ],
-                              ),
+                                _Badge(
+                                  label: item.status,
+                                  color: _statusColor(item.status),
+                                ),
+                              ],
                             ),
-                          );
-                        },
+                            const SizedBox(height: 10),
+                            Wrap(
+                              spacing: 8,
+                              runSpacing: 8,
+                              children: [
+                                _Badge(label: item.stage, color: const Color(0xFF213848)),
+                                _Badge(label: item.sourceType, color: const Color(0xFF8B5E34)),
+                                if ((item.intent ?? '').isNotEmpty)
+                                  _Badge(label: item.intent!, color: const Color(0xFF116A7B)),
+                              ],
+                            ),
+                            const SizedBox(height: 12),
+                            Text(
+                              item.latestSummary?.trim().isNotEmpty == true
+                                  ? item.latestSummary!
+                                  : item.latestReplyPreview?.trim().isNotEmpty == true
+                                      ? item.latestReplyPreview!
+                                      : '等待更多上下文…',
+                              maxLines: 3,
+                              overflow: TextOverflow.ellipsis,
+                              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                                    color: const Color(0xFF5B6770),
+                                    height: 1.5,
+                                  ),
+                            ),
+                            const SizedBox(height: 12),
+                            Text(
+                              'session: ${item.sessionId} · 更新于 ${_formatDateTime(item.updatedAt ?? item.createdAt)}',
+                              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                                    color: const Color(0xFF72808A),
+                                  ),
+                            ),
+                          ],
+                        ),
                       ),
-                    ),
-                  ],
+                    );
+                  },
                 ),
     );
   }
@@ -602,7 +600,7 @@ class _SessionOverview extends StatelessWidget {
         ),
         const SizedBox(height: 10),
         SizedBox(
-          height: 124,
+          height: 136,
           child: ListView.separated(
             scrollDirection: Axis.horizontal,
             itemCount: sessionSummaries.length,
@@ -641,7 +639,7 @@ class _SessionCard extends StatelessWidget {
       borderRadius: BorderRadius.circular(18),
       child: Container(
         width: 224,
-        padding: const EdgeInsets.all(14),
+        padding: const EdgeInsets.all(12),
         decoration: BoxDecoration(
           color: isActive ? const Color(0xFFEAF5FB) : Colors.white,
           borderRadius: BorderRadius.circular(18),
@@ -671,7 +669,7 @@ class _SessionCard extends StatelessWidget {
                     color: const Color(0xFF5B6770),
                   ),
             ),
-            const Spacer(),
+            const SizedBox(height: 10),
             Wrap(
               spacing: 6,
               runSpacing: 6,
@@ -952,7 +950,7 @@ class _StageTimeline extends StatelessWidget {
     return _SectionCard(
       title: '执行阶段',
       child: SizedBox(
-        height: 112,
+        height: 142,
         child: ListView.separated(
           scrollDirection: Axis.horizontal,
           itemCount: stages.length,
@@ -982,7 +980,7 @@ class _StageCard extends StatelessWidget {
 
     return Container(
       width: 180,
-      padding: const EdgeInsets.all(14),
+      padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
         color: item.state == _StageVisualState.current
             ? const Color(0xFFEAF5FB)
@@ -999,8 +997,8 @@ class _StageCard extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Container(
-            width: 34,
-            height: 34,
+            width: 30,
+            height: 30,
             decoration: BoxDecoration(
               color: accent.withValues(alpha: 0.14),
               shape: BoxShape.circle,
@@ -1008,17 +1006,17 @@ class _StageCard extends StatelessWidget {
             child: Icon(
               item.icon,
               color: accent,
-              size: 18,
+              size: 16,
             ),
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: 8),
           Text(
             item.label,
             style: Theme.of(context).textTheme.titleMedium?.copyWith(
                   fontWeight: FontWeight.w700,
                 ),
           ),
-          const SizedBox(height: 6),
+          const SizedBox(height: 4),
           Text(
             item.caption,
             maxLines: 2,
@@ -2706,6 +2704,8 @@ Color _connectionAccent(String state) {
       return const Color(0xFF73C8A9);
     case 'connecting':
       return const Color(0xFFF6B26B);
+    case 'polling':
+      return const Color(0xFF7EC8E3);
     case 'error':
       return const Color(0xFFC85D3A);
     case 'closed':
@@ -2721,6 +2721,8 @@ String _connectionLabel(String state) {
       return '实时在线';
     case 'connecting':
       return '连接中';
+    case 'polling':
+      return '轮询模式';
     case 'error':
       return '连接异常';
     case 'closed':

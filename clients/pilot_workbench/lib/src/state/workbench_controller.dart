@@ -34,8 +34,11 @@ class WorkbenchController extends ChangeNotifier {
   SocketConnection? _taskConnection;
   Timer? _sessionReconnectTimer;
   Timer? _taskReconnectTimer;
+  Timer? _fallbackRefreshTimer;
   String? _activeSessionSocketId;
   String? _activeTaskSocketId;
+  bool _sessionRealtimeEnabled = true;
+  bool _taskRealtimeEnabled = true;
 
   Future<void> initialize() async {
     await refreshTaskRuns(keepSelection: false);
@@ -55,7 +58,11 @@ class WorkbenchController extends ChangeNotifier {
       lastUpdatedAt = DateTime.now();
 
       if (sessionFilter.trim().isNotEmpty) {
-        await _bindSessionSocket(sessionFilter.trim());
+        if (_sessionRealtimeEnabled) {
+          await _bindSessionSocket(sessionFilter.trim());
+        } else {
+          sessionConnectionState = 'polling';
+        }
       } else {
         await _closeSessionSocket();
       }
@@ -102,7 +109,11 @@ class WorkbenchController extends ChangeNotifier {
       selectedTaskRun = detail;
       _mergeSummary(_summaryFromDetail(detail));
       lastUpdatedAt = DateTime.now();
-      await _bindTaskSocket(taskRunId);
+      if (_taskRealtimeEnabled) {
+        await _bindTaskSocket(taskRunId);
+      } else {
+        taskConnectionState = 'polling';
+      }
     } catch (error) {
       errorMessage = error.toString();
     } finally {
@@ -145,6 +156,9 @@ class WorkbenchController extends ChangeNotifier {
   }
 
   Future<void> retryCurrentView() async {
+    _sessionRealtimeEnabled = true;
+    _taskRealtimeEnabled = true;
+    _updateFallbackRefresh();
     if (selectedTaskRun != null) {
       await selectTaskRun(selectedTaskRun!.taskRunId, quiet: false);
       return;
@@ -164,32 +178,59 @@ class WorkbenchController extends ChangeNotifier {
     sessionConnectionState = 'connecting';
     notifyListeners();
 
-    _activeSessionSocketId = sessionId;
-    _sessionConnection = _socket.connect(
-      uri: AppConfig.sessionSocketUri(sessionId),
-      onEvent: _handleSessionEvent,
-      onClosed: () {
-        if (_activeSessionSocketId != sessionId) {
-          return;
-        }
-        sessionConnectionState = 'closed';
-        notifyListeners();
-        _scheduleSessionReconnect(sessionId);
-      },
-      onError: (error) {
-        if (_activeSessionSocketId != sessionId) {
-          return;
-        }
-        sessionConnectionState = 'error';
-        errorMessage = error.toString();
-        notifyListeners();
-        _scheduleSessionReconnect(sessionId);
-      },
-    );
+    try {
+      var allowReconnectOnClose = true;
+      _activeSessionSocketId = sessionId;
+      _sessionConnection = _socket.connect(
+        uri: AppConfig.sessionSocketUri(sessionId),
+        onEvent: _handleSessionEvent,
+        onClosed: () {
+          if (_activeSessionSocketId != sessionId) {
+            return;
+          }
+          sessionConnectionState = allowReconnectOnClose ? 'closed' : 'polling';
+          notifyListeners();
+          if (allowReconnectOnClose) {
+            _scheduleSessionReconnect(sessionId);
+          }
+        },
+        onError: (error) {
+          if (_activeSessionSocketId != sessionId) {
+            return;
+          }
+          final shouldRetry = _shouldRetrySocket(error);
+          allowReconnectOnClose = shouldRetry;
+          if (!shouldRetry) {
+            _sessionRealtimeEnabled = false;
+            _updateFallbackRefresh();
+          }
+          sessionConnectionState = shouldRetry ? 'error' : 'polling';
+          errorMessage = error.toString();
+          notifyListeners();
+          if (shouldRetry) {
+            _scheduleSessionReconnect(sessionId);
+          }
+        },
+      );
 
-    sessionConnectionState = 'live';
-    _sessionConnection?.ping();
-    notifyListeners();
+      sessionConnectionState = 'live';
+      _sessionRealtimeEnabled = true;
+      _updateFallbackRefresh();
+      _sessionConnection?.ping();
+      notifyListeners();
+    } catch (error) {
+      final shouldRetry = _shouldRetrySocket(error);
+      if (!shouldRetry) {
+        _sessionRealtimeEnabled = false;
+        _updateFallbackRefresh();
+      }
+      sessionConnectionState = shouldRetry ? 'error' : 'polling';
+      errorMessage = error.toString();
+      notifyListeners();
+      if (shouldRetry) {
+        _scheduleSessionReconnect(sessionId);
+      }
+    }
   }
 
   Future<void> _bindTaskSocket(String taskRunId) async {
@@ -204,32 +245,59 @@ class WorkbenchController extends ChangeNotifier {
     taskConnectionState = 'connecting';
     notifyListeners();
 
-    _activeTaskSocketId = taskRunId;
-    _taskConnection = _socket.connect(
-      uri: AppConfig.taskRunSocketUri(taskRunId),
-      onEvent: _handleTaskRunEvent,
-      onClosed: () {
-        if (_activeTaskSocketId != taskRunId) {
-          return;
-        }
-        taskConnectionState = 'closed';
-        notifyListeners();
-        _scheduleTaskReconnect(taskRunId);
-      },
-      onError: (error) {
-        if (_activeTaskSocketId != taskRunId) {
-          return;
-        }
-        taskConnectionState = 'error';
-        errorMessage = error.toString();
-        notifyListeners();
-        _scheduleTaskReconnect(taskRunId);
-      },
-    );
+    try {
+      var allowReconnectOnClose = true;
+      _activeTaskSocketId = taskRunId;
+      _taskConnection = _socket.connect(
+        uri: AppConfig.taskRunSocketUri(taskRunId),
+        onEvent: _handleTaskRunEvent,
+        onClosed: () {
+          if (_activeTaskSocketId != taskRunId) {
+            return;
+          }
+          taskConnectionState = allowReconnectOnClose ? 'closed' : 'polling';
+          notifyListeners();
+          if (allowReconnectOnClose) {
+            _scheduleTaskReconnect(taskRunId);
+          }
+        },
+        onError: (error) {
+          if (_activeTaskSocketId != taskRunId) {
+            return;
+          }
+          final shouldRetry = _shouldRetrySocket(error);
+          allowReconnectOnClose = shouldRetry;
+          if (!shouldRetry) {
+            _taskRealtimeEnabled = false;
+            _updateFallbackRefresh();
+          }
+          taskConnectionState = shouldRetry ? 'error' : 'polling';
+          errorMessage = error.toString();
+          notifyListeners();
+          if (shouldRetry) {
+            _scheduleTaskReconnect(taskRunId);
+          }
+        },
+      );
 
-    taskConnectionState = 'live';
-    _taskConnection?.ping();
-    notifyListeners();
+      taskConnectionState = 'live';
+      _taskRealtimeEnabled = true;
+      _updateFallbackRefresh();
+      _taskConnection?.ping();
+      notifyListeners();
+    } catch (error) {
+      final shouldRetry = _shouldRetrySocket(error);
+      if (!shouldRetry) {
+        _taskRealtimeEnabled = false;
+        _updateFallbackRefresh();
+      }
+      taskConnectionState = shouldRetry ? 'error' : 'polling';
+      errorMessage = error.toString();
+      notifyListeners();
+      if (shouldRetry) {
+        _scheduleTaskReconnect(taskRunId);
+      }
+    }
   }
 
   Future<void> _closeSessionSocket() async {
@@ -242,6 +310,7 @@ class WorkbenchController extends ChangeNotifier {
       await connection.close();
     }
     sessionConnectionState = 'idle';
+    _updateFallbackRefresh();
   }
 
   Future<void> _closeTaskSocket() async {
@@ -254,6 +323,7 @@ class WorkbenchController extends ChangeNotifier {
       await connection.close();
     }
     taskConnectionState = 'idle';
+    _updateFallbackRefresh();
   }
 
   void _scheduleSessionReconnect(String sessionId) {
@@ -279,6 +349,68 @@ class WorkbenchController extends ChangeNotifier {
         _bindTaskSocket(taskRunId);
       }
     });
+  }
+
+  bool _shouldRetrySocket(Object error) {
+    final text = error.toString().toLowerCase();
+    if (text.contains('not upgraded to websocket')) {
+      return false;
+    }
+    if (text.contains('full header was received')) {
+      return false;
+    }
+    if (text.contains('400 bad request')) {
+      return false;
+    }
+    return true;
+  }
+
+  void _updateFallbackRefresh() {
+    final needsPolling = !_sessionRealtimeEnabled || !_taskRealtimeEnabled;
+    if (!needsPolling) {
+      _fallbackRefreshTimer?.cancel();
+      _fallbackRefreshTimer = null;
+      return;
+    }
+    if (_fallbackRefreshTimer != null) {
+      return;
+    }
+    _fallbackRefreshTimer = Timer.periodic(
+      const Duration(seconds: 8),
+      (_) => _refreshFromPollingFallback(),
+    );
+  }
+
+  Future<void> _refreshFromPollingFallback() async {
+    if (isLoadingList || isLoadingDetail || isSubmittingConfirmation) {
+      return;
+    }
+    try {
+      final runs = await _api.listTaskRuns(
+        sessionId: sessionFilter.trim().isEmpty ? null : sessionFilter.trim(),
+        limit: 50,
+      );
+      taskRuns = runs;
+      lastUpdatedAt = DateTime.now();
+
+      final selectedId = selectedTaskRun?.taskRunId;
+      if (selectedId != null) {
+        final stillExists = runs.any((item) => item.taskRunId == selectedId);
+        if (stillExists) {
+          final detail = await _api.getTaskRun(selectedId);
+          selectedTaskRun = detail;
+          _mergeSummary(_summaryFromDetail(detail));
+        } else {
+          selectedTaskRun = null;
+          taskConnectionState = _taskRealtimeEnabled ? taskConnectionState : 'idle';
+        }
+      }
+
+      notifyListeners();
+    } catch (error) {
+      errorMessage ??= error.toString();
+      notifyListeners();
+    }
   }
 
   void _handleSessionEvent(Map<String, dynamic> event) {
@@ -343,6 +475,7 @@ class WorkbenchController extends ChangeNotifier {
   void dispose() {
     _sessionReconnectTimer?.cancel();
     _taskReconnectTimer?.cancel();
+    _fallbackRefreshTimer?.cancel();
     _closeSessionSocket();
     _closeTaskSocket();
     super.dispose();

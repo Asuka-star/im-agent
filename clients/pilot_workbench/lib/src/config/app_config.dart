@@ -33,15 +33,24 @@ class AppConfig {
     final apiUri = Uri.parse(apiBaseUrl);
     final scheme = apiUri.scheme == 'https' ? 'wss' : 'ws';
     final baseSegments = apiUri.pathSegments.where((segment) => segment.isNotEmpty).toList();
-    if (baseSegments.isNotEmpty && baseSegments.last == 'api') {
-      baseSegments.removeLast();
+    final pathSegments = <String>[
+      ...baseSegments,
+      ...relativePath.split('/').where((segment) => segment.isNotEmpty),
+    ];
+    if (apiUri.hasPort) {
+      return Uri(
+        scheme: scheme,
+        userInfo: apiUri.userInfo.isEmpty ? null : apiUri.userInfo,
+        host: apiUri.host,
+        port: apiUri.port,
+        pathSegments: pathSegments,
+      );
     }
-    return apiUri.replace(
+    return Uri(
       scheme: scheme,
-      pathSegments: <String>[
-        ...baseSegments,
-        ...relativePath.split('/').where((segment) => segment.isNotEmpty),
-      ],
+      userInfo: apiUri.userInfo.isEmpty ? null : apiUri.userInfo,
+      host: apiUri.host,
+      pathSegments: pathSegments,
     );
   }
 }
