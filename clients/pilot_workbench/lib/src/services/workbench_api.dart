@@ -6,8 +6,8 @@ import 'package:pilot_workbench/src/models/task_run_models.dart';
 
 class WorkbenchApi {
   WorkbenchApi({http.Client? client, String? baseUrl})
-      : _client = client ?? http.Client(),
-        _baseUrl = baseUrl ?? AppConfig.apiBaseUrl;
+    : _client = client ?? http.Client(),
+      _baseUrl = baseUrl ?? AppConfig.apiBaseUrl;
 
   final http.Client _client;
   final String _baseUrl;
@@ -32,7 +32,10 @@ class WorkbenchApi {
     if (decoded is! List) {
       return const [];
     }
-    return decoded.whereType<Map<String, dynamic>>().map(TaskRunSummary.fromJson).toList();
+    return decoded
+        .whereType<Map<String, dynamic>>()
+        .map(TaskRunSummary.fromJson)
+        .toList();
   }
 
   Future<TaskRunDetail> getTaskRun(String taskRunId) async {
@@ -40,7 +43,7 @@ class WorkbenchApi {
     _ensureSuccess(response);
     final decoded = jsonDecode(utf8.decode(response.bodyBytes));
     if (decoded is! Map<String, dynamic>) {
-      throw const FormatException('Task run payload is not a JSON object.');
+      throw const FormatException('任务详情返回的不是有效对象。');
     }
     return TaskRunDetail.fromJson(decoded);
   }
@@ -54,13 +57,11 @@ class WorkbenchApi {
     final response = await _client.post(
       _buildUri('/task-runs/$taskRunId/confirm'),
       headers: {'Content-Type': 'application/json'},
-      body: jsonEncode(
-        {
-          'confirmation_id': confirmationId,
-          'answer_value': answerValue,
-          'answered_by': answeredBy,
-        },
-      ),
+      body: jsonEncode({
+        'confirmation_id': confirmationId,
+        'answer_value': answerValue,
+        'answered_by': answeredBy,
+      }),
     );
     _ensureSuccess(response);
   }
@@ -75,7 +76,8 @@ class WorkbenchApi {
       ],
       queryParameters: {
         for (final entry in (queryParameters ?? const {}).entries)
-          if (entry.value != null && entry.value!.isNotEmpty) entry.key: entry.value!,
+          if (entry.value != null && entry.value!.isNotEmpty)
+            entry.key: entry.value!,
       },
     );
   }
@@ -85,7 +87,7 @@ class WorkbenchApi {
       return;
     }
     throw HttpException(
-      'Workbench API request failed: ${response.statusCode} ${response.reasonPhrase ?? ''}'.trim(),
+      '工作台接口请求失败：${response.statusCode} ${response.reasonPhrase ?? ''}'.trim(),
     );
   }
 }

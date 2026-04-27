@@ -1,12 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:pilot_workbench/src/config/app_config.dart';
 import 'package:pilot_workbench/src/ui/dashboard_page.dart';
 
 class PilotWorkbenchApp extends StatelessWidget {
-  const PilotWorkbenchApp({
-    super.key,
-    this.autoInitialize = true,
-  });
+  const PilotWorkbenchApp({super.key, this.autoInitialize = true});
 
   final bool autoInitialize;
 
@@ -20,32 +18,31 @@ class PilotWorkbenchApp extends StatelessWidget {
     final colorScheme = ColorScheme.fromSeed(
       seedColor: primary,
       brightness: Brightness.light,
-    ).copyWith(
-      primary: primary,
-      secondary: secondary,
-      surface: surface,
+    ).copyWith(primary: primary, secondary: secondary, surface: surface);
+
+    final baseTextTheme = GoogleFonts.notoSansScTextTheme().apply(
+      bodyColor: const Color(0xFF172026),
+      displayColor: const Color(0xFF172026),
     );
 
-    final baseTextTheme = GoogleFonts.ibmPlexSansTextTheme();
-
     return MaterialApp(
-      title: 'Pilot Workbench',
+      title: AppConfig.appName,
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         colorScheme: colorScheme,
         scaffoldBackgroundColor: background,
         textTheme: baseTextTheme.copyWith(
-          displaySmall: GoogleFonts.sora(
+          displaySmall: baseTextTheme.displaySmall?.copyWith(
             fontSize: 34,
             fontWeight: FontWeight.w700,
             color: const Color(0xFF172026),
           ),
-          headlineSmall: GoogleFonts.sora(
+          headlineSmall: baseTextTheme.headlineSmall?.copyWith(
             fontSize: 22,
             fontWeight: FontWeight.w700,
             color: const Color(0xFF172026),
           ),
-          titleLarge: GoogleFonts.sora(
+          titleLarge: baseTextTheme.titleLarge?.copyWith(
             fontSize: 18,
             fontWeight: FontWeight.w700,
             color: const Color(0xFF172026),

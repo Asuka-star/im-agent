@@ -1,7 +1,9 @@
 import 'dart:io';
 
+import 'package:pilot_workbench/src/utils/workbench_labels.dart';
+
 class AppConfig {
-  static const appName = 'Pilot Workbench';
+  static const appName = workbenchAppName;
   static const defaultSessionId = String.fromEnvironment(
     'WORKBENCH_SESSION_ID',
     defaultValue: '',
@@ -32,7 +34,9 @@ class AppConfig {
   static Uri _buildSocketUri(String relativePath) {
     final apiUri = Uri.parse(apiBaseUrl);
     final scheme = apiUri.scheme == 'https' ? 'wss' : 'ws';
-    final baseSegments = apiUri.pathSegments.where((segment) => segment.isNotEmpty).toList();
+    final baseSegments = apiUri.pathSegments
+        .where((segment) => segment.isNotEmpty)
+        .toList();
     final pathSegments = <String>[
       ...baseSegments,
       ...relativePath.split('/').where((segment) => segment.isNotEmpty),

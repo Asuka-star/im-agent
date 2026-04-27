@@ -5,12 +5,10 @@ import 'package:flutter/services.dart';
 import 'package:pilot_workbench/src/config/app_config.dart';
 import 'package:pilot_workbench/src/models/task_run_models.dart';
 import 'package:pilot_workbench/src/state/workbench_controller.dart';
+import 'package:pilot_workbench/src/utils/workbench_labels.dart';
 
 class DashboardPage extends StatefulWidget {
-  const DashboardPage({
-    super.key,
-    this.autoInitialize = true,
-  });
+  const DashboardPage({super.key, this.autoInitialize = true});
 
   final bool autoInitialize;
 
@@ -163,12 +161,19 @@ class _DashboardPageState extends State<DashboardPage> {
   List<TaskRunSummary> _buildVisibleTaskRuns(List<TaskRunSummary> taskRuns) {
     final keyword = _searchController.text.trim().toLowerCase();
     return taskRuns.where((item) {
-      final matchesStatus = _statusFilter == 'all' || item.status == _statusFilter;
+      final matchesStatus =
+          _statusFilter == 'all' || item.status == _statusFilter;
       final haystack = [
         item.title,
         item.sessionId,
         item.intent ?? '',
+        localizeIntent(item.intent),
         item.stage,
+        localizeStage(item.stage),
+        item.status,
+        localizeStatus(item.status),
+        item.sourceType,
+        localizeSourceType(item.sourceType),
         item.latestSummary ?? '',
         item.latestReplyPreview ?? '',
       ].join(' ').toLowerCase();
@@ -185,15 +190,23 @@ class _DashboardPageState extends State<DashboardPage> {
     final summaries = grouped.entries.map((entry) {
       final runs = entry.value;
       runs.sort((a, b) {
-        final aTime = a.updatedAt ?? a.createdAt ?? DateTime.fromMillisecondsSinceEpoch(0);
-        final bTime = b.updatedAt ?? b.createdAt ?? DateTime.fromMillisecondsSinceEpoch(0);
+        final aTime =
+            a.updatedAt ??
+            a.createdAt ??
+            DateTime.fromMillisecondsSinceEpoch(0);
+        final bTime =
+            b.updatedAt ??
+            b.createdAt ??
+            DateTime.fromMillisecondsSinceEpoch(0);
         return bTime.compareTo(aTime);
       });
       return _SessionSummary(
         sessionId: entry.key,
         totalCount: runs.length,
         runningCount: runs.where((item) => item.status == 'running').length,
-        waitingCount: runs.where((item) => item.status == 'waiting_confirmation').length,
+        waitingCount: runs
+            .where((item) => item.status == 'waiting_confirmation')
+            .length,
         completedCount: runs.where((item) => item.status == 'completed').length,
         latestTitle: runs.first.title,
         updatedAt: runs.first.updatedAt ?? runs.first.createdAt,
@@ -214,10 +227,7 @@ class _DashboardPageState extends State<DashboardPage> {
 }
 
 class _HeroPanel extends StatelessWidget {
-  const _HeroPanel({
-    required this.controller,
-    required this.sessionController,
-  });
+  const _HeroPanel({required this.controller, required this.sessionController});
 
   final WorkbenchController controller;
   final TextEditingController sessionController;
@@ -231,11 +241,7 @@ class _HeroPanel extends StatelessWidget {
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(28),
         gradient: const LinearGradient(
-          colors: [
-            Color(0xFF172026),
-            Color(0xFF213848),
-            Color(0xFF2D5668),
-          ],
+          colors: [Color(0xFF172026), Color(0xFF213848), Color(0xFF2D5668)],
         ),
         boxShadow: [
           BoxShadow(
@@ -257,11 +263,13 @@ class _HeroPanel extends StatelessWidget {
                   children: [
                     Text(
                       AppConfig.appName,
-                      style: theme.textTheme.displaySmall?.copyWith(color: Colors.white),
+                      style: theme.textTheme.displaySmall?.copyWith(
+                        color: Colors.white,
+                      ),
                     ),
                     const SizedBox(height: 8),
                     Text(
-                      '把飞书里的 Agent 运行态摊开来，让桌面端和移动端都能看见计划、步骤、产物和确认节点。',
+                      '把飞书里的智能体运行态摊开来，让桌面端和移动端都能看见计划、步骤、产物和确认节点。',
                       style: theme.textTheme.bodyLarge?.copyWith(
                         color: Colors.white.withValues(alpha: 0.82),
                         height: 1.45,
@@ -276,12 +284,16 @@ class _HeroPanel extends StatelessWidget {
                 runSpacing: 10,
                 children: [
                   _StatusPill(
-                    label: '任务流 ${_connectionLabel(controller.taskConnectionState)}',
+                    label:
+                        '任务流 ${_connectionLabel(controller.taskConnectionState)}',
                     accent: _connectionAccent(controller.taskConnectionState),
                   ),
                   _StatusPill(
-                    label: '会话流 ${_connectionLabel(controller.sessionConnectionState)}',
-                    accent: _connectionAccent(controller.sessionConnectionState),
+                    label:
+                        '会话流 ${_connectionLabel(controller.sessionConnectionState)}',
+                    accent: _connectionAccent(
+                      controller.sessionConnectionState,
+                    ),
                   ),
                 ],
               ),
@@ -299,10 +311,14 @@ class _HeroPanel extends StatelessWidget {
                   controller: sessionController,
                   style: const TextStyle(color: Colors.white),
                   decoration: InputDecoration(
-                    labelText: '会话过滤（session_id）',
-                    labelStyle: TextStyle(color: Colors.white.withValues(alpha: 0.75)),
+                    labelText: '会话筛选（会话编号）',
+                    labelStyle: TextStyle(
+                      color: Colors.white.withValues(alpha: 0.75),
+                    ),
                     hintText: '留空时查看全部任务',
-                    hintStyle: TextStyle(color: Colors.white.withValues(alpha: 0.45)),
+                    hintStyle: TextStyle(
+                      color: Colors.white.withValues(alpha: 0.45),
+                    ),
                     filled: true,
                     fillColor: Colors.white.withValues(alpha: 0.08),
                     border: OutlineInputBorder(
@@ -314,14 +330,19 @@ class _HeroPanel extends StatelessWidget {
                 ),
               ),
               FilledButton.icon(
-                onPressed: () => controller.applySessionFilter(sessionController.text),
+                onPressed: () =>
+                    controller.applySessionFilter(sessionController.text),
                 icon: const Icon(Icons.filter_alt_rounded),
                 label: const Text('应用过滤'),
               ),
               OutlinedButton.icon(
-                onPressed: controller.isLoadingList ? null : () => controller.refreshTaskRuns(),
+                onPressed: controller.isLoadingList
+                    ? null
+                    : () => controller.refreshTaskRuns(),
                 icon: Icon(
-                  controller.isLoadingList ? Icons.hourglass_top_rounded : Icons.sync_rounded,
+                  controller.isLoadingList
+                      ? Icons.hourglass_top_rounded
+                      : Icons.sync_rounded,
                 ),
                 label: Text(controller.isLoadingList ? '同步中...' : '刷新任务'),
                 style: OutlinedButton.styleFrom(
@@ -379,110 +400,125 @@ class _TaskListPanel extends StatelessWidget {
       child: controller.isLoadingList && controller.taskRuns.isEmpty
           ? const Center(child: CircularProgressIndicator())
           : controller.taskRuns.isEmpty
-              ? const _EmptyState(
-                  title: '还没有任务运行数据',
-                  message: '先从飞书侧触发一次 @机器人 请求，工作台就会开始出现任务轨迹。',
-                )
-              : items.isEmpty
-                  ? const _EmptyState(
-                      title: '当前筛选下没有结果',
-                      message: '试试清空搜索词、切换状态筛选，或者查看其他会话。',
-                    )
-              : ListView.separated(
-                  itemCount: items.length + 3,
-                  separatorBuilder: (context, index) => const SizedBox(height: 14),
-                  itemBuilder: (context, index) {
-                    if (index == 0) {
-                      return _TaskQuickStats(items: controller.taskRuns);
-                    }
-                    if (index == 1) {
-                      return _SessionOverview(
-                        sessionSummaries: sessionSummaries,
-                        activeSessionId: sessionController.text.trim(),
-                        onSelectSession: onSelectSession,
-                      );
-                    }
-                    if (index == 2) {
-                      return _TaskFilterBar(
-                        searchController: searchController,
-                        statusOptions: statusOptions,
-                        activeStatus: statusFilter,
-                        onSearchChanged: onSearchChanged,
-                        onStatusChanged: onStatusFilterChanged,
-                      );
-                    }
+          ? const _EmptyState(
+              title: '还没有任务运行数据',
+              message: '先从飞书侧触发一次 @机器人 请求，工作台就会开始出现任务轨迹。',
+            )
+          : items.isEmpty
+          ? const _EmptyState(
+              title: '当前筛选下没有结果',
+              message: '试试清空搜索词、切换状态筛选，或者查看其他会话。',
+            )
+          : ListView.separated(
+              itemCount: items.length + 3,
+              separatorBuilder: (context, index) => const SizedBox(height: 14),
+              itemBuilder: (context, index) {
+                if (index == 0) {
+                  return _TaskQuickStats(items: controller.taskRuns);
+                }
+                if (index == 1) {
+                  return _SessionOverview(
+                    sessionSummaries: sessionSummaries,
+                    activeSessionId: sessionController.text.trim(),
+                    onSelectSession: onSelectSession,
+                  );
+                }
+                if (index == 2) {
+                  return _TaskFilterBar(
+                    searchController: searchController,
+                    statusOptions: statusOptions,
+                    activeStatus: statusFilter,
+                    onSearchChanged: onSearchChanged,
+                    onStatusChanged: onStatusFilterChanged,
+                  );
+                }
 
-                    final item = items[index - 3];
-                    final isSelected = controller.selectedTaskRun?.taskRunId == item.taskRunId;
-                    return InkWell(
+                final item = items[index - 3];
+                final isSelected =
+                    controller.selectedTaskRun?.taskRunId == item.taskRunId;
+                return InkWell(
+                  borderRadius: BorderRadius.circular(20),
+                  onTap: () => controller.selectTaskRun(item.taskRunId),
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 180),
+                    padding: const EdgeInsets.all(18),
+                    decoration: BoxDecoration(
+                      color: isSelected
+                          ? const Color(0xFFEAF5FB)
+                          : Colors.white,
                       borderRadius: BorderRadius.circular(20),
-                      onTap: () => controller.selectTaskRun(item.taskRunId),
-                      child: AnimatedContainer(
-                        duration: const Duration(milliseconds: 180),
-                        padding: const EdgeInsets.all(18),
-                        decoration: BoxDecoration(
-                          color: isSelected ? const Color(0xFFEAF5FB) : Colors.white,
-                          borderRadius: BorderRadius.circular(20),
-                          border: Border.all(
-                            color: isSelected ? const Color(0xFF116A7B) : const Color(0xFFD9E3E8),
-                            width: isSelected ? 1.5 : 1,
-                          ),
-                        ),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
+                      border: Border.all(
+                        color: isSelected
+                            ? const Color(0xFF116A7B)
+                            : const Color(0xFFD9E3E8),
+                        width: isSelected ? 1.5 : 1,
+                      ),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
                           children: [
-                            Row(
-                              children: [
-                                Expanded(
-                                  child: Text(
-                                    item.title,
-                                    style: Theme.of(context).textTheme.titleLarge,
-                                  ),
-                                ),
-                                _Badge(
-                                  label: item.status,
-                                  color: _statusColor(item.status),
-                                ),
-                              ],
+                            Expanded(
+                              child: Text(
+                                item.title,
+                                style: Theme.of(context).textTheme.titleLarge,
+                              ),
                             ),
-                            const SizedBox(height: 10),
-                            Wrap(
-                              spacing: 8,
-                              runSpacing: 8,
-                              children: [
-                                _Badge(label: item.stage, color: const Color(0xFF213848)),
-                                _Badge(label: item.sourceType, color: const Color(0xFF8B5E34)),
-                                if ((item.intent ?? '').isNotEmpty)
-                                  _Badge(label: item.intent!, color: const Color(0xFF116A7B)),
-                              ],
-                            ),
-                            const SizedBox(height: 12),
-                            Text(
-                              item.latestSummary?.trim().isNotEmpty == true
-                                  ? item.latestSummary!
-                                  : item.latestReplyPreview?.trim().isNotEmpty == true
-                                      ? item.latestReplyPreview!
-                                      : '等待更多上下文…',
-                              maxLines: 3,
-                              overflow: TextOverflow.ellipsis,
-                              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                                    color: const Color(0xFF5B6770),
-                                    height: 1.5,
-                                  ),
-                            ),
-                            const SizedBox(height: 12),
-                            Text(
-                              'session: ${item.sessionId} · 更新于 ${_formatDateTime(item.updatedAt ?? item.createdAt)}',
-                              style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                                    color: const Color(0xFF72808A),
-                                  ),
+                            _Badge(
+                              label: localizeStatus(item.status),
+                              color: _statusColor(item.status),
                             ),
                           ],
                         ),
-                      ),
-                    );
-                  },
-                ),
+                        const SizedBox(height: 10),
+                        Wrap(
+                          spacing: 8,
+                          runSpacing: 8,
+                          children: [
+                            _Badge(
+                              label: localizeStage(item.stage),
+                              color: const Color(0xFF213848),
+                            ),
+                            _Badge(
+                              label: localizeSourceType(item.sourceType),
+                              color: const Color(0xFF8B5E34),
+                            ),
+                            if ((item.intent ?? '').isNotEmpty)
+                              _Badge(
+                                label: localizeIntent(item.intent),
+                                color: const Color(0xFF116A7B),
+                              ),
+                          ],
+                        ),
+                        const SizedBox(height: 12),
+                        Text(
+                          item.latestSummary?.trim().isNotEmpty == true
+                              ? item.latestSummary!
+                              : item.latestReplyPreview?.trim().isNotEmpty ==
+                                    true
+                              ? item.latestReplyPreview!
+                              : '等待更多上下文...',
+                          maxLines: 3,
+                          overflow: TextOverflow.ellipsis,
+                          style: Theme.of(context).textTheme.bodyMedium
+                              ?.copyWith(
+                                color: const Color(0xFF5B6770),
+                                height: 1.5,
+                              ),
+                        ),
+                        const SizedBox(height: 12),
+                        Text(
+                          '会话：${item.sessionId} · 更新于 ${_formatDateTime(item.updatedAt ?? item.createdAt)}',
+                          style: Theme.of(context).textTheme.bodySmall
+                              ?.copyWith(color: const Color(0xFF72808A)),
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              },
+            ),
     );
   }
 
@@ -494,8 +530,16 @@ class _TaskListPanel extends StatelessWidget {
     final options = <_StatusOption>[
       _StatusOption(key: 'all', label: '全部', count: taskRuns.length),
     ];
-    for (final entry in counts.entries.toList()..sort((a, b) => b.value.compareTo(a.value))) {
-      options.add(_StatusOption(key: entry.key, label: _statusLabel(entry.key), count: entry.value));
+    for (final entry
+        in counts.entries.toList()
+          ..sort((a, b) => b.value.compareTo(a.value))) {
+      options.add(
+        _StatusOption(
+          key: entry.key,
+          label: _statusLabel(entry.key),
+          count: entry.value,
+        ),
+      );
     }
     return options;
   }
@@ -510,18 +554,44 @@ class _TaskQuickStats extends StatelessWidget {
   Widget build(BuildContext context) {
     final total = items.length;
     final running = items.where((item) => item.status == 'running').length;
-    final waiting = items.where((item) => item.status == 'waiting_confirmation').length;
+    final waiting = items
+        .where((item) => item.status == 'waiting_confirmation')
+        .length;
     final completed = items.where((item) => item.status == 'completed').length;
 
     return Row(
       children: [
-        Expanded(child: _StatCard(label: '全部任务', value: '$total', accent: const Color(0xFF213848))),
+        Expanded(
+          child: _StatCard(
+            label: '全部任务',
+            value: '$total',
+            accent: const Color(0xFF213848),
+          ),
+        ),
         const SizedBox(width: 10),
-        Expanded(child: _StatCard(label: '运行中', value: '$running', accent: const Color(0xFF8B5E34))),
+        Expanded(
+          child: _StatCard(
+            label: '运行中',
+            value: '$running',
+            accent: const Color(0xFF8B5E34),
+          ),
+        ),
         const SizedBox(width: 10),
-        Expanded(child: _StatCard(label: '待确认', value: '$waiting', accent: const Color(0xFFC85D3A))),
+        Expanded(
+          child: _StatCard(
+            label: '待确认',
+            value: '$waiting',
+            accent: const Color(0xFFC85D3A),
+          ),
+        ),
         const SizedBox(width: 10),
-        Expanded(child: _StatCard(label: '已完成', value: '$completed', accent: const Color(0xFF116A7B))),
+        Expanded(
+          child: _StatCard(
+            label: '已完成',
+            value: '$completed',
+            accent: const Color(0xFF116A7B),
+          ),
+        ),
       ],
     );
   }
@@ -551,17 +621,17 @@ class _StatCard extends StatelessWidget {
         children: [
           Text(
             label,
-            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                  color: const Color(0xFF72808A),
-                ),
+            style: Theme.of(
+              context,
+            ).textTheme.bodySmall?.copyWith(color: const Color(0xFF72808A)),
           ),
           const SizedBox(height: 8),
           Text(
             value,
             style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                  color: accent,
-                  fontWeight: FontWeight.w800,
-                ),
+              color: accent,
+              fontWeight: FontWeight.w800,
+            ),
           ),
         ],
       ),
@@ -587,10 +657,7 @@ class _SessionOverview extends StatelessWidget {
       children: [
         Row(
           children: [
-            Text(
-              '会话概览',
-              style: Theme.of(context).textTheme.titleLarge,
-            ),
+            Text('会话概览', style: Theme.of(context).textTheme.titleLarge),
             const Spacer(),
             TextButton(
               onPressed: () => onSelectSession(''),
@@ -607,7 +674,9 @@ class _SessionOverview extends StatelessWidget {
             separatorBuilder: (context, index) => const SizedBox(width: 10),
             itemBuilder: (context, index) {
               final session = sessionSummaries[index];
-              final isActive = activeSessionId.isNotEmpty && activeSessionId == session.sessionId;
+              final isActive =
+                  activeSessionId.isNotEmpty &&
+                  activeSessionId == session.sessionId;
               return _SessionCard(
                 summary: session,
                 isActive: isActive,
@@ -655,9 +724,9 @@ class _SessionCard extends StatelessWidget {
               summary.sessionId,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                    fontWeight: FontWeight.w700,
-                  ),
+              style: Theme.of(
+                context,
+              ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
             ),
             const SizedBox(height: 8),
             Text(
@@ -665,20 +734,29 @@ class _SessionCard extends StatelessWidget {
               maxLines: 2,
               overflow: TextOverflow.ellipsis,
               style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                    height: 1.4,
-                    color: const Color(0xFF5B6770),
-                  ),
+                height: 1.4,
+                color: const Color(0xFF5B6770),
+              ),
             ),
             const SizedBox(height: 10),
             Wrap(
               spacing: 6,
               runSpacing: 6,
               children: [
-                _TinyPill(label: '${summary.totalCount} 任务', color: const Color(0xFF213848)),
+                _TinyPill(
+                  label: '${summary.totalCount} 任务',
+                  color: const Color(0xFF213848),
+                ),
                 if (summary.runningCount > 0)
-                  _TinyPill(label: '${summary.runningCount} 运行中', color: const Color(0xFF8B5E34)),
+                  _TinyPill(
+                    label: '${summary.runningCount} 运行中',
+                    color: const Color(0xFF8B5E34),
+                  ),
                 if (summary.waitingCount > 0)
-                  _TinyPill(label: '${summary.waitingCount} 待确认', color: const Color(0xFFC85D3A)),
+                  _TinyPill(
+                    label: '${summary.waitingCount} 待确认',
+                    color: const Color(0xFFC85D3A),
+                  ),
               ],
             ),
           ],
@@ -711,7 +789,7 @@ class _TaskFilterBar extends StatelessWidget {
           controller: searchController,
           onChanged: onSearchChanged,
           decoration: InputDecoration(
-            hintText: '搜索标题、session、意图或摘要',
+            hintText: '搜索标题、会话编号、意图或摘要',
             prefixIcon: const Icon(Icons.search_rounded),
             filled: true,
             fillColor: Colors.white,
@@ -749,10 +827,7 @@ class _TaskFilterBar extends StatelessWidget {
 }
 
 class _TinyPill extends StatelessWidget {
-  const _TinyPill({
-    required this.label,
-    required this.color,
-  });
+  const _TinyPill({required this.label, required this.color});
 
   final String label;
   final Color color;
@@ -794,69 +869,69 @@ class _DetailPanel extends StatelessWidget {
               message: '左侧点开任意任务后，这里会展示步骤、产物和确认节点。',
             )
           : controller.isLoadingDetail
-              ? const Center(child: CircularProgressIndicator())
-              : SingleChildScrollView(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    _SummaryCard(detail: detail),
-                    const SizedBox(height: 16),
-                    _StageTimeline(detail: detail),
-                    const SizedBox(height: 16),
-                    _SectionCard(
-                      title: '执行步骤',
-                        child: detail.steps.isEmpty
-                            ? const Text('当前还没有记录步骤。')
-                            : Column(
-                                children: detail.steps
-                                    .map(
-                                      (step) => Padding(
-                                        padding: const EdgeInsets.only(bottom: 12),
-                                        child: _StepTile(step: step),
-                                      ),
-                                    )
-                                    .toList(),
-                              ),
-                      ),
-                      const SizedBox(height: 16),
-                      _SectionCard(
-                        title: '产物预览',
-                        child: detail.artifacts.isEmpty
-                            ? const Text('当前还没有产物。')
-                            : Column(
-                                children: detail.artifacts
-                                    .map(
-                                      (artifact) => Padding(
-                                        padding: const EdgeInsets.only(bottom: 12),
-                                        child: _ArtifactTile(artifact: artifact),
-                                      ),
-                                    )
-                                    .toList(),
-                              ),
-                      ),
-                      const SizedBox(height: 16),
-                      _SectionCard(
-                        title: '确认节点',
-                        child: detail.confirmations.isEmpty
-                            ? const Text('当前没有待确认节点。')
-                            : Column(
-                                children: detail.confirmations
-                                    .map(
-                                      (confirmation) => Padding(
-                                        padding: const EdgeInsets.only(bottom: 12),
-                                        child: _ConfirmationTile(
-                                          controller: controller,
-                                          taskRunId: detail.taskRunId,
-                                          confirmation: confirmation,
-                                        ),
-                                      ),
-                                    )
-                                    .toList(),
-                              ),
-                      ),
-                    ],
+          ? const Center(child: CircularProgressIndicator())
+          : SingleChildScrollView(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _SummaryCard(detail: detail),
+                  const SizedBox(height: 16),
+                  _StageTimeline(detail: detail),
+                  const SizedBox(height: 16),
+                  _SectionCard(
+                    title: '执行步骤',
+                    child: detail.steps.isEmpty
+                        ? const Text('当前还没有记录步骤。')
+                        : Column(
+                            children: detail.steps
+                                .map(
+                                  (step) => Padding(
+                                    padding: const EdgeInsets.only(bottom: 12),
+                                    child: _StepTile(step: step),
+                                  ),
+                                )
+                                .toList(),
+                          ),
                   ),
-                ),
+                  const SizedBox(height: 16),
+                  _SectionCard(
+                    title: '产物预览',
+                    child: detail.artifacts.isEmpty
+                        ? const Text('当前还没有产物。')
+                        : Column(
+                            children: detail.artifacts
+                                .map(
+                                  (artifact) => Padding(
+                                    padding: const EdgeInsets.only(bottom: 12),
+                                    child: _ArtifactTile(artifact: artifact),
+                                  ),
+                                )
+                                .toList(),
+                          ),
+                  ),
+                  const SizedBox(height: 16),
+                  _SectionCard(
+                    title: '确认节点',
+                    child: detail.confirmations.isEmpty
+                        ? const Text('当前没有待确认节点。')
+                        : Column(
+                            children: detail.confirmations
+                                .map(
+                                  (confirmation) => Padding(
+                                    padding: const EdgeInsets.only(bottom: 12),
+                                    child: _ConfirmationTile(
+                                      controller: controller,
+                                      taskRunId: detail.taskRunId,
+                                      confirmation: confirmation,
+                                    ),
+                                  ),
+                                )
+                                .toList(),
+                          ),
+                  ),
+                ],
+              ),
+            ),
     );
   }
 }
@@ -884,10 +959,15 @@ class _SummaryCard extends StatelessWidget {
               Expanded(
                 child: Text(
                   detail.title,
-                  style: theme.textTheme.headlineSmall?.copyWith(color: Colors.white),
+                  style: theme.textTheme.headlineSmall?.copyWith(
+                    color: Colors.white,
+                  ),
                 ),
               ),
-              _Badge(label: detail.status, color: _statusColor(detail.status)),
+              _Badge(
+                label: localizeStatus(detail.status),
+                color: _statusColor(detail.status),
+              ),
             ],
           ),
           const SizedBox(height: 12),
@@ -895,10 +975,16 @@ class _SummaryCard extends StatelessWidget {
             spacing: 8,
             runSpacing: 8,
             children: [
-              _Badge(label: detail.stage, color: const Color(0xFFEF8354)),
+              _Badge(
+                label: localizeStage(detail.stage),
+                color: const Color(0xFFEF8354),
+              ),
               _Badge(label: detail.sessionId, color: const Color(0xFF73C8A9)),
               if ((detail.intent ?? '').isNotEmpty)
-                _Badge(label: detail.intent!, color: const Color(0xFF8CCDEB)),
+                _Badge(
+                  label: localizeIntent(detail.intent),
+                  color: const Color(0xFF8CCDEB),
+                ),
             ],
           ),
           const SizedBox(height: 16),
@@ -975,8 +1061,8 @@ class _StageCard extends StatelessWidget {
     final accent = item.state == _StageVisualState.current
         ? const Color(0xFF116A7B)
         : item.state == _StageVisualState.completed
-            ? const Color(0xFF213848)
-            : const Color(0xFFA5B3BB);
+        ? const Color(0xFF213848)
+        : const Color(0xFFA5B3BB);
 
     return Container(
       width: 180,
@@ -985,11 +1071,13 @@ class _StageCard extends StatelessWidget {
         color: item.state == _StageVisualState.current
             ? const Color(0xFFEAF5FB)
             : item.state == _StageVisualState.completed
-                ? const Color(0xFFF4F7F8)
-                : const Color(0xFFFAFBFB),
+            ? const Color(0xFFF4F7F8)
+            : const Color(0xFFFAFBFB),
         borderRadius: BorderRadius.circular(18),
         border: Border.all(
-          color: item.state == _StageVisualState.pending ? const Color(0xFFD9E3E8) : accent,
+          color: item.state == _StageVisualState.pending
+              ? const Color(0xFFD9E3E8)
+              : accent,
           width: item.state == _StageVisualState.current ? 1.5 : 1,
         ),
       ),
@@ -1003,18 +1091,14 @@ class _StageCard extends StatelessWidget {
               color: accent.withValues(alpha: 0.14),
               shape: BoxShape.circle,
             ),
-            child: Icon(
-              item.icon,
-              color: accent,
-              size: 16,
-            ),
+            child: Icon(item.icon, color: accent, size: 16),
           ),
           const SizedBox(height: 8),
           Text(
             item.label,
-            style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                  fontWeight: FontWeight.w700,
-                ),
+            style: Theme.of(
+              context,
+            ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
           ),
           const SizedBox(height: 4),
           Text(
@@ -1022,9 +1106,9 @@ class _StageCard extends StatelessWidget {
             maxLines: 2,
             overflow: TextOverflow.ellipsis,
             style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                  color: const Color(0xFF72808A),
-                  height: 1.4,
-                ),
+              color: const Color(0xFF72808A),
+              height: 1.4,
+            ),
           ),
         ],
       ),
@@ -1060,17 +1144,17 @@ class _ActionHintCard extends StatelessWidget {
                 Text(
                   '当前建议动作',
                   style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                        color: Colors.white,
-                        fontWeight: FontWeight.w700,
-                      ),
+                    color: Colors.white,
+                    fontWeight: FontWeight.w700,
+                  ),
                 ),
                 const SizedBox(height: 6),
                 Text(
                   hint,
                   style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                        color: Colors.white.withValues(alpha: 0.86),
-                        height: 1.45,
-                      ),
+                    color: Colors.white.withValues(alpha: 0.86),
+                    height: 1.45,
+                  ),
                 ),
               ],
             ),
@@ -1105,19 +1189,22 @@ class _StepTile extends StatelessWidget {
                 child: Text(
                   step.title,
                   style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                        fontWeight: FontWeight.w700,
-                      ),
+                    fontWeight: FontWeight.w700,
+                  ),
                 ),
               ),
-              _Badge(label: step.status, color: _statusColor(step.status)),
+              _Badge(
+                label: localizeStatus(step.status),
+                color: _statusColor(step.status),
+              ),
             ],
           ),
           const SizedBox(height: 8),
           Text(
-            '${step.stepType} · ${step.stepKey}',
-            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                  color: const Color(0xFF72808A),
-                ),
+            '${localizeStepType(step.stepType)} · ${localizeStage(step.stepKey)}',
+            style: Theme.of(
+              context,
+            ).textTheme.bodySmall?.copyWith(color: const Color(0xFF72808A)),
           ),
           if ((step.outputJson ?? '').isNotEmpty) ...[
             const SizedBox(height: 10),
@@ -1125,16 +1212,18 @@ class _StepTile extends StatelessWidget {
               step.outputJson!,
               maxLines: 4,
               overflow: TextOverflow.ellipsis,
-              style: Theme.of(context).textTheme.bodyMedium?.copyWith(height: 1.45),
+              style: Theme.of(
+                context,
+              ).textTheme.bodyMedium?.copyWith(height: 1.45),
             ),
           ],
           if ((step.error ?? '').isNotEmpty) ...[
             const SizedBox(height: 10),
             Text(
               step.error!,
-              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                    color: const Color(0xFFC85D3A),
-                  ),
+              style: Theme.of(
+                context,
+              ).textTheme.bodyMedium?.copyWith(color: const Color(0xFFC85D3A)),
             ),
           ],
         ],
@@ -1169,19 +1258,22 @@ class _ArtifactTile extends StatelessWidget {
                 child: Text(
                   artifact.title,
                   style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                        fontWeight: FontWeight.w700,
-                      ),
+                    fontWeight: FontWeight.w700,
+                  ),
                 ),
               ),
-              _Badge(label: artifact.artifactType, color: const Color(0xFF116A7B)),
+              _Badge(
+                label: localizeArtifactType(artifact.artifactType),
+                color: const Color(0xFF116A7B),
+              ),
             ],
           ),
           const SizedBox(height: 8),
           Text(
-            '${artifact.provider} · v${artifact.version} · ${artifact.status}',
-            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                  color: const Color(0xFF72808A),
-                ),
+            '${localizeProvider(artifact.provider)} · 版本 ${artifact.version} · ${localizeStatus(artifact.status)}',
+            style: Theme.of(
+              context,
+            ).textTheme.bodySmall?.copyWith(color: const Color(0xFF72808A)),
           ),
           const SizedBox(height: 12),
           previewBody,
@@ -1195,9 +1287,9 @@ class _ArtifactTile extends StatelessWidget {
                   onPressed: () async {
                     await Clipboard.setData(ClipboardData(text: artifact.url!));
                     if (context.mounted) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('产物链接已复制')),
-                      );
+                      ScaffoldMessenger.of(
+                        context,
+                      ).showSnackBar(const SnackBar(content: Text('产物链接已复制')));
                     }
                   },
                 ),
@@ -1210,20 +1302,24 @@ class _ArtifactTile extends StatelessWidget {
               actions: [
                 _InlineAction(
                   icon: Icons.unfold_more_rounded,
-                  label: '查看原始预览',
+                  label: '查看原始数据',
                   onPressed: () => _showRawPreview(context, artifact, preview),
                 ),
                 _InlineAction(
                   icon: Icons.copy_all_rounded,
-                  label: '复制预览 JSON',
+                  label: '复制预览数据',
                   onPressed: () async {
                     await Clipboard.setData(
-                      ClipboardData(text: const JsonEncoder.withIndent('  ').convert(preview)),
+                      ClipboardData(
+                        text: const JsonEncoder.withIndent(
+                          '  ',
+                        ).convert(preview),
+                      ),
                     );
                     if (context.mounted) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('预览 JSON 已复制')),
-                      );
+                      ScaffoldMessenger.of(
+                        context,
+                      ).showSnackBar(const SnackBar(content: Text('预览数据已复制')));
                     }
                   },
                 ),
@@ -1244,16 +1340,16 @@ class _ArtifactTile extends StatelessWidget {
       if ((artifact.url ?? '').isNotEmpty) {
         return SelectableText(
           artifact.url!,
-          style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                color: const Color(0xFF116A7B),
-              ),
+          style: Theme.of(
+            context,
+          ).textTheme.bodyMedium?.copyWith(color: const Color(0xFF116A7B)),
         );
       }
       return Text(
         '当前没有可预览的结构化内容。',
-        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-              color: const Color(0xFF72808A),
-            ),
+        style: Theme.of(
+          context,
+        ).textTheme.bodyMedium?.copyWith(color: const Color(0xFF72808A)),
       );
     }
 
@@ -1311,9 +1407,9 @@ class _ArtifactTile extends StatelessWidget {
                       child: SelectableText(
                         prettyJson,
                         style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                              fontFamily: 'Consolas',
-                              height: 1.5,
-                            ),
+                          fontFamily: 'Consolas',
+                          height: 1.5,
+                        ),
                       ),
                     ),
                   ),
@@ -1328,17 +1424,15 @@ class _ArtifactTile extends StatelessWidget {
 }
 
 class _DocumentPreview extends StatelessWidget {
-  const _DocumentPreview({
-    required this.preview,
-    required this.url,
-  });
+  const _DocumentPreview({required this.preview, required this.url});
 
   final Map<String, dynamic> preview;
   final String? url;
 
   @override
   Widget build(BuildContext context) {
-    final sections = (preview['sections'] as List?)
+    final sections =
+        (preview['sections'] as List?)
             ?.whereType<Map<String, dynamic>>()
             .toList() ??
         const <Map<String, dynamic>>[];
@@ -1358,17 +1452,17 @@ class _DocumentPreview extends StatelessWidget {
           if ((title ?? '').isNotEmpty)
             Text(
               title!,
-              style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                    fontWeight: FontWeight.w700,
-                  ),
+              style: Theme.of(
+                context,
+              ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
             ),
           if ((statsAsOf ?? '').isNotEmpty) ...[
             const SizedBox(height: 6),
             Text(
               '统计截至 $statsAsOf',
-              style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: const Color(0xFF72808A),
-              ),
+              style: Theme.of(
+                context,
+              ).textTheme.bodySmall?.copyWith(color: const Color(0xFF72808A)),
             ),
           ],
           const SizedBox(height: 10),
@@ -1377,25 +1471,27 @@ class _DocumentPreview extends StatelessWidget {
             const SizedBox(height: 10),
             SelectableText(
               url!,
-              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                    color: const Color(0xFF116A7B),
-                  ),
+              style: Theme.of(
+                context,
+              ).textTheme.bodyMedium?.copyWith(color: const Color(0xFF116A7B)),
             ),
           ],
           if (sections.isNotEmpty) ...[
             const SizedBox(height: 14),
-            ...sections.take(4).map(
-              (section) => Padding(
-                padding: const EdgeInsets.only(bottom: 10),
-                child: _DocSectionTile(section: section),
-              ),
-            ),
+            ...sections
+                .take(4)
+                .map(
+                  (section) => Padding(
+                    padding: const EdgeInsets.only(bottom: 10),
+                    child: _DocSectionTile(section: section),
+                  ),
+                ),
             if (sections.length > 4)
               Text(
                 '还有 ${sections.length - 4} 个章节未展开',
-                style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      color: const Color(0xFF72808A),
-                    ),
+                style: Theme.of(
+                  context,
+                ).textTheme.bodySmall?.copyWith(color: const Color(0xFF72808A)),
               ),
           ],
         ],
@@ -1433,9 +1529,9 @@ class _DocSyncStatus extends StatelessWidget {
           Text(
             label,
             style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                  color: color,
-                  fontWeight: FontWeight.w700,
-                ),
+              color: color,
+              fontWeight: FontWeight.w700,
+            ),
           ),
         ],
       ),
@@ -1451,7 +1547,8 @@ class _DocSectionTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final heading = (section['heading'] as String?)?.trim();
-    final paragraphs = (section['paragraphs'] as List?)
+    final paragraphs =
+        (section['paragraphs'] as List?)
             ?.map((item) => item.toString().trim())
             .where((item) => item.isNotEmpty)
             .toList() ??
@@ -1470,20 +1567,24 @@ class _DocSectionTile extends StatelessWidget {
         children: [
           Text(
             (heading ?? '').isNotEmpty ? heading! : '未命名章节',
-            style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                  fontWeight: FontWeight.w700,
-                ),
+            style: Theme.of(
+              context,
+            ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
           ),
           const SizedBox(height: 8),
-          ...paragraphs.take(2).map(
-            (paragraph) => Padding(
-              padding: const EdgeInsets.only(bottom: 6),
-              child: Text(
-                paragraph,
-                style: Theme.of(context).textTheme.bodyMedium?.copyWith(height: 1.45),
+          ...paragraphs
+              .take(2)
+              .map(
+                (paragraph) => Padding(
+                  padding: const EdgeInsets.only(bottom: 6),
+                  child: Text(
+                    paragraph,
+                    style: Theme.of(
+                      context,
+                    ).textTheme.bodyMedium?.copyWith(height: 1.45),
+                  ),
+                ),
               ),
-            ),
-          ),
         ],
       ),
     );
@@ -1499,16 +1600,19 @@ class _SlidesPreview extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = (preview['theme'] as String?)?.trim();
     final audience = (preview['audience'] as String?)?.trim();
-    final slides = (preview['slides'] as List?)
+    final slides =
+        (preview['slides'] as List?)
             ?.whereType<Map<String, dynamic>>()
             .toList() ??
         const <Map<String, dynamic>>[];
-    final emphasis = (preview['emphasis'] as List?)
+    final emphasis =
+        (preview['emphasis'] as List?)
             ?.map((item) => item.toString().trim())
             .where((item) => item.isNotEmpty)
             .toList() ??
         const <String>[];
-    final assets = (preview['assets'] as List?)
+    final assets =
+        (preview['assets'] as List?)
             ?.map((item) => item.toString().trim())
             .where((item) => item.isNotEmpty)
             .toList() ??
@@ -1529,17 +1633,17 @@ class _SlidesPreview extends StatelessWidget {
           if ((theme ?? '').isNotEmpty)
             Text(
               theme!,
-              style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                    color: Colors.white,
-                  ),
+              style: Theme.of(
+                context,
+              ).textTheme.titleLarge?.copyWith(color: Colors.white),
             ),
           if ((audience ?? '').isNotEmpty) ...[
             const SizedBox(height: 6),
             Text(
               '适用场景：$audience',
               style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                    color: Colors.white.withValues(alpha: 0.82),
-                  ),
+                color: Colors.white.withValues(alpha: 0.82),
+              ),
             ),
           ],
           if (slides.isNotEmpty) ...[
@@ -1551,10 +1655,7 @@ class _SlidesPreview extends StatelessWidget {
                 itemCount: slides.length.clamp(0, 5),
                 separatorBuilder: (context, index) => const SizedBox(width: 10),
                 itemBuilder: (context, index) {
-                  return _SlideCard(
-                    index: index,
-                    slide: slides[index],
-                  );
+                  return _SlideCard(index: index, slide: slides[index]);
                 },
               ),
             ),
@@ -1564,9 +1665,9 @@ class _SlidesPreview extends StatelessWidget {
             Text(
               '演示重点',
               style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                    color: Colors.white,
-                    fontWeight: FontWeight.w700,
-                  ),
+                color: Colors.white,
+                fontWeight: FontWeight.w700,
+              ),
             ),
             const SizedBox(height: 8),
             Wrap(
@@ -1576,7 +1677,10 @@ class _SlidesPreview extends StatelessWidget {
                   .take(4)
                   .map(
                     (item) => Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 8,
+                      ),
                       decoration: BoxDecoration(
                         color: Colors.white.withValues(alpha: 0.1),
                         borderRadius: BorderRadius.circular(999),
@@ -1584,8 +1688,8 @@ class _SlidesPreview extends StatelessWidget {
                       child: Text(
                         item,
                         style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                              color: Colors.white.withValues(alpha: 0.9),
-                            ),
+                          color: Colors.white.withValues(alpha: 0.9),
+                        ),
                       ),
                     ),
                   )
@@ -1681,7 +1785,8 @@ class _SlidesRehearsalDialogState extends State<_SlidesRehearsalDialog> {
   @override
   Widget build(BuildContext context) {
     final currentSlide = widget.slides[_currentIndex];
-    final currentBullets = (currentSlide['bullets'] as List?)
+    final currentBullets =
+        (currentSlide['bullets'] as List?)
             ?.map((item) => item.toString().trim())
             .where((item) => item.isNotEmpty)
             .toList() ??
@@ -1718,8 +1823,12 @@ class _SlidesRehearsalDialogState extends State<_SlidesRehearsalDialog> {
                   _currentIndex = index;
                 });
               },
-              onPrevious: _currentIndex == 0 ? null : () => _goToPage(_currentIndex - 1),
-              onNext: _currentIndex == widget.slides.length - 1 ? null : () => _goToPage(_currentIndex + 1),
+              onPrevious: _currentIndex == 0
+                  ? null
+                  : () => _goToPage(_currentIndex - 1),
+              onNext: _currentIndex == widget.slides.length - 1
+                  ? null
+                  : () => _goToPage(_currentIndex + 1),
             );
             final notePanel = _RehearsalNotesPanel(
               currentIndex: _currentIndex,
@@ -1774,10 +1883,7 @@ class _SlidesRehearsalDialogState extends State<_SlidesRehearsalDialog> {
 }
 
 class _RehearsalTopBar extends StatelessWidget {
-  const _RehearsalTopBar({
-    required this.title,
-    required this.audience,
-  });
+  const _RehearsalTopBar({required this.title, required this.audience});
 
   final String? title;
   final String? audience;
@@ -1792,17 +1898,17 @@ class _RehearsalTopBar extends StatelessWidget {
             children: [
               Text(
                 (title ?? '').isNotEmpty ? title! : '演示稿排练模式',
-                style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                      color: Colors.white,
-                    ),
+                style: Theme.of(
+                  context,
+                ).textTheme.headlineSmall?.copyWith(color: Colors.white),
               ),
               if ((audience ?? '').isNotEmpty) ...[
                 const SizedBox(height: 6),
                 Text(
                   '面向 $audience',
                   style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                        color: Colors.white.withValues(alpha: 0.72),
-                      ),
+                    color: Colors.white.withValues(alpha: 0.72),
+                  ),
                 ),
               ],
             ],
@@ -1851,10 +1957,7 @@ class _RehearsalStage extends StatelessWidget {
               itemCount: slides.length,
               onPageChanged: onPageChanged,
               itemBuilder: (context, index) {
-                return _SlideDeckPage(
-                  slide: slides[index],
-                  index: index,
-                );
+                return _SlideDeckPage(slide: slides[index], index: index);
               },
             ),
           ),
@@ -1870,9 +1973,9 @@ class _RehearsalStage extends StatelessWidget {
               Text(
                 '第 ${currentIndex + 1} / ${slides.length} 页',
                 style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                      fontWeight: FontWeight.w700,
-                      color: const Color(0xFF37444C),
-                    ),
+                  fontWeight: FontWeight.w700,
+                  color: const Color(0xFF37444C),
+                ),
               ),
               const Spacer(),
               FilledButton.icon(
@@ -1889,10 +1992,7 @@ class _RehearsalStage extends StatelessWidget {
 }
 
 class _SlideDeckPage extends StatelessWidget {
-  const _SlideDeckPage({
-    required this.slide,
-    required this.index,
-  });
+  const _SlideDeckPage({required this.slide, required this.index});
 
   final Map<String, dynamic> slide;
   final int index;
@@ -1900,7 +2000,8 @@ class _SlideDeckPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final title = (slide['title'] as String?)?.trim();
-    final bullets = (slide['bullets'] as List?)
+    final bullets =
+        (slide['bullets'] as List?)
             ?.map((item) => item.toString().trim())
             .where((item) => item.isNotEmpty)
             .toList() ??
@@ -1927,21 +2028,21 @@ class _SlideDeckPage extends StatelessWidget {
               borderRadius: BorderRadius.circular(999),
             ),
             child: Text(
-              'P${index + 1}',
+              '第 ${index + 1} 页',
               style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                    color: Colors.white.withValues(alpha: 0.88),
-                    fontWeight: FontWeight.w700,
-                  ),
+                color: Colors.white.withValues(alpha: 0.88),
+                fontWeight: FontWeight.w700,
+              ),
             ),
           ),
           const SizedBox(height: 18),
           Text(
             (title ?? '').isNotEmpty ? title! : '未命名页面',
             style: Theme.of(context).textTheme.displaySmall?.copyWith(
-                  color: Colors.white,
-                  fontSize: 32,
-                  height: 1.18,
-                ),
+              color: Colors.white,
+              fontSize: 32,
+              height: 1.18,
+            ),
           ),
           const SizedBox(height: 22),
           Expanded(
@@ -1966,7 +2067,8 @@ class _SlideDeckPage extends StatelessWidget {
                           Expanded(
                             child: Text(
                               bullet,
-                              style: Theme.of(context).textTheme.bodyLarge?.copyWith(
+                              style: Theme.of(context).textTheme.bodyLarge
+                                  ?.copyWith(
                                     color: Colors.white.withValues(alpha: 0.94),
                                     height: 1.5,
                                   ),
@@ -2019,10 +2121,7 @@ class _RehearsalNotesPanel extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              '排练笔记',
-              style: Theme.of(context).textTheme.headlineSmall,
-            ),
+            Text('排练笔记', style: Theme.of(context).textTheme.headlineSmall),
             const SizedBox(height: 10),
             _Badge(
               label: '当前页面 ${currentIndex + 1}/$totalSlides',
@@ -2048,17 +2147,11 @@ class _RehearsalNotesPanel extends StatelessWidget {
             ],
             if (emphasis.isNotEmpty) ...[
               const SizedBox(height: 12),
-              _NoteBlock(
-                title: '需要刻意强调',
-                lines: emphasis.take(4).toList(),
-              ),
+              _NoteBlock(title: '需要刻意强调', lines: emphasis.take(4).toList()),
             ],
             if (assets.isNotEmpty) ...[
               const SizedBox(height: 12),
-              _NoteBlock(
-                title: '建议补充素材',
-                lines: assets.take(4).toList(),
-              ),
+              _NoteBlock(title: '建议补充素材', lines: assets.take(4).toList()),
             ],
           ],
         ),
@@ -2068,10 +2161,7 @@ class _RehearsalNotesPanel extends StatelessWidget {
 }
 
 class _NoteBlock extends StatelessWidget {
-  const _NoteBlock({
-    required this.title,
-    required this.lines,
-  });
+  const _NoteBlock({required this.title, required this.lines});
 
   final String title;
   final List<String> lines;
@@ -2091,9 +2181,9 @@ class _NoteBlock extends StatelessWidget {
         children: [
           Text(
             title,
-            style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                  fontWeight: FontWeight.w700,
-                ),
+            style: Theme.of(
+              context,
+            ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
           ),
           const SizedBox(height: 10),
           ...lines.map(
@@ -2101,7 +2191,9 @@ class _NoteBlock extends StatelessWidget {
               padding: const EdgeInsets.only(bottom: 8),
               child: Text(
                 '• $line',
-                style: Theme.of(context).textTheme.bodyMedium?.copyWith(height: 1.45),
+                style: Theme.of(
+                  context,
+                ).textTheme.bodyMedium?.copyWith(height: 1.45),
               ),
             ),
           ),
@@ -2112,10 +2204,7 @@ class _NoteBlock extends StatelessWidget {
 }
 
 class _SlideCard extends StatelessWidget {
-  const _SlideCard({
-    required this.index,
-    required this.slide,
-  });
+  const _SlideCard({required this.index, required this.slide});
 
   final int index;
   final Map<String, dynamic> slide;
@@ -2123,7 +2212,8 @@ class _SlideCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final title = (slide['title'] as String?)?.trim();
-    final bullets = (slide['bullets'] as List?)
+    final bullets =
+        (slide['bullets'] as List?)
             ?.map((item) => item.toString().trim())
             .where((item) => item.isNotEmpty)
             .toList() ??
@@ -2140,32 +2230,36 @@ class _SlideCard extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            'P${index + 1}',
-            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                  color: const Color(0xFF72808A),
-                ),
+            '第 ${index + 1} 页',
+            style: Theme.of(
+              context,
+            ).textTheme.bodySmall?.copyWith(color: const Color(0xFF72808A)),
           ),
           const SizedBox(height: 6),
           Text(
             (title ?? '').isNotEmpty ? title! : '未命名页面',
             maxLines: 2,
             overflow: TextOverflow.ellipsis,
-            style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                  fontWeight: FontWeight.w700,
-                ),
+            style: Theme.of(
+              context,
+            ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
           ),
           const SizedBox(height: 10),
-          ...bullets.take(4).map(
-            (bullet) => Padding(
-              padding: const EdgeInsets.only(bottom: 6),
-              child: Text(
-                '• $bullet',
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: Theme.of(context).textTheme.bodySmall?.copyWith(height: 1.45),
+          ...bullets
+              .take(4)
+              .map(
+                (bullet) => Padding(
+                  padding: const EdgeInsets.only(bottom: 6),
+                  child: Text(
+                    '• $bullet',
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(
+                      context,
+                    ).textTheme.bodySmall?.copyWith(height: 1.45),
+                  ),
+                ),
               ),
-            ),
-          ),
         ],
       ),
     );
@@ -2181,7 +2275,10 @@ class _GenericPreview extends StatelessWidget {
   Widget build(BuildContext context) {
     final lines = preview.entries
         .take(6)
-        .map((entry) => '${entry.key}: ${_stringifyPreviewValue(entry.value)}')
+        .map(
+          (entry) =>
+              '${localizePreviewKey(entry.key)}：${_stringifyPreviewValue(entry.value)}',
+        )
         .toList();
 
     return Container(
@@ -2265,12 +2362,12 @@ class _ConfirmationTile extends StatelessWidget {
                 child: Text(
                   confirmation.prompt,
                   style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                        fontWeight: FontWeight.w700,
-                      ),
+                    fontWeight: FontWeight.w700,
+                  ),
                 ),
               ),
               _Badge(
-                label: confirmation.status,
+                label: localizeStatus(confirmation.status),
                 color: confirmation.status == 'answered'
                     ? const Color(0xFF116A7B)
                     : const Color(0xFFC85D3A),
@@ -2280,25 +2377,25 @@ class _ConfirmationTile extends StatelessWidget {
           if (confirmation.status == 'answered') ...[
             const SizedBox(height: 10),
             Text(
-              '已选择：${confirmation.answerValue ?? '-'}${confirmation.answeredBy == null ? '' : ' · ${confirmation.answeredBy}'}',
+              '已选择：${confirmation.answerValue ?? '-'}${confirmation.answeredBy == null ? '' : ' · ${localizeActor(confirmation.answeredBy)}'}',
               style: Theme.of(context).textTheme.bodyMedium,
             ),
             if (confirmation.answeredAt != null) ...[
               const SizedBox(height: 6),
               Text(
                 '确认时间：${_formatDateTime(confirmation.answeredAt)}',
-                style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      color: const Color(0xFF72808A),
-                    ),
+                style: Theme.of(
+                  context,
+                ).textTheme.bodySmall?.copyWith(color: const Color(0xFF72808A)),
               ),
             ],
           ] else if (options.isNotEmpty) ...[
             const SizedBox(height: 12),
             Text(
-              '待你确认后，Agent 才会继续推进后续动作。',
-              style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: const Color(0xFF72808A),
-                  ),
+              '待你确认后，智能体才会继续推进后续动作。',
+              style: Theme.of(
+                context,
+              ).textTheme.bodySmall?.copyWith(color: const Color(0xFF72808A)),
             ),
             const SizedBox(height: 12),
             Wrap(
@@ -2310,9 +2407,9 @@ class _ConfirmationTile extends StatelessWidget {
                       onPressed: controller.isSubmittingConfirmation
                           ? null
                           : () => _openConfirmationDialog(
-                                context,
-                                option: option,
-                              ),
+                              context,
+                              option: option,
+                            ),
                       icon: Icon(
                         option.contains('取消') || option.contains('稍后')
                             ? Icons.pause_circle_outline_rounded
@@ -2345,9 +2442,9 @@ class _ConfirmationTile extends StatelessWidget {
             children: [
               Text(
                 confirmation.prompt,
-                style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                      fontWeight: FontWeight.w700,
-                    ),
+                style: Theme.of(
+                  context,
+                ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
               ),
               const SizedBox(height: 12),
               Container(
@@ -2365,9 +2462,9 @@ class _ConfirmationTile extends StatelessWidget {
               const SizedBox(height: 12),
               Text(
                 '确认后，工作台和后端任务运行态都会同步刷新。',
-                style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      color: const Color(0xFF72808A),
-                    ),
+                style: Theme.of(
+                  context,
+                ).textTheme.bodySmall?.copyWith(color: const Color(0xFF72808A)),
               ),
             ],
           ),
@@ -2398,16 +2495,16 @@ class _ConfirmationTile extends StatelessWidget {
       if (!context.mounted) {
         return;
       }
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('已提交确认：$option')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('已提交确认：$option')));
     } catch (_) {
       if (!context.mounted) {
         return;
       }
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('提交确认失败，请稍后重试')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('提交确认失败，请稍后重试')));
     }
   }
 }
@@ -2446,9 +2543,9 @@ class _PanelShell extends StatelessWidget {
           const SizedBox(height: 6),
           Text(
             subtitle,
-            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                  color: const Color(0xFF72808A),
-                ),
+            style: Theme.of(
+              context,
+            ).textTheme.bodyMedium?.copyWith(color: const Color(0xFF72808A)),
           ),
           const SizedBox(height: 16),
           Expanded(child: child),
@@ -2459,10 +2556,7 @@ class _PanelShell extends StatelessWidget {
 }
 
 class _SectionCard extends StatelessWidget {
-  const _SectionCard({
-    required this.title,
-    required this.child,
-  });
+  const _SectionCard({required this.title, required this.child});
 
   final String title;
   final Widget child;
@@ -2480,10 +2574,7 @@ class _SectionCard extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            title,
-            style: Theme.of(context).textTheme.titleLarge,
-          ),
+          Text(title, style: Theme.of(context).textTheme.titleLarge),
           const SizedBox(height: 14),
           child,
         ],
@@ -2493,10 +2584,7 @@ class _SectionCard extends StatelessWidget {
 }
 
 class _StatusPill extends StatelessWidget {
-  const _StatusPill({
-    required this.label,
-    required this.accent,
-  });
+  const _StatusPill({required this.label, required this.accent});
 
   final String label;
   final Color accent;
@@ -2522,10 +2610,7 @@ class _StatusPill extends StatelessWidget {
 }
 
 class _InfoChip extends StatelessWidget {
-  const _InfoChip({
-    required this.icon,
-    required this.text,
-  });
+  const _InfoChip({required this.icon, required this.text});
 
   final IconData icon;
   final String text;
@@ -2555,10 +2640,7 @@ class _InfoChip extends StatelessWidget {
 }
 
 class _Badge extends StatelessWidget {
-  const _Badge({
-    required this.label,
-    required this.color,
-  });
+  const _Badge({required this.label, required this.color});
 
   final String label;
   final Color color;
@@ -2609,16 +2691,13 @@ class _ErrorBanner extends StatelessWidget {
           Expanded(
             child: Text(
               message,
-              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                    color: const Color(0xFF8B3720),
-                  ),
+              style: Theme.of(
+                context,
+              ).textTheme.bodyMedium?.copyWith(color: const Color(0xFF8B3720)),
             ),
           ),
           const SizedBox(width: 12),
-          TextButton(
-            onPressed: onDismiss,
-            child: const Text('关闭'),
-          ),
+          TextButton(onPressed: onDismiss, child: const Text('关闭')),
           FilledButton.tonal(
             onPressed: () => onRetry(),
             child: const Text('重试'),
@@ -2630,10 +2709,7 @@ class _ErrorBanner extends StatelessWidget {
 }
 
 class _EmptyState extends StatelessWidget {
-  const _EmptyState({
-    required this.title,
-    required this.message,
-  });
+  const _EmptyState({required this.title, required this.message});
 
   final String title;
   final String message;
@@ -2669,9 +2745,9 @@ class _EmptyState extends StatelessWidget {
             Text(
               message,
               style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                    color: const Color(0xFF72808A),
-                    height: 1.5,
-                  ),
+                color: const Color(0xFF72808A),
+                height: 1.5,
+              ),
               textAlign: TextAlign.center,
             ),
           ],
@@ -2755,20 +2831,7 @@ String _stringifyPreviewValue(Object? value) {
 }
 
 String _statusLabel(String status) {
-  switch (status) {
-    case 'running':
-      return '运行中';
-    case 'waiting_confirmation':
-      return '待确认';
-    case 'completed':
-      return '已完成';
-    case 'failed':
-      return '失败';
-    case 'queued':
-      return '排队中';
-    default:
-      return status;
-  }
+  return localizeStatus(status);
 }
 
 class _StatusOption {
@@ -2808,7 +2871,7 @@ List<_StageItem> _buildStageItems(TaskRunDetail detail) {
     const _StageItem(
       key: 'queued',
       label: '请求进入',
-      caption: '接收 IM 触发并建立任务实例',
+      caption: '接收消息触发并建立任务实例',
       icon: Icons.inbox_rounded,
       state: _StageVisualState.pending,
     ),
@@ -2859,16 +2922,13 @@ List<_StageItem> _buildStageItems(TaskRunDetail detail) {
         state: index < currentIndex
             ? _StageVisualState.completed
             : index == currentIndex
-                ? _StageVisualState.current
-                : _StageVisualState.pending,
+            ? _StageVisualState.current
+            : _StageVisualState.pending,
       ),
   ];
 }
 
-int _resolveStageIndex({
-  required String stage,
-  required String status,
-}) {
+int _resolveStageIndex({required String stage, required String status}) {
   if (status == 'completed' || stage == 'delivered') {
     return 5;
   }
@@ -2881,7 +2941,9 @@ int _resolveStageIndex({
   if (stage.contains('intent') || stage.contains('fallback')) {
     return 2;
   }
-  if (stage.contains('context') || stage.contains('recall') || stage.contains('building')) {
+  if (stage.contains('context') ||
+      stage.contains('recall') ||
+      stage.contains('building')) {
     return 1;
   }
   return 0;
@@ -2909,11 +2971,7 @@ String _buildActionHint(TaskRunDetail detail) {
   return '当前任务已进入工作台，可继续观察状态变化或从飞书侧补充上下文。';
 }
 
-enum _StageVisualState {
-  pending,
-  current,
-  completed,
-}
+enum _StageVisualState { pending, current, completed }
 
 class _StageItem {
   const _StageItem({

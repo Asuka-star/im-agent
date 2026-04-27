@@ -5,13 +5,12 @@ import 'package:pilot_workbench/src/config/app_config.dart';
 import 'package:pilot_workbench/src/models/task_run_models.dart';
 import 'package:pilot_workbench/src/services/workbench_api.dart';
 import 'package:pilot_workbench/src/services/workbench_socket.dart';
+import 'package:pilot_workbench/src/utils/workbench_labels.dart';
 
 class WorkbenchController extends ChangeNotifier {
-  WorkbenchController({
-    WorkbenchApi? api,
-    WorkbenchSocket? socket,
-  })  : _api = api ?? WorkbenchApi(),
-        _socket = socket ?? WorkbenchSocket();
+  WorkbenchController({WorkbenchApi? api, WorkbenchSocket? socket})
+    : _api = api ?? WorkbenchApi(),
+      _socket = socket ?? WorkbenchSocket();
 
   final WorkbenchApi _api;
   final WorkbenchSocket _socket;
@@ -85,7 +84,7 @@ class WorkbenchController extends ChangeNotifier {
         await selectTaskRun(runs.first.taskRunId, quiet: true);
       }
     } catch (error) {
-      errorMessage = error.toString();
+      errorMessage = localizeWorkbenchError(error);
     } finally {
       isLoadingList = false;
       notifyListeners();
@@ -115,7 +114,7 @@ class WorkbenchController extends ChangeNotifier {
         taskConnectionState = 'polling';
       }
     } catch (error) {
-      errorMessage = error.toString();
+      errorMessage = localizeWorkbenchError(error);
     } finally {
       isLoadingDetail = false;
       notifyListeners();
@@ -139,7 +138,7 @@ class WorkbenchController extends ChangeNotifier {
       );
       await refreshTaskRuns(keepSelection: true);
     } catch (error) {
-      errorMessage = error.toString();
+      errorMessage = localizeWorkbenchError(error);
       rethrow;
     } finally {
       isSubmittingConfirmation = false;
@@ -205,7 +204,7 @@ class WorkbenchController extends ChangeNotifier {
             _updateFallbackRefresh();
           }
           sessionConnectionState = shouldRetry ? 'error' : 'polling';
-          errorMessage = error.toString();
+          errorMessage = localizeWorkbenchError(error);
           notifyListeners();
           if (shouldRetry) {
             _scheduleSessionReconnect(sessionId);
@@ -225,7 +224,7 @@ class WorkbenchController extends ChangeNotifier {
         _updateFallbackRefresh();
       }
       sessionConnectionState = shouldRetry ? 'error' : 'polling';
-      errorMessage = error.toString();
+      errorMessage = localizeWorkbenchError(error);
       notifyListeners();
       if (shouldRetry) {
         _scheduleSessionReconnect(sessionId);
@@ -272,7 +271,7 @@ class WorkbenchController extends ChangeNotifier {
             _updateFallbackRefresh();
           }
           taskConnectionState = shouldRetry ? 'error' : 'polling';
-          errorMessage = error.toString();
+          errorMessage = localizeWorkbenchError(error);
           notifyListeners();
           if (shouldRetry) {
             _scheduleTaskReconnect(taskRunId);
@@ -292,7 +291,7 @@ class WorkbenchController extends ChangeNotifier {
         _updateFallbackRefresh();
       }
       taskConnectionState = shouldRetry ? 'error' : 'polling';
-      errorMessage = error.toString();
+      errorMessage = localizeWorkbenchError(error);
       notifyListeners();
       if (shouldRetry) {
         _scheduleTaskReconnect(taskRunId);
@@ -402,13 +401,15 @@ class WorkbenchController extends ChangeNotifier {
           _mergeSummary(_summaryFromDetail(detail));
         } else {
           selectedTaskRun = null;
-          taskConnectionState = _taskRealtimeEnabled ? taskConnectionState : 'idle';
+          taskConnectionState = _taskRealtimeEnabled
+              ? taskConnectionState
+              : 'idle';
         }
       }
 
       notifyListeners();
     } catch (error) {
-      errorMessage ??= error.toString();
+      errorMessage ??= localizeWorkbenchError(error);
       notifyListeners();
     }
   }
@@ -418,7 +419,10 @@ class WorkbenchController extends ChangeNotifier {
     if (event['type'] == 'session.snapshot') {
       final list = event['task_runs'];
       if (list is List) {
-        taskRuns = list.whereType<Map<String, dynamic>>().map(TaskRunSummary.fromJson).toList();
+        taskRuns = list
+            .whereType<Map<String, dynamic>>()
+            .map(TaskRunSummary.fromJson)
+            .toList();
       }
     } else if (payload is Map<String, dynamic>) {
       _mergeSummary(TaskRunSummary.fromJson(payload));
@@ -441,7 +445,9 @@ class WorkbenchController extends ChangeNotifier {
 
   void _mergeSummary(TaskRunSummary incoming) {
     final items = [...taskRuns];
-    final index = items.indexWhere((item) => item.taskRunId == incoming.taskRunId);
+    final index = items.indexWhere(
+      (item) => item.taskRunId == incoming.taskRunId,
+    );
     if (index >= 0) {
       items[index] = incoming;
     } else {
