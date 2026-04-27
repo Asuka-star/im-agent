@@ -35,6 +35,15 @@ async def receive_events(request: Request) -> dict:
         logger.warning("Rejected Feishu callback due to invalid verification token")
         raise HTTPException(status_code=403, detail="Invalid Feishu verification token")
 
+    raw_message = envelope.event.message if envelope.event else None
+    raw_message_id = raw_message.message_id if raw_message else None
+    if dedup_service.already_processed(raw_message_id):
+        logger.info(
+            "Skipping duplicate message event before extraction: message_id=%s",
+            raw_message_id,
+        )
+        return {"code": 0, "msg": "duplicate_ignored"}
+
     message_context = event_handler.extract_message_context(envelope)
     if message_context is None:
         logger.info("Ignored callback because no supported message context was extracted")
@@ -45,10 +54,11 @@ async def receive_events(request: Request) -> dict:
         return {"code": 0, "msg": "duplicate_ignored"}
 
     logger.info(
-        "Processing message event: message_id=%s chat_id=%s sender_id=%s mentioned=%s mentioned_users=%s text=%s raw_text=%s",
+        "Processing message event: message_id=%s chat_id=%s sender_id=%s message_type=%s mentioned=%s mentioned_users=%s text=%s raw_text=%s",
         message_context.message_id,
         message_context.chat_id,
         message_context.sender_id,
+        message_context.message_type,
         message_context.is_mentioned,
         message_context.mentioned_user_names,
         message_context.text,

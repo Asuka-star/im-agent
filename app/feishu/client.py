@@ -35,5 +35,16 @@ class FeishuClient:
             raise RuntimeError(f"Feishu API error: {data.get('msg', 'unknown error')}")
         return data
 
+    def get_response(
+        self,
+        path: str,
+        *,
+        headers: dict | None = None,
+        params: dict | None = None,
+    ) -> httpx.Response:
+        response = self.client.get(path, headers=headers, params=params)
+        response.raise_for_status()
+        return response
+
     def close(self) -> None:
         self.client.close()

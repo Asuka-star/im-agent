@@ -83,6 +83,7 @@ class FeishuMessageContext(BaseModel):
     message_id: str | None = None
     chat_id: str | None = None
     chat_type: str | None = None
+    message_type: str | None = None
     session_id: str
     sender_id: str
     sender_user_id: str | None = None
@@ -90,6 +91,8 @@ class FeishuMessageContext(BaseModel):
     sender_union_id: str | None = None
     text: str
     raw_text: str
+    file_key: str | None = None
+    transcription_notice: str | None = None
     is_mentioned: bool = False
     mentioned_users: list[FeishuMentionedUser] = Field(default_factory=list)
 

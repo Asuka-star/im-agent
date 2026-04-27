@@ -262,6 +262,64 @@ class LLMTaskOperationTests(unittest.TestCase):
         self.assertEqual(last_update_call.kwargs["status"], "waiting_confirmation")
         self.assertEqual(last_update_call.kwargs["stage"], "awaiting_user_confirmation")
 
+    def test_handle_message_replies_with_transcription_notice(self) -> None:
+        message = type(
+            "FakeMessage",
+            (),
+            {
+                "session_id": "s1",
+                "message_id": "m2",
+                "sender_id": "u1",
+                "sender_user_id": "user_1",
+                "sender_open_id": "open_1",
+                "sender_union_id": "union_1",
+                "text": "",
+                "raw_text": "",
+                "chat_id": "c1",
+                "chat_type": "p2p",
+                "message_type": "audio",
+                "is_mentioned": False,
+                "mentioned_users": [],
+                "event_id": "evt_2",
+                "transcription_notice": "这条语音消息处理失败了，请直接发送文本消息。",
+            },
+        )()
+        with patch.object(self.service, "_ensure_sender_alias"), patch.object(
+            self.service.memory_service,
+            "save_user_message",
+        ) as save_user_message, patch.object(
+            self.service.task_run_service,
+            "create_task_run",
+            return_value=SimpleNamespace(task_run_id="run_456"),
+        ), patch.object(
+            self.service.task_run_service,
+            "upsert_step",
+        ) as upsert_step, patch.object(
+            self.service.task_run_service,
+            "update_task_run",
+        ) as update_task_run, patch.object(
+            self.service,
+            "_deliver_reply",
+            return_value={
+                "session_id": "s1",
+                "mode": "speech_notice",
+                "analysis": None,
+                "reply_preview": "这条语音消息处理失败了，请直接发送文本消息。",
+                "reply_sent": False,
+                "reply_error": None,
+                "artifacts": [],
+            },
+        ) as deliver_reply:
+            result = self.service.handle_message(message)
+
+        self.assertEqual(result["task_run_id"], "run_456")
+        deliver_reply.assert_called_once()
+        self.assertEqual(save_user_message.call_args.kwargs["content"], "[语音消息]")
+        last_update_call = update_task_run.call_args_list[-1]
+        self.assertEqual(last_update_call.kwargs["status"], "completed")
+        self.assertEqual(last_update_call.kwargs["stage"], "delivered")
+        self.assertEqual(upsert_step.call_args_list[-1].kwargs["status"], "done")
+
     def test_resume_after_confirmation_replays_agent_flow(self) -> None:
         with patch.object(
             self.service.task_run_service,

@@ -1,20 +1,36 @@
 import json
+import logging
 import re
 
 from app.core.config import settings
+from app.feishu.message_resource_api import FeishuMessageResourceAPI
 from app.schemas.feishu_event import (
     FeishuEventEnvelope,
     FeishuEventType,
     FeishuMention,
     FeishuMentionedUser,
+    FeishuMessage,
     FeishuMessageContext,
 )
+from app.services.speech_to_text import SpeechToTextService
+
+
+logger = logging.getLogger(__name__)
 
 
 class FeishuEventHandler:
     """Parses incoming Feishu event payloads into an internal message context."""
 
     BOT_NAME_HINTS = ("机器人", "智能助手", "assistant", "bot")
+
+    def __init__(
+        self,
+        *,
+        message_resource_api: FeishuMessageResourceAPI | None = None,
+        speech_to_text_service: SpeechToTextService | None = None,
+    ) -> None:
+        self.message_resource_api = message_resource_api or FeishuMessageResourceAPI()
+        self.speech_to_text_service = speech_to_text_service or SpeechToTextService()
 
     def parse_event(self, payload: dict) -> FeishuEventEnvelope:
         return FeishuEventEnvelope.model_validate(payload)
@@ -32,7 +48,9 @@ class FeishuEventHandler:
         ]
         return settings.feishu_verification_token in candidates
 
-    def extract_message_context(self, envelope: FeishuEventEnvelope) -> FeishuMessageContext | None:
+    def extract_message_context(
+        self, envelope: FeishuEventEnvelope
+    ) -> FeishuMessageContext | None:
         event_type = envelope.header.event_type if envelope.header else None
         if event_type != "im.message.receive_v1" or envelope.event is None:
             return None
@@ -43,12 +61,18 @@ class FeishuEventHandler:
             return None
 
         parsed_content = self._parse_message_content(message.content)
-        raw_text = parsed_content.get("text", "").strip()
-        if not raw_text:
+        raw_text, file_key, transcription_notice = self._extract_message_text(
+            message=message,
+            parsed_content=parsed_content,
+        )
+        if not raw_text and not transcription_notice:
             return None
 
         parsed_mentions = self._parse_mentions(message.mentions or [])
         text = self._strip_mentions(raw_text, message.mentions or [])
+        voice_mention = False
+        if (message.message_type or "").strip().lower() == "audio":
+            text, voice_mention = self._strip_voice_bot_prefix(text)
 
         session_id = (
             message.chat_id
@@ -56,7 +80,6 @@ class FeishuEventHandler:
             or sender.sender_id.user_id
             or message.message_id
         )
-
         sender_label = (
             sender.sender_id.user_id
             or sender.sender_id.open_id
@@ -70,6 +93,7 @@ class FeishuEventHandler:
             message_id=message.message_id,
             chat_id=message.chat_id,
             chat_type=message.chat_type,
+            message_type=message.message_type,
             session_id=session_id,
             sender_id=sender_label,
             sender_user_id=sender.sender_id.user_id,
@@ -77,7 +101,9 @@ class FeishuEventHandler:
             sender_union_id=sender.sender_id.union_id,
             text=text,
             raw_text=raw_text,
-            is_mentioned=any(user.is_bot for user in parsed_mentions),
+            file_key=file_key,
+            transcription_notice=transcription_notice,
+            is_mentioned=any(user.is_bot for user in parsed_mentions) or voice_mention,
             mentioned_users=parsed_mentions,
         )
 
@@ -92,7 +118,76 @@ class FeishuEventHandler:
 
         return parsed if isinstance(parsed, dict) else {"text": str(parsed)}
 
-    def _parse_mentions(self, mentions: list[FeishuMention]) -> list[FeishuMentionedUser]:
+    def _extract_message_text(
+        self,
+        *,
+        message: FeishuMessage,
+        parsed_content: dict,
+    ) -> tuple[str, str | None, str | None]:
+        message_type = (message.message_type or "text").strip().lower()
+        if message_type in {"", "text", "post"}:
+            return str(parsed_content.get("text") or "").strip(), None, None
+
+        if message_type == "audio":
+            return self._extract_audio_text(
+                message=message, parsed_content=parsed_content
+            )
+
+        return "", None, None
+
+    def _extract_audio_text(
+        self,
+        *,
+        message: FeishuMessage,
+        parsed_content: dict,
+    ) -> tuple[str, str | None, str | None]:
+        file_key = str(parsed_content.get("file_key") or "").strip()
+        if not file_key:
+            logger.info(
+                "Ignoring audio message without file_key: message_id=%s",
+                message.message_id,
+            )
+            return "", None, None
+
+        if not self.speech_to_text_service.is_configured():
+            notice = self.speech_to_text_service.unavailable_notice()
+            logger.warning(
+                "Audio message cannot be transcribed yet: message_id=%s reason=%s",
+                message.message_id,
+                notice,
+            )
+            return "", file_key, notice
+
+        if not message.message_id:
+            logger.warning(
+                "Ignoring audio message without message_id: file_key=%s", file_key
+            )
+            return "", file_key, self.speech_to_text_service.failure_notice()
+
+        try:
+            audio_bytes, content_type = (
+                self.message_resource_api.download_message_resource(
+                    message_id=message.message_id,
+                    file_key=file_key,
+                    resource_type="file",
+                )
+            )
+            transcript = self.speech_to_text_service.transcribe_bytes(
+                content=audio_bytes,
+                content_type=content_type,
+            )
+            return transcript.strip(), file_key, None
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Audio transcription failed: message_id=%s error=%s",
+                message.message_id,
+                exc,
+            )
+            return "", file_key, self.speech_to_text_service.failure_notice()
+
+    def _parse_mentions(
+        self, mentions: list[FeishuMention]
+    ) -> list[FeishuMentionedUser]:
         parsed: list[FeishuMentionedUser] = []
         for mention in mentions:
             mention_id = mention.id or None
@@ -131,7 +226,9 @@ class FeishuEventHandler:
         if mention_name and mention_name in configured_names:
             return True
 
-        return bool(mention_name and any(hint in mention_name for hint in self.BOT_NAME_HINTS))
+        return bool(
+            mention_name and any(hint in mention_name for hint in self.BOT_NAME_HINTS)
+        )
 
     def _strip_mentions(self, text: str, mentions: list[FeishuMention]) -> str:
         cleaned = text
@@ -145,3 +242,26 @@ class FeishuEventHandler:
 
         cleaned = re.sub(r"@[^\s]+\s*", " ", cleaned)
         return re.sub(r"\s+", " ", cleaned).strip()
+
+    def _strip_voice_bot_prefix(self, text: str) -> tuple[str, bool]:
+        normalized = re.sub(r"\s+", " ", (text or "").strip())
+        if not normalized:
+            return "", False
+
+        prefixes = []
+        configured_names = [
+            (settings.feishu_bot_name or "").strip(),
+            (settings.app_name or "").strip(),
+        ]
+        prefixes.extend(name for name in configured_names if name)
+        prefixes.extend(self.BOT_NAME_HINTS)
+
+        for prefix in prefixes:
+            pattern = rf"^\s*{re.escape(prefix)}[\uFF0C,\uFF1A:\s]*"
+            if re.match(pattern, normalized, flags=re.IGNORECASE):
+                stripped = re.sub(
+                    pattern, "", normalized, count=1, flags=re.IGNORECASE
+                ).strip()
+                return stripped or normalized, True
+
+        return normalized, False

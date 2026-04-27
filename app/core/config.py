@@ -36,6 +36,12 @@ class Settings(BaseSettings):
     feishu_bitable_notes_field: str = Field(default="备注", alias="FEISHU_BITABLE_NOTES_FIELD")
     feishu_bitable_session_field: str = Field(default="会话ID", alias="FEISHU_BITABLE_SESSION_FIELD")
 
+    deepgram_enabled: bool = Field(default=False, alias="DEEPGRAM_ENABLED")
+    deepgram_api_key: str = Field(default="", alias="DEEPGRAM_API_KEY")
+    deepgram_base_url: str = Field(default="https://api.deepgram.com/v1", alias="DEEPGRAM_BASE_URL")
+    deepgram_model: str = Field(default="nova-3", alias="DEEPGRAM_MODEL")
+    deepgram_language: str = Field(default="zh-CN", alias="DEEPGRAM_LANGUAGE")
+
     llm_api_key: str = Field(default="", alias="LLM_API_KEY")
     llm_base_url: str = Field(default="https://openrouter.ai/api/v1", alias="LLM_BASE_URL")
     llm_model: str = Field(default="deepseek/deepseek-v3.2", alias="LLM_MODEL")

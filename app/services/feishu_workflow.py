@@ -53,11 +53,15 @@ class FeishuWorkflowService:
 
         self._ensure_sender_alias(message)
 
+        saved_content = message.text or message.raw_text
+        if not saved_content and message.message_type == "audio":
+            saved_content = "[语音消息]"
+
         self.memory_service.save_user_message(
             session_id=message.session_id,
             message_id=message.message_id,
             sender_id=message.sender_id,
-            content=message.text or message.raw_text,
+            content=saved_content,
             episode_id=active_episode_id,
             mentioned_users=[user.model_dump() for user in message.mentioned_users],
             embed=False,
@@ -102,6 +106,39 @@ class FeishuWorkflowService:
             },
         )
         self.task_run_service.update_task_run(task_run.task_run_id, status="running", stage="building_context")
+
+        transcription_notice = getattr(message, "transcription_notice", None)
+        if transcription_notice:
+            result = self._deliver_reply(
+                message,
+                "speech_notice",
+                transcription_notice,
+                analysis=None,
+            )
+            self.task_run_service.upsert_step(
+                task_run.task_run_id,
+                step_key="response_generated",
+                title="生成处理结果",
+                step_type="workflow",
+                status="done",
+                output_payload={
+                    "mode": result["mode"],
+                    "reply_preview": result["reply_preview"],
+                    "artifact_count": 0,
+                },
+            )
+            self.task_run_service.update_task_run(
+                task_run.task_run_id,
+                intent=result["mode"],
+                title=self._task_run_title(message.text, result["mode"]),
+                stage="delivered",
+                status="completed",
+                latest_summary=self._condense_text(result.get("reply_preview")),
+                latest_reply_preview=result.get("reply_preview"),
+                latest_error=result.get("reply_error"),
+            )
+            result["task_run_id"] = task_run.task_run_id
+            return result
 
         try:
             result = self._handle_mentioned_request(message, task_run_id=task_run.task_run_id)
