@@ -13,6 +13,7 @@ from app.feishu.message_api import FeishuMessageAPI
 from app.feishu.user_api import FeishuUserAPI
 from app.schemas.analyze import AgentTrace, AnalyzeRequest, AnalyzeResponse
 from app.schemas.feishu_event import FeishuMessageContext
+from app.schemas.planner import ExecutionPlan, PlannerStep
 from app.schemas.task import TaskItem
 from app.services.due_date import normalize_task_dates
 from app.services.interaction import InteractionService
@@ -345,7 +346,34 @@ class FeishuWorkflowService:
                 stage=f"{intent or 'help'}_processing",
             )
 
-        plan_artifact = self._build_plan_artifact(intent=intent, reason=reason, llm_result=llm_result)
+        plan = self._resolve_execution_plan(
+            intent=intent,
+            reason=reason,
+            llm_result=llm_result,
+            instruction=message.text,
+        )
+        plan_artifact = self._build_plan_artifact(plan=plan, reason=reason, llm_result=llm_result)
+        if task_run_id:
+            self.task_run_service.upsert_step(
+                task_run_id,
+                step_key="execution_plan",
+                title="生成执行计划",
+                step_type="plan",
+                status="done",
+                output_payload={
+                    "goal": plan.goal,
+                    "primary_intent": plan.primary_intent,
+                    "steps": [
+                        {
+                            "step_id": step.step_id,
+                            "step_type": step.step_type,
+                            "title": step.title,
+                            "depends_on": step.depends_on,
+                        }
+                        for step in plan.steps
+                    ],
+                },
+            )
         clarification = self._extract_clarification_request(llm_result)
         if clarification and clarification["blocking"]:
             return self._pause_for_clarification(
@@ -358,134 +386,14 @@ class FeishuWorkflowService:
                 artifacts=[plan_artifact] if plan_artifact else None,
             )
 
-        if intent in {"help", "unknown", ""}:
-            return self._deliver_reply(
-                message,
-                "help",
-                self._format_help_reply(reason),
-                analysis=None,
-                artifacts=[plan_artifact] if plan_artifact else None,
-            )
-
-        if intent == "slides":
-            package = llm_result.get("slides")
-            if not isinstance(package, dict) or not package.get("slides"):
-                try:
-                    package = self.llm_service.generate_presentation_package(workspace_context, message.text)
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("Slide package fallback generation failed: %s", exc)
-                    package = self._build_fallback_presentation_package(message.session_id)
-            reply_preview = self._format_presentation_reply(package)
-            result = self._deliver_reply(
-                message,
-                "slides",
-                reply_preview,
-                analysis=None,
-                episode_id=active_episode_id,
-                artifacts=self._append_artifacts(
-                    [plan_artifact] if plan_artifact else None,
-                    {
-                        "artifact_type": "slides_package",
-                        "provider": "llm",
-                        "title": str(package.get("theme") or "演示稿"),
-                        "preview": package,
-                    },
-                ),
-            )
-            if active_episode_id is not None and self._should_close_episode(result, reply_preview):
-                self.memory_service.close_active_episode(message.session_id, title="slides")
-            return result
-
-        if intent == "doc":
-            package, analysis = self._build_doc_response_package(
-                session_id=message.session_id,
-                instruction=message.text,
-                llm_result=llm_result,
-                workspace_context=workspace_context,
-                episode_id=active_episode_id,
-                reason=reason,
-                source_message_id=message.message_id,
-            )
-            package["title"] = self._compose_doc_title(
-                str(package.get("title") or "协同文档"),
-                stats_as_of=str(package.get("stats_as_of") or "").strip() or None,
-            )
-            sync_lines = self._sync_package_to_doc(package)
-            reply_preview = self._format_doc_reply(package, sync_lines)
-            result = self._deliver_reply(
-                message,
-                "doc",
-                reply_preview,
-                analysis=analysis,
-                episode_id=active_episode_id,
-                artifacts=self._append_artifacts(
-                    [plan_artifact] if plan_artifact else None,
-                    {
-                        "artifact_type": "document",
-                        "provider": "feishu_doc" if any("文档链接" in line for line in sync_lines) else "local",
-                        "title": str(package.get("title") or "协同文档"),
-                        "url": self._extract_first_url(sync_lines),
-                        "preview": package,
-                    },
-                ),
-            )
-            if active_episode_id is not None and self._should_close_episode(result, reply_preview):
-                self.memory_service.close_active_episode(message.session_id, title=str(package.get("title") or "doc"))
-            return result
-
-        if intent == "status":
-            status_answer = str(llm_result.get("status_answer") or "").strip()
-            if not status_answer:
-                tasks = self.memory_service.get_current_tasks(message.session_id)
-                payload = self.memory_service.load_memory_payload(message.session_id)
-                status_answer = self._format_status_reply(message.text, tasks, payload)
-            return self._deliver_reply(
-                message,
-                "status",
-                status_answer,
-                analysis=None,
-                artifacts=[plan_artifact] if plan_artifact else None,
-            )
-
-        if intent in {"summary", "tasks", "risks"}:
-            source_text = self.memory_service.build_discussion_block(
-                message.session_id,
-                episode_id=active_episode_id,
-                exclude_message_id=message.message_id,
-            ) or workspace_context or message.text
-            analysis = self._build_analysis_from_llm(
-                session_id=message.session_id,
-                source_text=source_text,
-                llm_result=llm_result,
-                intent=intent,
-                reason=reason,
-            )
-            reply_preview = self._format_analysis_reply(analysis, intent)
-            self.memory_service.save_round(
-                session_id=message.session_id,
-                analysis=analysis,
-                episode_id=active_episode_id,
-                async_embed=True,
-                preserve_unmatched_previous=False,
-            )
-            result = self._deliver_reply(
-                message,
-                intent,
-                reply_preview,
-                analysis=analysis,
-                episode_id=active_episode_id,
-                artifacts=[plan_artifact] if plan_artifact else None,
-            )
-            if active_episode_id is not None and self._should_close_episode(result, reply_preview):
-                self.memory_service.close_active_episode(message.session_id, title=analysis.summary)
-            return result
-
-        return self._deliver_reply(
+        return self._execute_plan(
             message,
-            "help",
-            self._format_help_reply(reason),
-            analysis=None,
-            artifacts=[plan_artifact] if plan_artifact else None,
+            plan=plan,
+            llm_result=llm_result,
+            workspace_context=workspace_context,
+            active_episode_id=active_episode_id,
+            task_run_id=task_run_id,
+            base_artifacts=[plan_artifact] if plan_artifact else None,
         )
 
     def _extract_clarification_request(self, llm_result: dict) -> dict | None:
@@ -511,7 +419,156 @@ class FeishuWorkflowService:
             "blocking": True if blocking is None else bool(blocking),
         }
 
-    def _build_plan_artifact(self, *, intent: str, reason: str, llm_result: dict) -> dict | None:
+    def _resolve_execution_plan(
+        self,
+        *,
+        intent: str,
+        reason: str,
+        llm_result: dict,
+        instruction: str,
+    ) -> ExecutionPlan:
+        raw_plan = llm_result.get("plan")
+        if isinstance(raw_plan, dict):
+            normalized = self._normalize_execution_plan(
+                raw_plan,
+                intent=intent,
+                instruction=instruction,
+            )
+            if normalized.steps:
+                return normalized
+        return self._build_fallback_plan(intent=intent, reason=reason, instruction=instruction, llm_result=llm_result)
+
+    def _normalize_execution_plan(
+        self,
+        raw_plan: dict,
+        *,
+        intent: str,
+        instruction: str,
+    ) -> ExecutionPlan:
+        goal = str(raw_plan.get("goal") or "").strip() or self._default_plan_goal(intent, instruction)
+        steps: list[PlannerStep] = []
+        raw_steps = raw_plan.get("steps")
+        if isinstance(raw_steps, list):
+            for index, item in enumerate(raw_steps, start=1):
+                if not isinstance(item, dict):
+                    continue
+                step_type = self._normalize_plan_step_type(str(item.get("type") or item.get("step_type") or "").strip())
+                if not step_type:
+                    continue
+                step_id = str(item.get("id") or item.get("step_id") or f"step_{index}").strip() or f"step_{index}"
+                title = str(item.get("title") or "").strip() or self._default_plan_step_title(step_type, intent)
+                depends_on = (
+                    [str(dep).strip() for dep in item.get("depends_on", []) if str(dep).strip()]
+                    if isinstance(item.get("depends_on"), list)
+                    else []
+                )
+                notes = str(item.get("notes") or "").strip() or None
+                steps.append(
+                    PlannerStep(
+                        step_id=step_id,
+                        step_type=step_type,
+                        title=title,
+                        depends_on=depends_on,
+                        notes=notes,
+                    )
+                )
+        return ExecutionPlan(goal=goal, primary_intent=intent or "help", steps=steps)
+
+    def _build_fallback_plan(
+        self,
+        *,
+        intent: str,
+        reason: str,
+        instruction: str,
+        llm_result: dict,
+    ) -> ExecutionPlan:
+        primary_intent = intent or "help"
+        wants_slides = self._should_include_slides_step(primary_intent, instruction, llm_result)
+        if primary_intent in {"summary", "tasks", "risks"}:
+            steps = [PlannerStep(step_id="step_1", step_type="analyze_discussion", title="分析讨论并整理结果")]
+        elif primary_intent == "doc":
+            steps = [PlannerStep(step_id="step_1", step_type="sync_doc", title="生成并同步文档")]
+            if wants_slides:
+                steps.append(
+                    PlannerStep(
+                        step_id="step_2",
+                        step_type="generate_slides",
+                        title="基于当前上下文生成演示稿",
+                        depends_on=["step_1"],
+                    )
+                )
+        elif primary_intent == "slides":
+            steps = [PlannerStep(step_id="step_1", step_type="generate_slides", title="生成演示稿大纲")]
+        elif primary_intent == "status":
+            steps = [PlannerStep(step_id="step_1", step_type="answer_status", title="回答当前协作状态")]
+        else:
+            steps = [PlannerStep(step_id="step_1", step_type="reply_help", title="给出下一步指引")]
+
+        return ExecutionPlan(
+            goal=self._default_plan_goal(primary_intent, instruction, reason=reason),
+            primary_intent=primary_intent,
+            steps=steps,
+        )
+
+    def _normalize_plan_step_type(self, raw_type: str) -> str:
+        normalized = raw_type.lower().strip()
+        mapping = {
+            "analyze_discussion": "analyze_discussion",
+            "analyze": "analyze_discussion",
+            "summary": "analyze_discussion",
+            "summarize_context": "analyze_discussion",
+            "sync_doc": "sync_doc",
+            "generate_doc": "sync_doc",
+            "write_doc": "sync_doc",
+            "doc": "sync_doc",
+            "generate_slides": "generate_slides",
+            "slides": "generate_slides",
+            "presentation": "generate_slides",
+            "answer_status": "answer_status",
+            "status": "answer_status",
+            "reply_help": "reply_help",
+            "help": "reply_help",
+        }
+        return mapping.get(normalized, "")
+
+    def _default_plan_goal(self, intent: str, instruction: str, *, reason: str | None = None) -> str:
+        candidate = " ".join((instruction or "").split()).strip()
+        if candidate:
+            return candidate[:80]
+        if reason:
+            return reason[:80]
+        return {
+            "summary": "总结当前讨论",
+            "tasks": "整理任务清单",
+            "risks": "识别风险与卡点",
+            "doc": "生成并同步协作文档",
+            "slides": "生成演示稿",
+            "status": "回答当前状态问题",
+        }.get(intent, "完成当前协作请求")
+
+    def _default_plan_step_title(self, step_type: str, intent: str) -> str:
+        return {
+            "analyze_discussion": {
+                "summary": "总结当前讨论",
+                "tasks": "整理任务与待办",
+                "risks": "分析风险与卡点",
+            }.get(intent, "分析讨论内容"),
+            "sync_doc": "生成并同步文档",
+            "generate_slides": "生成演示稿",
+            "answer_status": "回答状态问题",
+            "reply_help": "给出下一步指引",
+        }.get(step_type, "执行计划步骤")
+
+    def _should_include_slides_step(self, intent: str, instruction: str, llm_result: dict) -> bool:
+        if intent == "slides":
+            return True
+        if intent != "doc":
+            return False
+        if isinstance(llm_result.get("slides"), dict) and llm_result.get("slides", {}).get("slides"):
+            return True
+        return self._is_outline_request(instruction)
+
+    def _build_plan_artifact(self, *, plan: ExecutionPlan, reason: str, llm_result: dict) -> dict | None:
         next_actions = (
             [str(item).strip() for item in llm_result.get("next_actions", []) if str(item).strip()]
             if isinstance(llm_result.get("next_actions"), list)
@@ -519,8 +576,18 @@ class FeishuWorkflowService:
         )
         clarification = self._extract_clarification_request(llm_result)
         preview = {
-            "intent": intent or "unknown",
+            "goal": plan.goal,
+            "intent": plan.primary_intent or "unknown",
             "reason": reason,
+            "steps": [
+                {
+                    "step_id": step.step_id,
+                    "step_type": step.step_type,
+                    "title": step.title,
+                    "depends_on": step.depends_on,
+                }
+                for step in plan.steps
+            ],
             "next_actions": next_actions[:4],
             "task_operation_count": len(llm_result.get("task_operations", []))
             if isinstance(llm_result.get("task_operations"), list)
@@ -549,6 +616,284 @@ class FeishuWorkflowService:
             if item:
                 combined.append(item)
         return combined
+
+    def _execute_plan(
+        self,
+        message: FeishuMessageContext,
+        *,
+        plan: ExecutionPlan,
+        llm_result: dict,
+        workspace_context: str,
+        active_episode_id: int | None,
+        task_run_id: str | None,
+        base_artifacts: list[dict] | None = None,
+    ) -> dict:
+        combined_artifacts = list(base_artifacts or [])
+        reply_parts: list[str] = []
+        final_analysis: AnalyzeResponse | None = None
+        close_title: str | None = None
+
+        if not plan.steps:
+            fallback_reply = self._format_help_reply("当前还没有可执行的计划步骤。")
+            return self._deliver_reply(
+                message,
+                plan.primary_intent or "help",
+                fallback_reply,
+                analysis=None,
+                episode_id=active_episode_id,
+                artifacts=combined_artifacts,
+            )
+
+        for index, step in enumerate(plan.steps, start=1):
+            if task_run_id:
+                self.task_run_service.update_task_run(
+                    task_run_id,
+                    stage=f"executing_{step.step_type}",
+                    status="running",
+                )
+                self.task_run_service.upsert_step(
+                    task_run_id,
+                    step_key=f"plan_{index}_{step.step_type}",
+                    title=step.title,
+                    step_type="plan_execution",
+                    status="running",
+                    output_payload={
+                        "step_id": step.step_id,
+                        "step_type": step.step_type,
+                        "depends_on": step.depends_on,
+                        "notes": step.notes,
+                    },
+                )
+
+            try:
+                step_result = self._execute_plan_step(
+                    message,
+                    step=step,
+                    plan=plan,
+                    llm_result=llm_result,
+                    workspace_context=workspace_context,
+                    active_episode_id=active_episode_id,
+                )
+            except Exception as exc:  # noqa: BLE001
+                if task_run_id:
+                    self.task_run_service.upsert_step(
+                        task_run_id,
+                        step_key=f"plan_{index}_{step.step_type}",
+                        title=step.title,
+                        step_type="plan_execution",
+                        status="failed",
+                        error=str(exc),
+                    )
+                raise
+
+            if task_run_id:
+                self.task_run_service.upsert_step(
+                    task_run_id,
+                    step_key=f"plan_{index}_{step.step_type}",
+                    title=step.title,
+                    step_type="plan_execution",
+                    status="done",
+                    output_payload={
+                        "step_id": step.step_id,
+                        "step_type": step.step_type,
+                        "reply_preview": step_result.get("reply_preview"),
+                        "artifact_count": len(step_result.get("artifacts", [])),
+                    },
+                )
+
+            reply_preview = str(step_result.get("reply_preview") or "").strip()
+            if reply_preview:
+                reply_parts.append(reply_preview)
+            combined_artifacts.extend(step_result.get("artifacts", []))
+            if step_result.get("analysis") is not None:
+                final_analysis = step_result["analysis"]
+            if step_result.get("close_title"):
+                close_title = str(step_result["close_title"])
+
+        final_reply = self._combine_plan_replies(reply_parts)
+        result = self._deliver_reply(
+            message,
+            plan.primary_intent or "help",
+            final_reply,
+            analysis=final_analysis,
+            episode_id=active_episode_id,
+            artifacts=combined_artifacts,
+        )
+        if active_episode_id is not None and self._should_close_episode(result, final_reply):
+            self.memory_service.close_active_episode(
+                message.session_id,
+                title=close_title or (final_analysis.summary if final_analysis is not None else plan.primary_intent),
+            )
+        return result
+
+    def _execute_plan_step(
+        self,
+        message: FeishuMessageContext,
+        *,
+        step: PlannerStep,
+        plan: ExecutionPlan,
+        llm_result: dict,
+        workspace_context: str,
+        active_episode_id: int | None,
+    ) -> dict:
+        if step.step_type == "generate_slides":
+            return self._prepare_slides_execution(
+                message,
+                llm_result=llm_result,
+                workspace_context=workspace_context,
+            )
+        if step.step_type == "sync_doc":
+            return self._prepare_doc_execution(
+                message,
+                llm_result=llm_result,
+                workspace_context=workspace_context,
+                active_episode_id=active_episode_id,
+                reason=plan.goal,
+            )
+        if step.step_type == "answer_status":
+            return self._prepare_status_execution(message, llm_result=llm_result)
+        if step.step_type == "analyze_discussion":
+            return self._prepare_analysis_execution(
+                message,
+                llm_result=llm_result,
+                workspace_context=workspace_context,
+                active_episode_id=active_episode_id,
+                intent=plan.primary_intent,
+            )
+        return self._prepare_help_execution(reason=str(llm_result.get("reason") or "").strip())
+
+    def _prepare_slides_execution(
+        self,
+        message: FeishuMessageContext,
+        *,
+        llm_result: dict,
+        workspace_context: str,
+    ) -> dict:
+        package = llm_result.get("slides")
+        if not isinstance(package, dict) or not package.get("slides"):
+            try:
+                package = self.llm_service.generate_presentation_package(workspace_context, message.text)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Slide package fallback generation failed: %s", exc)
+                package = self._build_fallback_presentation_package(message.session_id)
+        reply_preview = self._format_presentation_reply(package)
+        return {
+            "reply_preview": reply_preview,
+            "analysis": None,
+            "artifacts": [
+                {
+                    "artifact_type": "slides_package",
+                    "provider": "llm",
+                    "title": str(package.get("theme") or "演示稿"),
+                    "preview": package,
+                }
+            ],
+            "close_title": "slides",
+        }
+
+    def _prepare_doc_execution(
+        self,
+        message: FeishuMessageContext,
+        *,
+        llm_result: dict,
+        workspace_context: str,
+        active_episode_id: int | None,
+        reason: str,
+    ) -> dict:
+        package, analysis = self._build_doc_response_package(
+            session_id=message.session_id,
+            instruction=message.text,
+            llm_result=llm_result,
+            workspace_context=workspace_context,
+            episode_id=active_episode_id,
+            reason=reason,
+            source_message_id=message.message_id,
+        )
+        package["title"] = self._compose_doc_title(
+            str(package.get("title") or "协同文档"),
+            stats_as_of=str(package.get("stats_as_of") or "").strip() or None,
+        )
+        sync_lines = self._sync_package_to_doc(package)
+        reply_preview = self._format_doc_reply(package, sync_lines)
+        return {
+            "reply_preview": reply_preview,
+            "analysis": analysis,
+            "artifacts": [
+                {
+                    "artifact_type": "document",
+                    "provider": "feishu_doc" if any("文档链接" in line for line in sync_lines) else "local",
+                    "title": str(package.get("title") or "协同文档"),
+                    "url": self._extract_first_url(sync_lines),
+                    "preview": package,
+                }
+            ],
+            "close_title": str(package.get("title") or "doc"),
+        }
+
+    def _prepare_status_execution(self, message: FeishuMessageContext, *, llm_result: dict) -> dict:
+        status_answer = str(llm_result.get("status_answer") or "").strip()
+        if not status_answer:
+            tasks = self.memory_service.get_current_tasks(message.session_id)
+            payload = self.memory_service.load_memory_payload(message.session_id)
+            status_answer = self._format_status_reply(message.text, tasks, payload)
+        return {
+            "reply_preview": status_answer,
+            "analysis": None,
+            "artifacts": [],
+            "close_title": None,
+        }
+
+    def _prepare_analysis_execution(
+        self,
+        message: FeishuMessageContext,
+        *,
+        llm_result: dict,
+        workspace_context: str,
+        active_episode_id: int | None,
+        intent: str,
+    ) -> dict:
+        source_text = self.memory_service.build_discussion_block(
+            message.session_id,
+            episode_id=active_episode_id,
+            exclude_message_id=message.message_id,
+        ) or workspace_context or message.text
+        analysis = self._build_analysis_from_llm(
+            session_id=message.session_id,
+            source_text=source_text,
+            llm_result=llm_result,
+            intent=intent,
+            reason=str(llm_result.get("reason") or "").strip(),
+        )
+        reply_preview = self._format_analysis_reply(analysis, intent)
+        self.memory_service.save_round(
+            session_id=message.session_id,
+            analysis=analysis,
+            episode_id=active_episode_id,
+            async_embed=True,
+            preserve_unmatched_previous=False,
+        )
+        return {
+            "reply_preview": reply_preview,
+            "analysis": analysis,
+            "artifacts": [],
+            "close_title": analysis.summary,
+        }
+
+    def _prepare_help_execution(self, *, reason: str) -> dict:
+        return {
+            "reply_preview": self._format_help_reply(reason),
+            "analysis": None,
+            "artifacts": [],
+            "close_title": None,
+        }
+
+    def _combine_plan_replies(self, reply_parts: list[str]) -> str | None:
+        cleaned = [part.strip() for part in reply_parts if str(part).strip()]
+        if not cleaned:
+            return None
+        if len(cleaned) == 1:
+            return cleaned[0]
+        return "\n\n".join(cleaned)
 
     def _pause_for_clarification(
         self,

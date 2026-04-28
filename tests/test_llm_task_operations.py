@@ -196,6 +196,90 @@ class LLMTaskOperationTests(unittest.TestCase):
             options=["报名材料版", "组内评审版"],
         )
 
+    def test_fallback_plan_for_doc_can_chain_slides(self) -> None:
+        plan = self.service._resolve_execution_plan(
+            intent="doc",
+            reason="需要先沉淀文档，再给出演示材料",
+            llm_result={
+                "slides": {
+                    "theme": "报名汇报",
+                    "slides": [{"title": "背景", "bullets": ["目标"]}],
+                }
+            },
+            instruction="帮我整理成文档，并顺手出一个汇报PPT大纲",
+        )
+
+        self.assertEqual(plan.primary_intent, "doc")
+        self.assertEqual([step.step_type for step in plan.steps], ["sync_doc", "generate_slides"])
+
+    def test_execute_llm_request_runs_planner_steps_in_order(self) -> None:
+        message = type(
+            "FakeMessage",
+            (),
+            {"session_id": "s1", "message_id": "m1", "text": "帮我整理成文档并生成PPT", "chat_id": "c1"},
+        )()
+        with patch.object(
+            self.service,
+            "_prepare_doc_execution",
+            return_value={
+                "reply_preview": "【文档同步】\n已生成文档",
+                "analysis": None,
+                "artifacts": [{"artifact_type": "document", "title": "文档"}],
+                "close_title": "文档",
+            },
+        ) as prepare_doc, patch.object(
+            self.service,
+            "_prepare_slides_execution",
+            return_value={
+                "reply_preview": "【演示稿】\n已生成演示稿大纲",
+                "analysis": None,
+                "artifacts": [{"artifact_type": "slides_package", "title": "演示稿"}],
+                "close_title": "slides",
+            },
+        ) as prepare_slides, patch.object(
+            self.service,
+            "_deliver_reply",
+            return_value={
+                "session_id": "s1",
+                "episode_id": 1,
+                "mode": "doc",
+                "analysis": None,
+                "reply_preview": "combined",
+                "reply_sent": False,
+                "reply_error": None,
+                "artifacts": [],
+            },
+        ) as deliver_reply, patch.object(
+            self.service.memory_service,
+            "close_active_episode",
+        ):
+            result = self.service._execute_llm_request(
+                message,
+                {
+                    "intent": "doc",
+                    "reason": "用户要文档和演示稿",
+                    "slides": {
+                        "theme": "报名汇报",
+                        "slides": [{"title": "背景", "bullets": ["目标"]}],
+                    },
+                },
+                "[workspace]",
+                1,
+                task_run_id=None,
+            )
+
+        self.assertEqual(result["mode"], "doc")
+        prepare_doc.assert_called_once()
+        prepare_slides.assert_called_once()
+        deliver_reply.assert_called_once()
+        combined_reply = deliver_reply.call_args.args[2]
+        self.assertIn("【文档同步】", combined_reply)
+        self.assertIn("【演示稿】", combined_reply)
+        artifact_types = [item["artifact_type"] for item in deliver_reply.call_args.kwargs["artifacts"]]
+        self.assertIn("agent_plan", artifact_types)
+        self.assertIn("document", artifact_types)
+        self.assertIn("slides_package", artifact_types)
+
     def test_handle_message_preserves_waiting_confirmation_status(self) -> None:
         message = type(
             "FakeMessage",

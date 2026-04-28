@@ -72,10 +72,13 @@ class LLMService:
         }
         result = self._chat_json(payload, request_name="resolve_workspace_request", timeout_seconds=settings.llm_timeout_seconds)
         logger.info(
-            "LLM workspace request resolved: intent=%s tasks=%s operations=%s",
+            "LLM workspace request resolved: intent=%s tasks=%s operations=%s plan_steps=%s",
             result.get("intent"),
             len(result.get("tasks", [])) if isinstance(result.get("tasks"), list) else 0,
             len(result.get("task_operations", [])) if isinstance(result.get("task_operations"), list) else 0,
+            len(result.get("plan", {}).get("steps", []))
+            if isinstance(result.get("plan"), dict) and isinstance(result.get("plan", {}).get("steps"), list)
+            else 0,
         )
         return result
 
@@ -238,6 +241,18 @@ Schema:
     "options": ["option 1", "option 2"],
     "blocking": true
   }},
+  "plan": {{
+    "goal": "execution goal in Simplified Chinese",
+    "steps": [
+      {{
+        "id": "step_1",
+        "type": "analyze_discussion|sync_doc|generate_slides|answer_status|reply_help",
+        "title": "step title in Simplified Chinese",
+        "depends_on": ["step_0"],
+        "notes": "optional execution note"
+      }}
+    ]
+  }},
   "summary": "overall summary in Simplified Chinese",
   "task_operations": [
     {{
@@ -298,6 +313,7 @@ Rules:
 - Prefer understanding the whole discussion instead of keyword matching.
 - The current discussion block is the primary source of truth for this round. Treat older summaries and task snapshots as background state, not as instructions to rewrite everything.
 - Use clarification.needed=true when key execution facts are missing or there are multiple materially different paths that require the user's choice first.
+- Always think in terms of an execution plan first, then fill the rest of the fields.
 - Typical clarification cases include: the target output format is unclear, the user refers to an ambiguous previous decision, or critical owners / deadlines / audience are missing for a deliverable.
 - When clarification.needed=true, still choose the most likely intent, write a short clarification.question in Simplified Chinese, provide 2 to 4 concise options when possible, and set clarification.blocking=true if execution should pause before continuing.
 - Recent discussion lines may include structured fields like "发言人" and "提及". Treat "提及" as a strong assignee hint in multi-person collaboration.
@@ -312,6 +328,12 @@ Rules:
 - For status, put the natural-language answer into status_answer. You may also return tasks if useful.
 - For slides, fill the slides object with 5 to 7 slides and concise bullets.
 - For doc, return intent=doc and fill doc.title plus doc.sections with a Feishu-document-ready structure.
+- plan.steps should contain the high-level execution steps the agent will actually perform. Use only these step types: analyze_discussion, sync_doc, generate_slides, answer_status, reply_help.
+- For summary/tasks/risks, usually include analyze_discussion.
+- For doc, usually include sync_doc, and add generate_slides when the user also wants a report outline / PPT / presentation material.
+- For slides, include generate_slides.
+- For status, include answer_status.
+- For help or unknown, include reply_help.
 - If the user asks for a report outline and also wants it written into a document, choose doc and fill both doc and slides when helpful.
 - If the request is too vague, return intent=help.
 - If the request cannot be safely understood, return intent=unknown.
