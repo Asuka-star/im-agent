@@ -26,7 +26,7 @@ class _DashboardPageState extends State<DashboardPage> {
   void initState() {
     super.initState();
     _controller = WorkbenchController();
-    _sessionController = TextEditingController(text: _controller.sessionFilter);
+    _sessionController = TextEditingController(text: _controller.sessionQuery);
     _searchController = TextEditingController();
     if (widget.autoInitialize) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -166,6 +166,7 @@ class _DashboardPageState extends State<DashboardPage> {
       final haystack = [
         item.title,
         item.sessionId,
+        item.sessionLabel ?? '',
         item.intent ?? '',
         localizeIntent(item.intent),
         item.stage,
@@ -202,6 +203,7 @@ class _DashboardPageState extends State<DashboardPage> {
       });
       return _SessionSummary(
         sessionId: entry.key,
+        sessionLabel: runs.first.sessionLabel,
         totalCount: runs.length,
         runningCount: runs.where((item) => item.status == 'running').length,
         waitingCount: runs
@@ -311,11 +313,11 @@ class _HeroPanel extends StatelessWidget {
                   controller: sessionController,
                   style: const TextStyle(color: Colors.white),
                   decoration: InputDecoration(
-                    labelText: '会话筛选（会话编号）',
+                    labelText: '会话名称查询',
                     labelStyle: TextStyle(
                       color: Colors.white.withValues(alpha: 0.75),
                     ),
-                    hintText: '留空时查看全部任务',
+                    hintText: '输入群名或人名关键词',
                     hintStyle: TextStyle(
                       color: Colors.white.withValues(alpha: 0.45),
                     ),
@@ -510,6 +512,17 @@ class _TaskListPanel extends StatelessWidget {
                         ),
                         const SizedBox(height: 12),
                         Text(
+                          _sessionDisplayLabel(
+                            item.sessionLabel,
+                            item.sessionId,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: Theme.of(context).textTheme.titleSmall
+                              ?.copyWith(color: const Color(0xFF213848)),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
                           '会话：${item.sessionId} · 更新于 ${_formatDateTime(item.updatedAt ?? item.createdAt)}',
                           style: Theme.of(context).textTheme.bodySmall
                               ?.copyWith(color: const Color(0xFF72808A)),
@@ -677,11 +690,17 @@ class _SessionOverview extends StatelessWidget {
               final session = sessionSummaries[index];
               final isActive =
                   activeSessionId.isNotEmpty &&
-                  activeSessionId == session.sessionId;
+                  activeSessionId ==
+                      _sessionDisplayLabel(
+                        session.sessionLabel,
+                        session.sessionId,
+                      );
               return _SessionCard(
                 summary: session,
                 isActive: isActive,
-                onTap: () => onSelectSession(session.sessionId),
+                onTap: () => onSelectSession(
+                  _sessionDisplayLabel(session.sessionLabel, session.sessionId),
+                ),
               );
             },
           ),
@@ -722,21 +741,32 @@ class _SessionCard extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              summary.sessionId,
+              _sessionDisplayLabel(summary.sessionLabel, summary.sessionId),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: Theme.of(
                 context,
               ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
             ),
-            const SizedBox(height: 8),
+            const SizedBox(height: 4),
             Text(
-              summary.latestTitle,
-              maxLines: 2,
+              summary.sessionId,
+              maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                height: 1.4,
-                color: const Color(0xFF5B6770),
+              style: Theme.of(
+                context,
+              ).textTheme.bodySmall?.copyWith(color: const Color(0xFF72808A)),
+            ),
+            const SizedBox(height: 8),
+            Expanded(
+              child: Text(
+                summary.latestTitle,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                  height: 1.4,
+                  color: const Color(0xFF5B6770),
+                ),
               ),
             ),
             const SizedBox(height: 10),
@@ -790,7 +820,7 @@ class _TaskFilterBar extends StatelessWidget {
           controller: searchController,
           onChanged: onSearchChanged,
           decoration: InputDecoration(
-            hintText: '搜索标题、会话编号、意图或摘要',
+            hintText: '搜索标题、会话名称、意图或摘要',
             prefixIcon: const Icon(Icons.search_rounded),
             filled: true,
             fillColor: Colors.white,
@@ -980,7 +1010,13 @@ class _SummaryCard extends StatelessWidget {
                 label: localizeStage(detail.stage),
                 color: const Color(0xFFEF8354),
               ),
-              _Badge(label: detail.sessionId, color: const Color(0xFF73C8A9)),
+              _Badge(
+                label: _sessionDisplayLabel(
+                  detail.sessionLabel,
+                  detail.sessionId,
+                ),
+                color: const Color(0xFF73C8A9),
+              ),
               if ((detail.intent ?? '').isNotEmpty)
                 _Badge(
                   label: localizeIntent(detail.intent),
@@ -988,6 +1024,16 @@ class _SummaryCard extends StatelessWidget {
                 ),
             ],
           ),
+          if (_sessionDisplayLabel(detail.sessionLabel, detail.sessionId) !=
+              detail.sessionId) ...[
+            const SizedBox(height: 10),
+            Text(
+              '会话 ID：${detail.sessionId}',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: Colors.white.withValues(alpha: 0.62),
+              ),
+            ),
+          ],
           const SizedBox(height: 16),
           if ((detail.latestSummary ?? '').isNotEmpty)
             Text(
@@ -2850,6 +2896,7 @@ class _StatusOption {
 class _SessionSummary {
   const _SessionSummary({
     required this.sessionId,
+    required this.sessionLabel,
     required this.totalCount,
     required this.runningCount,
     required this.waitingCount,
@@ -2859,12 +2906,18 @@ class _SessionSummary {
   });
 
   final String sessionId;
+  final String? sessionLabel;
   final int totalCount;
   final int runningCount;
   final int waitingCount;
   final int completedCount;
   final String latestTitle;
   final DateTime? updatedAt;
+}
+
+String _sessionDisplayLabel(String? label, String sessionId) {
+  final normalized = label?.trim() ?? '';
+  return normalized.isNotEmpty ? normalized : sessionId;
 }
 
 List<_StageItem> _buildStageItems(TaskRunDetail detail) {

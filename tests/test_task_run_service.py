@@ -10,6 +10,33 @@ from app.db.models import Artifact, ConfirmationRequest, TaskRun, TaskRunStep
 from app.services.task_run_service import TaskRunService
 
 
+class _StubSessionDisplayService:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def resolve_session_label(
+        self,
+        *,
+        session_id: str,
+        source_type: str | None = None,
+        source_ref: str | None = None,
+        created_by: str | None = None,
+    ) -> str | None:
+        self.calls.append(
+            {
+                "session_id": session_id,
+                "source_type": source_type,
+                "source_ref": source_ref,
+                "created_by": created_by,
+            }
+        )
+        if source_type == "group":
+            return "产品讨论群"
+        if source_type == "p2p":
+            return "张三"
+        return None
+
+
 class TaskRunServiceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
@@ -25,7 +52,10 @@ class TaskRunServiceTests(unittest.TestCase):
         self.addCleanup(patcher.stop)
         patcher.start()
 
-        self.service = TaskRunService()
+        self.session_display_service = _StubSessionDisplayService()
+        self.service = TaskRunService(
+            session_display_service=self.session_display_service
+        )
 
     def tearDown(self) -> None:
         self.engine.dispose()
@@ -67,6 +97,7 @@ class TaskRunServiceTests(unittest.TestCase):
         assert detail is not None
         self.assertEqual(detail.task_run_id, created.task_run_id)
         self.assertEqual(detail.session_id, "oc_test")
+        self.assertEqual(detail.session_label, "产品讨论群")
         self.assertEqual(len(detail.steps), 1)
         self.assertEqual(detail.steps[0].step_key, "request_received")
         self.assertEqual(len(detail.artifacts), 1)
@@ -125,6 +156,25 @@ class TaskRunServiceTests(unittest.TestCase):
         self.assertEqual(first_message["task_run"]["task_run_id"], created.task_run_id)
         self.assertEqual(second_message["task_run"]["session_id"], "oc_demo")
         self.assertEqual(third_message["task_run"]["session_id"], "oc_demo")
+        self.assertEqual(second_message["task_run"]["session_label"], "产品讨论群")
+        self.assertEqual(third_message["task_run"]["session_label"], "产品讨论群")
+
+    def test_list_task_runs_can_filter_by_session_label_query(self) -> None:
+        self.service.create_task_run(
+            session_id="oc_alpha",
+            title="群聊任务一",
+            source_type="group",
+        )
+        self.service.create_task_run(
+            session_id="oc_beta",
+            title="单聊任务二",
+            source_type="p2p",
+        )
+
+        results = self.service.list_task_runs(session_query="产品讨论", limit=20)
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].session_id, "oc_alpha")
 
 
 if __name__ == "__main__":

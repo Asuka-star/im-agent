@@ -14,6 +14,7 @@ class WorkbenchApi {
 
   Future<List<TaskRunSummary>> listTaskRuns({
     String? sessionId,
+    String? sessionQuery,
     String? status,
     int limit = 20,
   }) async {
@@ -22,6 +23,7 @@ class WorkbenchApi {
         '/task-runs/',
         queryParameters: {
           'session_id': sessionId,
+          'session_query': sessionQuery,
           'status': status,
           'limit': '$limit',
         },

@@ -20,7 +20,7 @@ class WorkbenchController extends ChangeNotifier {
   List<TaskRunSummary> taskRuns = const [];
   TaskRunDetail? selectedTaskRun;
 
-  String sessionFilter = AppConfig.defaultSessionId;
+  String sessionQuery = AppConfig.defaultSessionId;
   String sessionConnectionState = 'idle';
   String taskConnectionState = 'idle';
   String? errorMessage;
@@ -50,24 +50,16 @@ class WorkbenchController extends ChangeNotifier {
 
     try {
       final runs = await _api.listTaskRuns(
-        sessionId: sessionFilter.trim().isEmpty ? null : sessionFilter.trim(),
+        sessionQuery: sessionQuery.trim().isEmpty ? null : sessionQuery.trim(),
         limit: 50,
       );
       taskRuns = runs;
       lastUpdatedAt = DateTime.now();
 
-      if (sessionFilter.trim().isNotEmpty) {
-        if (_sessionRealtimeEnabled) {
-          await _bindTaskRunFeedSocket(sessionId: sessionFilter.trim());
-        } else {
-          sessionConnectionState = 'polling';
-        }
+      if (_sessionRealtimeEnabled) {
+        await _bindTaskRunFeedSocket();
       } else {
-        if (_sessionRealtimeEnabled) {
-          await _bindTaskRunFeedSocket();
-        } else {
-          sessionConnectionState = 'polling';
-        }
+        sessionConnectionState = 'polling';
       }
 
       final selectedId = selectedTaskRun?.taskRunId;
@@ -96,7 +88,7 @@ class WorkbenchController extends ChangeNotifier {
   }
 
   Future<void> applySessionFilter(String value) async {
-    sessionFilter = value.trim();
+    sessionQuery = value.trim();
     await refreshTaskRuns(keepSelection: false);
   }
 
@@ -170,9 +162,7 @@ class WorkbenchController extends ChangeNotifier {
   }
 
   Future<void> _bindTaskRunFeedSocket({String? sessionId}) async {
-    final socketKey = (sessionId != null && sessionId.isNotEmpty)
-        ? 'session:$sessionId'
-        : 'all';
+    final socketKey = 'all';
     if (_activeSessionSocketId == socketKey &&
         _sessionConnection != null &&
         sessionConnectionState == 'live') {
@@ -194,9 +184,7 @@ class WorkbenchController extends ChangeNotifier {
       var allowReconnectOnClose = true;
       _activeSessionSocketId = socketKey;
       _sessionConnection = _socket.connect(
-        uri: (sessionId != null && sessionId.isNotEmpty)
-            ? AppConfig.sessionSocketUri(sessionId)
-            : AppConfig.allTaskRunsSocketUri(),
+        uri: AppConfig.allTaskRunsSocketUri(),
         onEvent: _handleSessionEvent,
         onClosed: () {
           if (_activeSessionSocketId != socketKey) {
@@ -347,21 +335,12 @@ class WorkbenchController extends ChangeNotifier {
   }
 
   void _scheduleSessionReconnect(String? sessionId) {
-    final normalizedSessionId = sessionId?.trim() ?? '';
-    final expectedKey = normalizedSessionId.isEmpty ? 'all' : 'session:$normalizedSessionId';
-    if (normalizedSessionId.isNotEmpty && sessionFilter != normalizedSessionId) {
-      return;
-    }
-    if (normalizedSessionId.isEmpty && sessionFilter.isNotEmpty) {
-      return;
-    }
+    final expectedKey = 'all';
     _sessionReconnectTimer?.cancel();
     _sessionReconnectTimer = Timer(const Duration(seconds: 3), () {
-      final currentKey = sessionFilter.isEmpty ? 'all' : 'session:$sessionFilter';
+      final currentKey = 'all';
       if (currentKey == expectedKey) {
-        _bindTaskRunFeedSocket(
-          sessionId: normalizedSessionId.isEmpty ? null : normalizedSessionId,
-        );
+        _bindTaskRunFeedSocket();
       }
     });
   }
@@ -415,7 +394,7 @@ class WorkbenchController extends ChangeNotifier {
     }
     try {
       final runs = await _api.listTaskRuns(
-        sessionId: sessionFilter.trim().isEmpty ? null : sessionFilter.trim(),
+        sessionQuery: sessionQuery.trim().isEmpty ? null : sessionQuery.trim(),
         limit: 50,
       );
       taskRuns = runs;
@@ -451,6 +430,7 @@ class WorkbenchController extends ChangeNotifier {
         taskRuns = list
             .whereType<Map<String, dynamic>>()
             .map(TaskRunSummary.fromJson)
+            .where(_matchesSessionQuery)
             .toList();
       }
     } else if (payload is Map<String, dynamic>) {
@@ -473,10 +453,18 @@ class WorkbenchController extends ChangeNotifier {
   }
 
   void _mergeSummary(TaskRunSummary incoming) {
+    final matches = _matchesSessionQuery(incoming);
     final items = [...taskRuns];
     final index = items.indexWhere(
       (item) => item.taskRunId == incoming.taskRunId,
     );
+    if (!matches) {
+      if (index >= 0) {
+        items.removeAt(index);
+      }
+      taskRuns = items;
+      return;
+    }
     if (index >= 0) {
       items[index] = incoming;
     } else {
@@ -489,6 +477,7 @@ class WorkbenchController extends ChangeNotifier {
     return TaskRunSummary(
       taskRunId: detail.taskRunId,
       sessionId: detail.sessionId,
+      sessionLabel: detail.sessionLabel,
       sourceType: detail.sourceType,
       sourceRef: detail.sourceRef,
       triggerMessageId: detail.triggerMessageId,
@@ -504,6 +493,14 @@ class WorkbenchController extends ChangeNotifier {
       updatedAt: detail.updatedAt,
       completedAt: detail.completedAt,
     );
+  }
+
+  bool _matchesSessionQuery(TaskRunSummary item) {
+    final query = sessionQuery.trim().toLowerCase();
+    if (query.isEmpty) {
+      return true;
+    }
+    return (item.sessionLabel ?? item.sessionId).toLowerCase().contains(query);
   }
 
   @override

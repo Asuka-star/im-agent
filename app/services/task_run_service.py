@@ -15,10 +15,18 @@ from app.schemas.task_run import (
     TaskRunSummary,
 )
 from app.services.realtime_hub import realtime_hub
+from app.services.session_display_service import SessionDisplayService
 
 
 class TaskRunService:
     """Stores task-run level state for the dashboard and multi-end collaboration."""
+
+    def __init__(
+        self,
+        *,
+        session_display_service: SessionDisplayService | None = None,
+    ) -> None:
+        self.session_display_service = session_display_service or SessionDisplayService()
 
     def create_task_run(
         self,
@@ -57,17 +65,28 @@ class TaskRunService:
         self,
         *,
         session_id: str | None = None,
+        session_query: str | None = None,
         status: str | None = None,
         limit: int = 20,
     ) -> list[TaskRunSummary]:
         with SessionLocal() as session:
-            statement = select(TaskRun).order_by(desc(TaskRun.id)).limit(limit)
+            query_active = bool((session_query or "").strip())
+            statement = select(TaskRun).order_by(desc(TaskRun.id)).limit(limit if not query_active else max(limit * 4, limit))
             if session_id:
                 statement = statement.where(TaskRun.session_id == session_id)
             if status:
                 statement = statement.where(TaskRun.status == status)
             rows = session.execute(statement).scalars().all()
-            return [self._summary_from_row(row) for row in rows]
+            summaries = [self._summary_from_row(row) for row in rows]
+            normalized_query = (session_query or "").strip().lower()
+            if normalized_query:
+                summaries = [
+                    item
+                    for item in summaries
+                    if normalized_query
+                    in ((item.session_label or item.session_id).strip().lower())
+                ]
+            return summaries[:limit]
 
     def get_task_run(self, task_run_id: str) -> TaskRunDetail | None:
         with SessionLocal() as session:
@@ -323,6 +342,12 @@ class TaskRunService:
         return TaskRunSummary(
             task_run_id=row.task_run_id,
             session_id=row.session_id,
+            session_label=self.session_display_service.resolve_session_label(
+                session_id=row.session_id,
+                source_type=row.source_type,
+                source_ref=row.source_ref,
+                created_by=row.created_by,
+            ),
             source_type=row.source_type,
             source_ref=row.source_ref,
             trigger_message_id=row.trigger_message_id,
@@ -406,6 +431,7 @@ class TaskRunService:
         return {
             "task_run_id": detail.task_run_id,
             "session_id": detail.session_id,
+            "session_label": detail.session_label,
             "source_type": detail.source_type,
             "source_ref": detail.source_ref,
             "trigger_message_id": detail.trigger_message_id,

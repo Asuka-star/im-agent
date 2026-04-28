@@ -45,6 +45,7 @@ class ConfirmationRequestRecord(BaseModel):
 class TaskRunSummary(BaseModel):
     task_run_id: str
     session_id: str
+    session_label: str | None = None
     source_type: str
     source_ref: str | None = None
     trigger_message_id: str | None = None

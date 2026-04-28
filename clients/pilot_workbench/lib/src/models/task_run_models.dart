@@ -11,6 +11,7 @@ class TaskRunSummary {
     required this.createdAt,
     required this.updatedAt,
     this.intent,
+    this.sessionLabel,
     this.sourceRef,
     this.triggerMessageId,
     this.latestSummary,
@@ -22,6 +23,7 @@ class TaskRunSummary {
 
   final String taskRunId;
   final String sessionId;
+  final String? sessionLabel;
   final String sourceType;
   final String title;
   final String stage;
@@ -41,6 +43,7 @@ class TaskRunSummary {
     return TaskRunSummary(
       taskRunId: json['task_run_id'] as String? ?? '',
       sessionId: json['session_id'] as String? ?? '',
+      sessionLabel: json['session_label'] as String?,
       sourceType: json['source_type'] as String? ?? '',
       sourceRef: json['source_ref'] as String?,
       triggerMessageId: json['trigger_message_id'] as String?,
@@ -204,6 +207,7 @@ class TaskRunDetail extends TaskRunSummary {
     required this.confirmations,
     this.metadataJson,
     super.intent,
+    super.sessionLabel,
     super.sourceRef,
     super.triggerMessageId,
     super.latestSummary,
@@ -222,6 +226,7 @@ class TaskRunDetail extends TaskRunSummary {
     return TaskRunDetail(
       taskRunId: json['task_run_id'] as String? ?? '',
       sessionId: json['session_id'] as String? ?? '',
+      sessionLabel: json['session_label'] as String?,
       sourceType: json['source_type'] as String? ?? '',
       sourceRef: json['source_ref'] as String?,
       triggerMessageId: json['trigger_message_id'] as String?,
