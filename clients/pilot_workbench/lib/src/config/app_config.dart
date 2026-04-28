@@ -27,6 +27,10 @@ class AppConfig {
     return _buildSocketUri('ws/task-runs/$taskRunId');
   }
 
+  static Uri allTaskRunsSocketUri() {
+    return _buildSocketUri('ws/task-runs-feed');
+  }
+
   static Uri sessionSocketUri(String sessionId) {
     return _buildSocketUri('ws/sessions/$sessionId');
   }

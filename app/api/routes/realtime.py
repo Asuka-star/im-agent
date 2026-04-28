@@ -8,6 +8,32 @@ router = APIRouter()
 task_run_service = TaskRunService()
 
 
+@router.websocket("/task-runs-feed")
+async def watch_all_task_runs(
+    websocket: WebSocket,
+    limit: int = Query(default=50, ge=1, le=200),
+) -> None:
+    room = realtime_hub.all_task_runs_room()
+    await realtime_hub.connect(websocket, room)
+    try:
+        task_runs = task_run_service.list_task_runs(limit=limit)
+        await websocket.send_json(
+            {
+                "type": "task_runs.snapshot",
+                "task_runs": [item.model_dump(mode="json") for item in task_runs],
+            }
+        )
+        while True:
+            message = await websocket.receive_text()
+            if message.strip().lower() == "ping":
+                await websocket.send_json({"type": "pong", "scope": "all_task_runs"})
+    except WebSocketDisconnect:
+        realtime_hub.disconnect(websocket, room)
+    except Exception:
+        realtime_hub.disconnect(websocket, room)
+        raise
+
+
 @router.websocket("/task-runs/{task_run_id}")
 async def watch_task_run(websocket: WebSocket, task_run_id: str) -> None:
     room = realtime_hub.task_run_room(task_run_id)

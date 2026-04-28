@@ -26,6 +26,9 @@ class RealtimeHub:
     def session_room(self, session_id: str) -> str:
         return f"session:{session_id}"
 
+    def all_task_runs_room(self) -> str:
+        return "task-runs:all"
+
     async def connect(self, websocket: WebSocket, room: str) -> None:
         await websocket.accept()
         with self._lock:

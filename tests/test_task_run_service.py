@@ -114,14 +114,17 @@ class TaskRunServiceTests(unittest.TestCase):
             )
 
         self.assertTrue(created.task_run_id.startswith("run_"))
-        self.assertEqual(emit_room.call_count, 2)
+        self.assertEqual(emit_room.call_count, 3)
         first_room, first_message = emit_room.call_args_list[0].args
         second_room, second_message = emit_room.call_args_list[1].args
+        third_room, third_message = emit_room.call_args_list[2].args
         self.assertEqual(first_room, f"task-run:{created.task_run_id}")
         self.assertEqual(second_room, "session:oc_demo")
+        self.assertEqual(third_room, "task-runs:all")
         self.assertEqual(first_message["type"], "task_run.created")
         self.assertEqual(first_message["task_run"]["task_run_id"], created.task_run_id)
         self.assertEqual(second_message["task_run"]["session_id"], "oc_demo")
+        self.assertEqual(third_message["task_run"]["session_id"], "oc_demo")
 
 
 if __name__ == "__main__":

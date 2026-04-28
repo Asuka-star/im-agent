@@ -347,6 +347,7 @@ class _HeroPanel extends StatelessWidget {
                 label: Text(controller.isLoadingList ? '同步中...' : '刷新任务'),
                 style: OutlinedButton.styleFrom(
                   foregroundColor: Colors.white,
+                  disabledForegroundColor: Colors.white70,
                   side: BorderSide(color: Colors.white.withValues(alpha: 0.28)),
                 ),
               ),

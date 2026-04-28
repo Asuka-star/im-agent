@@ -400,6 +400,7 @@ class TaskRunService:
         }
         realtime_hub.emit_room(self._task_room(task_run_id), task_message)
         realtime_hub.emit_room(self._session_room(detail.session_id), session_message)
+        realtime_hub.emit_room(realtime_hub.all_task_runs_room(), session_message)
 
     def _summary_payload(self, detail: TaskRunDetail) -> dict:
         return {

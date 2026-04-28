@@ -58,12 +58,16 @@ class WorkbenchController extends ChangeNotifier {
 
       if (sessionFilter.trim().isNotEmpty) {
         if (_sessionRealtimeEnabled) {
-          await _bindSessionSocket(sessionFilter.trim());
+          await _bindTaskRunFeedSocket(sessionId: sessionFilter.trim());
         } else {
           sessionConnectionState = 'polling';
         }
       } else {
-        await _closeSessionSocket();
+        if (_sessionRealtimeEnabled) {
+          await _bindTaskRunFeedSocket();
+        } else {
+          sessionConnectionState = 'polling';
+        }
       }
 
       final selectedId = selectedTaskRun?.taskRunId;
@@ -165,7 +169,16 @@ class WorkbenchController extends ChangeNotifier {
     await refreshTaskRuns(keepSelection: false);
   }
 
-  Future<void> _bindSessionSocket(String sessionId) async {
+  Future<void> _bindTaskRunFeedSocket({String? sessionId}) async {
+    final socketKey = (sessionId != null && sessionId.isNotEmpty)
+        ? 'session:$sessionId'
+        : 'all';
+    if (_activeSessionSocketId == socketKey &&
+        _sessionConnection != null &&
+        sessionConnectionState == 'live') {
+      return;
+    }
+
     _sessionReconnectTimer?.cancel();
     final current = _sessionConnection;
     _sessionConnection = null;
@@ -179,12 +192,14 @@ class WorkbenchController extends ChangeNotifier {
 
     try {
       var allowReconnectOnClose = true;
-      _activeSessionSocketId = sessionId;
+      _activeSessionSocketId = socketKey;
       _sessionConnection = _socket.connect(
-        uri: AppConfig.sessionSocketUri(sessionId),
+        uri: (sessionId != null && sessionId.isNotEmpty)
+            ? AppConfig.sessionSocketUri(sessionId)
+            : AppConfig.allTaskRunsSocketUri(),
         onEvent: _handleSessionEvent,
         onClosed: () {
-          if (_activeSessionSocketId != sessionId) {
+          if (_activeSessionSocketId != socketKey) {
             return;
           }
           sessionConnectionState = allowReconnectOnClose ? 'closed' : 'polling';
@@ -194,7 +209,7 @@ class WorkbenchController extends ChangeNotifier {
           }
         },
         onError: (error) {
-          if (_activeSessionSocketId != sessionId) {
+          if (_activeSessionSocketId != socketKey) {
             return;
           }
           final shouldRetry = _shouldRetrySocket(error);
@@ -233,6 +248,12 @@ class WorkbenchController extends ChangeNotifier {
   }
 
   Future<void> _bindTaskSocket(String taskRunId) async {
+    if (_activeTaskSocketId == taskRunId &&
+        _taskConnection != null &&
+        taskConnectionState == 'live') {
+      return;
+    }
+
     _taskReconnectTimer?.cancel();
     final current = _taskConnection;
     _taskConnection = null;
@@ -325,14 +346,22 @@ class WorkbenchController extends ChangeNotifier {
     _updateFallbackRefresh();
   }
 
-  void _scheduleSessionReconnect(String sessionId) {
-    if (sessionId.isEmpty || sessionFilter != sessionId) {
+  void _scheduleSessionReconnect(String? sessionId) {
+    final normalizedSessionId = sessionId?.trim() ?? '';
+    final expectedKey = normalizedSessionId.isEmpty ? 'all' : 'session:$normalizedSessionId';
+    if (normalizedSessionId.isNotEmpty && sessionFilter != normalizedSessionId) {
+      return;
+    }
+    if (normalizedSessionId.isEmpty && sessionFilter.isNotEmpty) {
       return;
     }
     _sessionReconnectTimer?.cancel();
     _sessionReconnectTimer = Timer(const Duration(seconds: 3), () {
-      if (sessionFilter == sessionId) {
-        _bindSessionSocket(sessionId);
+      final currentKey = sessionFilter.isEmpty ? 'all' : 'session:$sessionFilter';
+      if (currentKey == expectedKey) {
+        _bindTaskRunFeedSocket(
+          sessionId: normalizedSessionId.isEmpty ? null : normalizedSessionId,
+        );
       }
     });
   }
@@ -416,7 +445,7 @@ class WorkbenchController extends ChangeNotifier {
 
   void _handleSessionEvent(Map<String, dynamic> event) {
     final payload = event['task_run'];
-    if (event['type'] == 'session.snapshot') {
+    if (event['type'] == 'session.snapshot' || event['type'] == 'task_runs.snapshot') {
       final list = event['task_runs'];
       if (list is List) {
         taskRuns = list

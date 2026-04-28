@@ -1,6 +1,7 @@
 import logging
 import time
 
+from fastapi.concurrency import run_in_threadpool
 from fastapi import APIRouter, HTTPException, Request
 
 from app.feishu.event_handler import FeishuEventHandler
@@ -65,7 +66,7 @@ async def receive_events(request: Request) -> dict:
         message_context.raw_text,
     )
 
-    result = workflow_service.handle_message(message_context)
+    result = await run_in_threadpool(workflow_service.handle_message, message_context)
     task_count = len(result["analysis"].tasks) if result["analysis"] is not None else 0
     logger.info(
         "Workflow completed: message_id=%s session_id=%s mode=%s reply_sent=%s task_count=%s reply_error=%s",
