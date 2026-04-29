@@ -2,6 +2,7 @@ import json
 import logging
 import re
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
@@ -30,6 +31,13 @@ from app.services.text_analysis import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class RequestProtocol:
+    operation: str
+    object: str
+    route: str
 
 
 class FeishuWorkflowService:
@@ -294,6 +302,7 @@ class FeishuWorkflowService:
                 if task_run_id:
                     self.task_run_service.update_task_run(task_run_id, stage="intent_resolution")
                 llm_result = self.llm_service.resolve_workspace_request(workspace_context, message.text)
+                protocol = self._normalize_request_protocol(llm_result)
                 if task_run_id:
                     self.task_run_service.upsert_step(
                         task_run_id,
@@ -302,6 +311,9 @@ class FeishuWorkflowService:
                         step_type="intent",
                         status="done",
                         output_payload={
+                            "operation": protocol.operation,
+                            "object": protocol.object,
+                            "route": protocol.route,
                             "intent": llm_result.get("intent"),
                             "reason": llm_result.get("reason"),
                         },
@@ -389,15 +401,188 @@ class FeishuWorkflowService:
             current_session_id=message.session_id,
         )
 
-    def _is_status_query(self, text: str) -> bool:
-        normalized = " ".join((text or "").lower().split())
-        if not normalized:
-            return False
-        if "整理" in normalized or "生成" in normalized or "提取" in normalized:
-            return False
-        status_verbs = ("查看", "查询", "看看", "看下", "现在", "当前", "还有", "哪些", "谁负责", "进展", "状态")
-        task_terms = ("任务", "待办", "todo", "to-do", "负责人", "截止", "列表", "清单")
-        return any(verb in normalized for verb in status_verbs) and any(term in normalized for term in task_terms)
+    def _normalize_request_protocol(self, llm_result: dict) -> RequestProtocol:
+        raw_route = self._normalize_token(llm_result.get("route") or llm_result.get("intent"))
+        raw_operation = self._normalize_operation(llm_result.get("operation") or llm_result.get("action"))
+        raw_object = self._normalize_object(llm_result.get("object") or llm_result.get("target"))
+
+        if not raw_operation or not raw_object:
+            inferred = self._infer_protocol_from_legacy_result(llm_result, raw_route)
+            raw_operation = raw_operation or inferred.operation
+            raw_object = raw_object or inferred.object
+
+        route = self._canonical_route(raw_operation, raw_object, raw_route)
+        protocol = RequestProtocol(
+            operation=raw_operation or "help",
+            object=raw_object or "workspace",
+            route=route,
+        )
+        llm_result["operation"] = protocol.operation
+        llm_result["object"] = protocol.object
+        llm_result["route"] = protocol.route
+        llm_result["request_protocol"] = {
+            "operation": protocol.operation,
+            "object": protocol.object,
+            "route": protocol.route,
+        }
+        return protocol
+
+    def _normalize_token(self, value: object) -> str:
+        return str(value or "").strip().lower().replace("-", "_")
+
+    def _normalize_operation(self, value: object) -> str:
+        token = self._normalize_token(value)
+        aliases = {
+            "read": "read",
+            "query": "read",
+            "get": "read",
+            "list": "read",
+            "show": "read",
+            "answer": "read",
+            "status": "read",
+            "analyze": "analyze",
+            "analysis": "analyze",
+            "organize": "analyze",
+            "extract": "analyze",
+            "summarize": "analyze",
+            "update": "update",
+            "modify": "update",
+            "revise": "update",
+            "create": "create",
+            "generate": "create",
+            "write": "create",
+            "sync": "create",
+            "deliver": "deliver",
+            "share": "deliver",
+            "export": "deliver",
+            "archive": "deliver",
+            "help": "help",
+            "clarify": "help",
+            "unknown": "unknown",
+        }
+        return aliases.get(token, "")
+
+    def _normalize_object(self, value: object) -> str:
+        token = self._normalize_token(value)
+        aliases = {
+            "task": "tasks",
+            "tasks": "tasks",
+            "todo": "tasks",
+            "todos": "tasks",
+            "action_items": "tasks",
+            "summary": "summary",
+            "summaries": "summary",
+            "risk": "risks",
+            "risks": "risks",
+            "blockers": "risks",
+            "doc": "doc",
+            "document": "doc",
+            "feishu_doc": "doc",
+            "slides": "slides",
+            "slide": "slides",
+            "ppt": "slides",
+            "presentation": "slides",
+            "workspace": "workspace",
+            "project": "workspace",
+            "help": "workspace",
+            "unknown": "workspace",
+        }
+        return aliases.get(token, "")
+
+    def _infer_protocol_from_legacy_result(self, llm_result: dict, route: str) -> RequestProtocol:
+        if route == "status" or str(llm_result.get("status_answer") or "").strip():
+            return RequestProtocol(operation="read", object="tasks", route="status")
+        if route == "tasks":
+            return RequestProtocol(operation="analyze", object="tasks", route="tasks")
+        if route == "summary":
+            return RequestProtocol(operation="analyze", object="summary", route="summary")
+        if route == "risks":
+            return RequestProtocol(operation="analyze", object="risks", route="risks")
+        if route == "doc":
+            return RequestProtocol(operation="create", object="doc", route="doc")
+        if route == "slides":
+            return RequestProtocol(operation="create", object="slides", route="slides")
+        if route == "unknown":
+            return RequestProtocol(operation="unknown", object="workspace", route="unknown")
+        return RequestProtocol(operation="help", object="workspace", route="help")
+
+    def _canonical_route(self, operation: str, object_name: str, fallback: str) -> str:
+        if operation == "read":
+            return "status"
+        if operation == "analyze":
+            if object_name in {"summary", "risks"}:
+                return object_name
+            if object_name == "tasks":
+                return "tasks"
+            return fallback if fallback in {"summary", "tasks", "risks"} else "summary"
+        if operation == "update":
+            if object_name in {"summary", "risks"}:
+                return object_name
+            if object_name == "tasks":
+                return "tasks"
+            if object_name in {"doc", "slides"}:
+                return object_name
+            return fallback if fallback in {"summary", "tasks", "risks", "doc", "slides"} else "help"
+        if operation == "create":
+            if object_name in {"doc", "slides"}:
+                return object_name
+            if object_name == "tasks":
+                return "tasks"
+            return fallback if fallback in {"doc", "slides"} else "doc"
+        if operation == "deliver":
+            return "help"
+        if operation == "unknown":
+            return "unknown"
+        return "help"
+
+    def _allowed_steps_for_protocol(self, protocol: RequestProtocol) -> set[str]:
+        if protocol.operation == "read":
+            return {"answer_status"}
+        if protocol.operation == "analyze":
+            return {"analyze_discussion"}
+        if protocol.operation in {"create", "update"}:
+            if protocol.object == "doc":
+                return {"sync_doc", "generate_slides"}
+            if protocol.object == "slides":
+                return {"generate_slides"}
+            if protocol.object == "tasks":
+                return {"analyze_discussion"}
+            return {"reply_help"}
+        return {"reply_help"}
+
+    def _required_step_for_protocol(self, protocol: RequestProtocol) -> str:
+        if protocol.operation == "read":
+            return "answer_status"
+        if protocol.operation == "analyze":
+            return "analyze_discussion"
+        if protocol.operation in {"create", "update"} and protocol.object == "doc":
+            return "sync_doc"
+        if protocol.operation in {"create", "update"} and protocol.object == "slides":
+            return "generate_slides"
+        if protocol.operation == "update" and protocol.object == "tasks":
+            return "analyze_discussion"
+        return "reply_help"
+
+    def _enforce_protocol_on_plan(
+        self,
+        plan: ExecutionPlan,
+        *,
+        protocol: RequestProtocol,
+        reason: str,
+        instruction: str,
+        llm_result: dict,
+    ) -> ExecutionPlan:
+        allowed_steps = self._allowed_steps_for_protocol(protocol)
+        filtered_steps = [step for step in plan.steps if step.step_type in allowed_steps]
+        required_step = self._required_step_for_protocol(protocol)
+        if filtered_steps and any(step.step_type == required_step for step in filtered_steps):
+            return ExecutionPlan(goal=plan.goal, primary_intent=protocol.route, steps=filtered_steps)
+        return self._build_fallback_plan(
+            intent=protocol.route,
+            reason=reason,
+            instruction=instruction,
+            llm_result=llm_result,
+        )
 
     def _execute_llm_request(
         self,
@@ -408,23 +593,9 @@ class FeishuWorkflowService:
         *,
         task_run_id: str | None = None,
     ) -> dict:
-        intent = str(llm_result.get("intent") or "").strip().lower()
+        protocol = self._normalize_request_protocol(llm_result)
+        intent = protocol.route
         reason = str(llm_result.get("reason") or "").strip()
-        if self._is_status_query(message.text):
-            intent = "status"
-            llm_result["intent"] = "status"
-            llm_result["status_answer"] = ""
-            llm_result["plan"] = {
-                "goal": "查询当前任务状态",
-                "primary_intent": "status",
-                "steps": [
-                    {
-                        "id": "step_1",
-                        "type": "answer_status",
-                        "title": "回答当前任务状态",
-                    }
-                ],
-            }
         if task_run_id:
             self.task_run_service.update_task_run(
                 task_run_id,
@@ -438,6 +609,7 @@ class FeishuWorkflowService:
             reason=reason,
             llm_result=llm_result,
             instruction=message.text,
+            protocol=protocol,
         )
         plan_artifact = self._build_plan_artifact(plan=plan, reason=reason, llm_result=llm_result)
         if task_run_id:
@@ -513,7 +685,19 @@ class FeishuWorkflowService:
         reason: str,
         llm_result: dict,
         instruction: str,
+        protocol: RequestProtocol | None = None,
     ) -> ExecutionPlan:
+        if protocol is None:
+            if (
+                llm_result.get("operation")
+                or llm_result.get("object")
+                or llm_result.get("action")
+                or llm_result.get("target")
+                or llm_result.get("route")
+            ):
+                protocol = self._normalize_request_protocol(llm_result)
+            else:
+                protocol = self._infer_protocol_from_legacy_result(llm_result, self._normalize_token(intent))
         raw_plan = llm_result.get("plan")
         if isinstance(raw_plan, dict):
             normalized = self._normalize_execution_plan(
@@ -522,8 +706,26 @@ class FeishuWorkflowService:
                 instruction=instruction,
             )
             if normalized.steps:
-                return normalized
-        return self._build_fallback_plan(intent=intent, reason=reason, instruction=instruction, llm_result=llm_result)
+                return self._enforce_protocol_on_plan(
+                    normalized,
+                    protocol=protocol,
+                    reason=reason,
+                    instruction=instruction,
+                    llm_result=llm_result,
+                )
+        plan = self._build_fallback_plan(
+            intent=protocol.route,
+            reason=reason,
+            instruction=instruction,
+            llm_result=llm_result,
+        )
+        return self._enforce_protocol_on_plan(
+            plan,
+            protocol=protocol,
+            reason=reason,
+            instruction=instruction,
+            llm_result=llm_result,
+        )
 
     def _normalize_execution_plan(
         self,
@@ -665,6 +867,9 @@ class FeishuWorkflowService:
         preview = {
             "goal": plan.goal,
             "intent": plan.primary_intent or "unknown",
+            "operation": llm_result.get("operation") or "",
+            "object": llm_result.get("object") or "",
+            "route": llm_result.get("route") or plan.primary_intent or "unknown",
             "reason": reason,
             "steps": [
                 {
@@ -1922,6 +2127,21 @@ class FeishuWorkflowService:
         return "\n".join(lines)
 
     def _format_status_reply(self, query: str, tasks: list, payload: dict) -> str:
+        if "风险" in query or "卡点" in query or "阻塞" in query:
+            risks = payload.get("risks") if isinstance(payload.get("risks"), list) else []
+            if not risks:
+                risks = ["当前没有额外记录到新的风险项。"]
+            lines = ["【当前风险】"]
+            for idx, risk in enumerate(risks, start=1):
+                lines.append(f"{idx}. {risk}")
+            return "\n".join(lines)
+
+        if "总结" in query or "结论" in query or "摘要" in query or "概览" in query:
+            summary = str(payload.get("summary") or "").strip()
+            if not summary:
+                return "我这边还没有现成的讨论总结。你可以先让我总结一下当前讨论。"
+            return "\n".join(["【当前总结】", summary])
+
         if not tasks:
             return "我这边还没有现成的任务快照。你可以先让我总结一下或整理待办，我再基于结果回答状态问题。"
 

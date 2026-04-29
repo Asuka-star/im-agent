@@ -212,7 +212,54 @@ class LLMTaskOperationTests(unittest.TestCase):
         self.assertEqual(plan.primary_intent, "doc")
         self.assertEqual([step.step_type for step in plan.steps], ["sync_doc", "generate_slides"])
 
-    def test_status_query_forces_answer_status_plan(self) -> None:
+    def test_doc_route_requires_doc_step_before_optional_slides(self) -> None:
+        plan = self.service._resolve_execution_plan(
+            intent="slides",
+            reason="planner missed the required document step",
+            llm_result={
+                "operation": "create",
+                "object": "doc",
+                "intent": "slides",
+                "slides": {
+                    "theme": "report",
+                    "slides": [{"title": "背景", "bullets": ["目标"]}],
+                },
+                "plan": {
+                    "steps": [
+                        {
+                            "id": "step_1",
+                            "type": "generate_slides",
+                            "title": "generate slides only",
+                        }
+                    ]
+                },
+            },
+            instruction="write the discussion into a document",
+        )
+
+        self.assertEqual(plan.primary_intent, "doc")
+        self.assertEqual([step.step_type for step in plan.steps], ["sync_doc", "generate_slides"])
+
+    def test_operation_object_protocol_derives_route_without_legacy_intent(self) -> None:
+        protocol = self.service._normalize_request_protocol(
+            {
+                "operation": "read",
+                "object": "tasks",
+                "reason": "read current task snapshot",
+            }
+        )
+
+        self.assertEqual(protocol.operation, "read")
+        self.assertEqual(protocol.object, "tasks")
+        self.assertEqual(protocol.route, "status")
+
+    def test_read_risks_can_answer_from_payload_without_task_snapshot(self) -> None:
+        reply = self.service._format_status_reply("当前有什么风险", [], {"risks": ["接口联调时间紧"]})
+
+        self.assertIn("当前风险", reply)
+        self.assertIn("接口联调时间紧", reply)
+
+    def test_read_task_route_forces_answer_status_plan(self) -> None:
         message = type(
             "FakeMessage",
             (),
@@ -244,6 +291,8 @@ class LLMTaskOperationTests(unittest.TestCase):
             result = self.service._execute_llm_request(
                 message,
                 {
+                    "operation": "read",
+                    "object": "tasks",
                     "intent": "tasks",
                     "reason": "模型误判成整理任务",
                     "tasks": [],
@@ -263,6 +312,69 @@ class LLMTaskOperationTests(unittest.TestCase):
 
         self.assertEqual(result["mode"], "status")
         prepare_status.assert_called_once()
+
+    def test_analyze_task_route_rejects_read_only_plan(self) -> None:
+        message = type(
+            "FakeMessage",
+            (),
+            {"session_id": "s1", "message_id": "m1", "text": "organize todos", "chat_id": "c1", "chat_type": "group"},
+        )()
+        with patch.object(
+            self.service,
+            "_prepare_analysis_execution",
+            return_value={
+                "reply_preview": "[tasks]",
+                "analysis": None,
+                "artifacts": [],
+                "close_title": "tasks",
+            },
+        ) as prepare_analysis, patch.object(
+            self.service,
+            "_prepare_status_execution",
+            return_value={
+                "reply_preview": "should not run",
+                "analysis": None,
+                "artifacts": [],
+                "close_title": None,
+            },
+        ) as prepare_status, patch.object(
+            self.service,
+            "_deliver_reply",
+            return_value={
+                "session_id": "s1",
+                "episode_id": None,
+                "mode": "tasks",
+                "analysis": None,
+                "reply_preview": "[tasks]",
+                "reply_sent": False,
+                "reply_error": None,
+                "artifacts": [],
+            },
+        ):
+            result = self.service._execute_llm_request(
+                message,
+                {
+                    "operation": "analyze",
+                    "object": "tasks",
+                    "intent": "status",
+                    "reason": "planner picked the wrong read-only step",
+                    "plan": {
+                        "steps": [
+                            {
+                                "id": "step_1",
+                                "type": "answer_status",
+                                "title": "answer status",
+                            }
+                        ]
+                    },
+                },
+                "[workspace]",
+                None,
+            )
+
+        self.assertEqual(result["mode"], "tasks")
+        prepare_analysis.assert_called_once()
+        prepare_status.assert_not_called()
 
     def test_execute_llm_request_runs_planner_steps_in_order(self) -> None:
         message = type(

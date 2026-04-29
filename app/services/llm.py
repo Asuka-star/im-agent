@@ -72,8 +72,9 @@ class LLMService:
         }
         result = self._chat_json(payload, request_name="resolve_workspace_request", timeout_seconds=settings.llm_timeout_seconds)
         logger.info(
-            "LLM workspace request resolved: intent=%s tasks=%s operations=%s plan_steps=%s",
-            result.get("intent"),
+            "LLM workspace request resolved: operation=%s object=%s tasks=%s operations=%s plan_steps=%s",
+            result.get("operation"),
+            result.get("object"),
             len(result.get("tasks", [])) if isinstance(result.get("tasks"), list) else 0,
             len(result.get("task_operations", [])) if isinstance(result.get("task_operations"), list) else 0,
             len(result.get("plan", {}).get("steps", []))
@@ -232,7 +233,8 @@ Return valid JSON only. No markdown, no explanation.
 
 Schema:
 {{
-  "intent": "summary|tasks|risks|status|slides|doc|help|unknown",
+  "operation": "read|analyze|create|update|deliver|help|unknown",
+  "object": "tasks|summary|risks|doc|slides|workspace",
   "reason": "short reason in Simplified Chinese",
   "clarification": {{
     "needed": false,
@@ -311,32 +313,35 @@ Schema:
 Rules:
 - Today is {today} in Asia/Shanghai.
 - Prefer understanding the whole discussion instead of keyword matching.
+- Choose operation and object before planning. operation=read means answer from existing context without changing task/document state. operation=analyze means organize or update discussion-derived analysis such as tasks, summary, or risks. operation=create means create a new artifact such as a document or slides. operation=update means modify an existing artifact or task snapshot. operation=deliver means share, export, or archive a result.
+- object names the thing being handled. For "show/list/query/current/pending task list" requests, use operation=read, object=tasks, and plan.steps=[answer_status]. For "organize/extract/update the task list" requests, use operation=analyze, object=tasks, and plan.steps=[analyze_discussion].
+- Do not use operation=analyze for read-only task/status questions.
 - The current discussion block is the primary source of truth for this round. Treat older summaries and task snapshots as background state, not as instructions to rewrite everything.
 - Use clarification.needed=true when key execution facts are missing or there are multiple materially different paths that require the user's choice first.
 - Always think in terms of an execution plan first, then fill the rest of the fields.
 - Typical clarification cases include: the target output format is unclear, the user refers to an ambiguous previous decision, or critical owners / deadlines / audience are missing for a deliverable.
-- When clarification.needed=true, still choose the most likely intent, write a short clarification.question in Simplified Chinese, provide 2 to 4 concise options when possible, and set clarification.blocking=true if execution should pause before continuing.
+- When clarification.needed=true, still choose the most likely operation/object, write a short clarification.question in Simplified Chinese, provide 2 to 4 concise options when possible, and set clarification.blocking=true if execution should pause before continuing.
 - Recent discussion lines may include structured fields like "发言人" and "提及". Treat "提及" as a strong assignee hint in multi-person collaboration.
 - Distinguish clearly between the speaker, the mentioned teammate, and the final owner of a task.
 - When one teammate assigns work to an @mentioned teammate, prefer the mentioned teammate as the task owner unless the discussion clearly says otherwise.
-- For summary/tasks/risks/doc, prefer using task_operations to describe how the current discussion changes existing tasks.
+- For operation=analyze objects summary/tasks/risks, prefer using task_operations to describe how the current discussion changes existing tasks.
 - If the current round adds one more assignment, create or update only the related tasks. Do not delete or rewrite unrelated existing tasks.
 - If an existing task remains valid and the current round does not explicitly change it, preserve it.
 - Use create for new tasks, update for changes to existing tasks, and remove for tasks that are explicitly cancelled or no longer needed.
 - match_hint should point to the existing task that needs to be updated or removed, usually by title and owner from the current task snapshot.
 - You may also return tasks as a refreshed full task list. If both task_operations and tasks are present, task_operations is the primary source of truth.
-- For status, put the natural-language answer into status_answer. You may also return tasks if useful.
+- For operation=read, do not return task_operations. For status questions, put the natural-language answer into status_answer. You may also return tasks if useful.
 - For slides, fill the slides object with 5 to 7 slides and concise bullets.
-- For doc, return intent=doc and fill doc.title plus doc.sections with a Feishu-document-ready structure.
+- For doc, fill doc.title plus doc.sections with a Feishu-document-ready structure.
 - plan.steps should contain the high-level execution steps the agent will actually perform. Use only these step types: analyze_discussion, sync_doc, generate_slides, answer_status, reply_help.
-- For summary/tasks/risks, usually include analyze_discussion.
-- For doc, usually include sync_doc, and add generate_slides when the user also wants a report outline / PPT / presentation material.
-- For slides, include generate_slides.
-- For status, include answer_status.
+- For operation=analyze and object=summary/tasks/risks, usually include analyze_discussion.
+- For operation=create/update and object=doc, usually include sync_doc, and add generate_slides when the user also wants a report outline / PPT / presentation material.
+- For operation=create/update and object=slides, include generate_slides.
+- For operation=read, include answer_status.
 - For help or unknown, include reply_help.
-- If the user asks for a report outline and also wants it written into a document, choose doc and fill both doc and slides when helpful.
-- If the request is too vague, return intent=help.
-- If the request cannot be safely understood, return intent=unknown.
+- If the user asks for a report outline and also wants it written into a document, use operation=create, object=doc and fill both doc and slides when helpful.
+- If the request is too vague, use operation=help and object=workspace.
+- If the request cannot be safely understood, use operation=unknown and object=workspace.
 - Convert relative dates like 今天、明天、这周五、下周三前 into absolute YYYY-MM-DD dates whenever possible.
 - Never invent stale years such as 2024 for relative deadlines.
 - All output must be Simplified Chinese.

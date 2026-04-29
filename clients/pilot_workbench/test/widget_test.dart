@@ -12,7 +12,7 @@ void main() {
     await tester.pumpWidget(const PilotWorkbenchApp(autoInitialize: false));
     await tester.pump();
 
-    expect(find.text('Pilot Workbench'), findsOneWidget);
+    expect(find.text('飞书智能体工作台'), findsOneWidget);
     expect(find.text('任务运行面板'), findsOneWidget);
     expect(find.text('任务详情与产物'), findsOneWidget);
   });
