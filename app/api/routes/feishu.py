@@ -1,10 +1,10 @@
 import logging
 import time
 
-from fastapi.concurrency import run_in_threadpool
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 
 from app.feishu.event_handler import FeishuEventHandler
+from app.schemas.feishu_event import FeishuEventEnvelope, FeishuMessageContext
 from app.services.dedup import MessageDedupService
 from app.services.feishu_workflow import FeishuWorkflowService
 
@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 @router.post("/events")
-async def receive_events(request: Request) -> dict:
+async def receive_events(request: Request, background_tasks: BackgroundTasks) -> dict:
     started_at = time.perf_counter()
     payload = await request.json()
     envelope = event_handler.parse_event(payload)
@@ -38,21 +38,52 @@ async def receive_events(request: Request) -> dict:
 
     raw_message = envelope.event.message if envelope.event else None
     raw_message_id = raw_message.message_id if raw_message else None
-    if dedup_service.already_processed(raw_message_id):
+    if not dedup_service.accept_for_processing(raw_message_id):
         logger.info(
-            "Skipping duplicate message event before extraction: message_id=%s",
+            "Skipping duplicate message event before background scheduling: message_id=%s",
             raw_message_id,
         )
         return {"code": 0, "msg": "duplicate_ignored"}
 
-    message_context = event_handler.extract_message_context(envelope)
+    background_tasks.add_task(_process_event_background, envelope, raw_message_id)
+    logger.info(
+        "Feishu callback accepted for background processing: message_id=%s ack_elapsed_ms=%.1f",
+        raw_message_id,
+        (time.perf_counter() - started_at) * 1000,
+    )
+    return {
+        "code": 0,
+        "msg": "accepted",
+        "data": {
+            "message_id": raw_message_id,
+            "background": True,
+        },
+    }
+
+
+def _process_event_background(envelope: FeishuEventEnvelope, raw_message_id: str | None) -> None:
+    started_at = time.perf_counter()
+    try:
+        message_context = event_handler.extract_message_context(envelope)
+        if message_context is None:
+            logger.info("Ignored callback because no supported message context was extracted")
+            return
+
+        _process_message_context(message_context, started_at=started_at)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to process Feishu callback in background: message_id=%s error=%s", raw_message_id, exc)
+    finally:
+        dedup_service.finish_processing(raw_message_id)
+
+
+def _process_message_context(message_context: FeishuMessageContext, *, started_at: float) -> None:
     if message_context is None:
         logger.info("Ignored callback because no supported message context was extracted")
-        return {"code": 0, "msg": "ignored"}
+        return
 
     if dedup_service.already_processed(message_context.message_id):
         logger.info("Skipping duplicate message event: message_id=%s", message_context.message_id)
-        return {"code": 0, "msg": "duplicate_ignored"}
+        return
 
     logger.info(
         "Processing message event: message_id=%s chat_id=%s sender_id=%s message_type=%s mentioned=%s mentioned_users=%s text=%s raw_text=%s",
@@ -66,7 +97,7 @@ async def receive_events(request: Request) -> dict:
         message_context.raw_text,
     )
 
-    result = await run_in_threadpool(workflow_service.handle_message, message_context)
+    result = workflow_service.handle_message(message_context)
     task_count = len(result["analysis"].tasks) if result["analysis"] is not None else 0
     logger.info(
         "Workflow completed: message_id=%s session_id=%s mode=%s reply_sent=%s task_count=%s reply_error=%s",
@@ -78,20 +109,7 @@ async def receive_events(request: Request) -> dict:
         result["reply_error"],
     )
     logger.info(
-        "Feishu callback handled: message_id=%s total_elapsed_ms=%.1f",
+        "Feishu background workflow handled: message_id=%s total_elapsed_ms=%.1f",
         message_context.message_id,
         (time.perf_counter() - started_at) * 1000,
     )
-    return {
-        "code": 0,
-        "msg": "ok",
-        "data": {
-            "session_id": result["session_id"],
-            "task_run_id": result.get("task_run_id"),
-            "mode": result["mode"],
-            "reply_preview": result["reply_preview"],
-            "reply_sent": result["reply_sent"],
-            "reply_error": result["reply_error"],
-            "task_count": task_count,
-        },
-    }

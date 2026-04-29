@@ -56,6 +56,121 @@ class LLMService:
         )
         return result
 
+    def route_workspace_request(self, instruction: str) -> dict[str, Any]:
+        self._ensure_configured()
+        payload = {
+            "model": self.model,
+            "temperature": 0.0,
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {"role": "system", "content": self._route_prompt()},
+                {"role": "user", "content": instruction},
+            ],
+        }
+        result = self._chat_json(
+            payload,
+            request_name="route_workspace_request",
+            timeout_seconds=settings.llm_memory_gate_timeout_seconds,
+        )
+        logger.info(
+            "LLM lightweight route resolved: route=%s confidence=%s clarification=%s",
+            result.get("route"),
+            result.get("confidence"),
+            result.get("needs_clarification"),
+        )
+        return result
+
+    def resolve_doc_request(self, workspace_context: str, instruction: str) -> dict[str, Any]:
+        self._ensure_configured()
+        payload = {
+            "model": self.model,
+            "temperature": 0.2,
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {"role": "system", "content": self._doc_request_prompt()},
+                {
+                    "role": "user",
+                    "content": f"[工作区上下文]\n{workspace_context}\n\n[当前请求]\n{instruction}",
+                },
+            ],
+        }
+        result = self._chat_json(payload, request_name="resolve_doc_request", timeout_seconds=settings.llm_timeout_seconds)
+        doc = result.get("doc") if isinstance(result.get("doc"), dict) else {}
+        logger.info(
+            "LLM doc request resolved: sections=%s",
+            len(doc.get("sections", [])) if isinstance(doc.get("sections"), list) else 0,
+        )
+        result["operation"] = "create"
+        result["object"] = "doc"
+        result["route"] = "doc"
+        result.setdefault("reason", "用户要求生成或更新协作文档")
+        result.setdefault(
+            "plan",
+            {
+                "goal": instruction[:80],
+                "steps": [
+                    {
+                        "id": "step_1",
+                        "type": "sync_doc",
+                        "title": "生成并同步协作文档",
+                        "depends_on": [],
+                    }
+                ],
+            },
+        )
+        return result
+
+    def resolve_analysis_request(self, workspace_context: str, instruction: str, route: str) -> dict[str, Any]:
+        self._ensure_configured()
+        normalized_route = route if route in {"summary", "tasks", "risks"} else "summary"
+        payload = {
+            "model": self.model,
+            "temperature": 0.2,
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {"role": "system", "content": self._analysis_request_prompt(normalized_route)},
+                {
+                    "role": "user",
+                    "content": f"[工作区上下文]\n{workspace_context}\n\n[当前请求]\n{instruction}",
+                },
+            ],
+        }
+        result = self._chat_json(
+            payload,
+            request_name=f"resolve_{normalized_route}_request",
+            timeout_seconds=settings.llm_timeout_seconds,
+        )
+        result["operation"] = "analyze"
+        result["object"] = {
+            "tasks": "tasks",
+            "risks": "risks",
+            "summary": "summary",
+        }[normalized_route]
+        result["route"] = normalized_route
+        result.setdefault("reason", "用户要求分析当前协作上下文")
+        result.setdefault(
+            "plan",
+            {
+                "goal": instruction[:80],
+                "steps": [
+                    {
+                        "id": "step_1",
+                        "type": "analyze_discussion",
+                        "title": "分析讨论并整理结果",
+                        "depends_on": [],
+                    }
+                ],
+            },
+        )
+        logger.info(
+            "LLM analysis request resolved: route=%s tasks=%s operations=%s risks=%s",
+            normalized_route,
+            len(result.get("tasks", [])) if isinstance(result.get("tasks"), list) else 0,
+            len(result.get("task_operations", [])) if isinstance(result.get("task_operations"), list) else 0,
+            len(result.get("risks", [])) if isinstance(result.get("risks"), list) else 0,
+        )
+        return result
+
     def resolve_workspace_request(self, workspace_context: str, instruction: str) -> dict[str, Any]:
         self._ensure_configured()
         payload = {
@@ -336,6 +451,7 @@ Rules:
 - plan.steps should contain the high-level execution steps the agent will actually perform. Use only these step types: analyze_discussion, sync_doc, generate_slides, answer_status, reply_help.
 - For operation=analyze and object=summary/tasks/risks, usually include analyze_discussion.
 - For operation=create/update and object=doc, usually include sync_doc, and add generate_slides when the user also wants a report outline / PPT / presentation material.
+- Requests like “总结成文档”, “写成文档”, “整理成文档”, or “沉淀到文档” are document artifact requests: use operation=create or update, object=doc, not operation=analyze/object=summary.
 - For operation=create/update and object=slides, include generate_slides.
 - For operation=read, include answer_status.
 - For help or unknown, include reply_help.
@@ -404,6 +520,139 @@ Rules:
 - If the user asks who owns tasks / what is pending / deadlines / progress, choose status.
 - If the user only says vague things like 'help me handle this' without enough detail, choose help.
 - All reasons must be in Simplified Chinese.
+""".strip()
+
+    def _route_prompt(self) -> str:
+        return """
+You are a lightweight route classifier for a Feishu collaboration agent.
+Only decide which business route should handle the user's request. Do not plan, do not generate content, and do not extract tasks.
+Return valid JSON only. No markdown, no explanation.
+
+Schema:
+{
+  "route": "status|summary|tasks|risks|doc|slides|help|unknown",
+  "confidence": 0.0,
+  "needs_clarification": false,
+  "requested_outputs": ["doc"],
+  "reason": "short reason in Simplified Chinese"
+}
+
+Rules:
+- If the user asks to view/query current tasks, owners, deadlines, progress, or status, choose status.
+- If the user asks to整理/总结/沉淀/同步/写入/写成 a document, Feishu document, requirement document, or doc, choose doc.
+- Requests like “总结成文档”, “写成文档”, “整理成文档”, or “沉淀到文档” are doc requests, not summary requests.
+- If the user asks for PPT, slides, presentation, 演示稿, or 汇报大纲, choose slides.
+- If the user asks for both a document and PPT/slides, choose route=doc and set requested_outputs=["doc","slides"].
+- If the user explicitly says only generate PPT and do not write a document, choose route=slides and set requested_outputs=["slides"].
+- If the user asks to extract/update/organize action items or TODOs, choose tasks.
+- If the user asks only for risks/blockers/卡点, choose risks.
+- If the user asks for a normal conversation summary without artifact words, choose summary.
+- If the request is too vague to choose the output, choose unknown and set needs_clarification=true.
+- All reasons must be in Simplified Chinese.
+""".strip()
+
+    def _doc_request_prompt(self) -> str:
+        today = current_local_date().isoformat()
+        return f"""
+You are a Feishu document drafting agent.
+Turn the workspace context into a concise, Feishu-document-ready collaborative document.
+Return valid JSON only. No markdown, no explanation.
+
+Schema:
+{{
+  "reason": "short reason in Simplified Chinese",
+  "doc": {{
+    "title": "document title in Simplified Chinese",
+    "sections": [
+      {{
+        "heading": "section heading",
+        "paragraphs": ["paragraph or bullet 1", "paragraph or bullet 2"]
+      }}
+    ]
+  }}
+}}
+
+Rules:
+- Today is {today} in Asia/Shanghai.
+- Use only information supported by the workspace context and the current request.
+- If [当前协作文档] is present, treat the request as a document update: compare it with [本次待同步讨论] or [近期群聊讨论] before writing.
+- For document updates, return only sections that need refresh, but each returned section must contain the full updated section content, preserving still-valid existing items from [当前协作文档].
+- Prefer stable collaboration sections: 讨论摘要, 任务清单, 风险与卡点, 下一步建议, 演示重点, 建议补充素材.
+- If current tasks are present, include them in 任务清单 with owner, due date, priority, and status when available.
+- If new discussion changes an owner, due date, status, risk, or next action, update the corresponding section instead of only appending a generic summary.
+- Convert relative dates like 今天、明天、本周六、这周日、下周三前 into absolute YYYY-MM-DD dates whenever possible.
+- Never invent stale years such as 2024 for relative deadlines.
+- If the user asks to revise/update an existing document, preserve the existing section structure when possible and only refresh the relevant sections.
+- Keep paragraphs concise and directly usable in a Feishu document.
+- Do not output task_operations, slides, status_answer, or a multi-step plan.
+- All output must be Simplified Chinese.
+""".strip()
+
+    def _analysis_request_prompt(self, route: str) -> str:
+        today = current_local_date().isoformat()
+        focus = {
+            "summary": "summarize the current discussion and decisions",
+            "tasks": "extract and update action items / task state",
+            "risks": "identify risks, blockers, and next actions",
+        }.get(route, "summarize the current discussion and decisions")
+        object_name = {
+            "summary": "summary",
+            "tasks": "tasks",
+            "risks": "risks",
+        }.get(route, "summary")
+        return f"""
+You are a Feishu collaboration analysis agent.
+Your only job is to {focus}. Do not generate documents, slides, or status answers.
+Return valid JSON only. No markdown, no explanation.
+
+Schema:
+{{
+  "reason": "short reason in Simplified Chinese",
+  "summary": "overall summary in Simplified Chinese",
+  "task_operations": [
+    {{
+      "action": "create|update|remove",
+      "match_hint": {{
+        "title": "existing task title or empty string",
+        "owner": "existing owner or TBD"
+      }},
+      "task": {{
+        "title": "task title",
+        "owner": "owner or TBD",
+        "priority": "high|medium|low",
+        "due_date": "YYYY-MM-DD or TBD",
+        "status": "draft|done|cancelled",
+        "notes": "supporting discussion snippet"
+      }},
+      "reason": "why this operation is needed"
+    }}
+  ],
+  "tasks": [
+    {{
+      "title": "task title",
+      "owner": "owner or TBD",
+      "priority": "high|medium|low",
+      "due_date": "YYYY-MM-DD or TBD",
+      "status": "draft|done|cancelled",
+      "notes": "supporting discussion snippet"
+    }}
+  ],
+  "risks": ["risk in Simplified Chinese"],
+  "next_actions": ["next action in Simplified Chinese"]
+}}
+
+Rules:
+- Today is {today} in Asia/Shanghai.
+- Focus route is {route}; object is {object_name}.
+- Use the current discussion block as the primary source of truth.
+- Existing summaries and task snapshots are background state, not instructions to rewrite everything.
+- If the user is only asking for {route}, do not add document or slide content.
+- For tasks, use task_operations when changing existing task state. Preserve unrelated existing tasks.
+- For summary, include tasks/risks only when they are directly supported by context.
+- For risks, prioritize concrete blockers and mitigation-oriented next actions.
+- Convert relative dates like 今天、明天、这周五、下周三前 into absolute YYYY-MM-DD dates whenever possible.
+- Never invent stale years such as 2024 for relative deadlines.
+- All output must be Simplified Chinese.
 """.strip()
 
     def _memory_gate_prompt(self) -> str:

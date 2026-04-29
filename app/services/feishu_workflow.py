@@ -20,6 +20,8 @@ from app.services.due_date import normalize_task_dates
 from app.services.interaction import InteractionService
 from app.services.llm import LLMService
 from app.services.memory_service import MemoryService
+from app.services.request_router import RequestRouter, RouteDecision
+from app.services.session_document_service import SessionDocumentService
 from app.services.task_run_service import TaskRunService
 from app.services.text_analysis import (
     apply_discussion_updates,
@@ -49,9 +51,11 @@ class FeishuWorkflowService:
         self.doc_api = FeishuDocAPI()
         self.user_api = FeishuUserAPI()
         self.memory_service = MemoryService()
+        self.session_document_service = SessionDocumentService()
         self.task_run_service = TaskRunService()
         self.interaction_service = InteractionService()
         self.llm_service = LLMService()
+        self.request_router = RequestRouter()
 
     def handle_message(self, message: FeishuMessageContext) -> dict:
         started_at = time.perf_counter()
@@ -192,6 +196,7 @@ class FeishuWorkflowService:
                 status=str(artifact.get("status") or "ready"),
                 url=str(artifact.get("url") or "").strip() or None,
                 preview=artifact.get("preview") if isinstance(artifact.get("preview"), dict) else None,
+                version=max(int(artifact.get("version") or 1), 1),
             )
         summary_text = (
             result["analysis"].summary
@@ -283,7 +288,43 @@ class FeishuWorkflowService:
                 output_payload={"context_length": len(base_workspace_context)},
             )
 
-        if self.llm_service.is_configured():
+        route_decision = self._route_request(message.text)
+        if task_run_id:
+            self.task_run_service.upsert_step(
+                task_run_id,
+                step_key="request_route",
+                title="确定请求路由",
+                step_type="intent",
+                status="done",
+                output_payload={
+                    "route": route_decision.route,
+                    "source": route_decision.source,
+                    "confidence": route_decision.confidence,
+                    "needs_clarification": route_decision.needs_clarification,
+                    "reason": route_decision.reason,
+                    "requested_outputs": list(route_decision.requested_outputs),
+                },
+            )
+        logger.info(
+            "Request route resolved: message_id=%s route=%s source=%s confidence=%.2f clarification=%s",
+            message.message_id,
+            route_decision.route,
+            route_decision.source,
+            route_decision.confidence,
+            route_decision.needs_clarification,
+        )
+        if route_decision.needs_clarification:
+            return self._pause_for_clarification(
+                message,
+                intent=route_decision.route if route_decision.route != "unknown" else "help",
+                clarification=self._clarification_from_route_decision(route_decision),
+                active_episode_id=active_episode_id,
+                task_run_id=task_run_id,
+                workspace_context=workspace_context,
+                artifacts=[],
+            )
+
+        if self.llm_service.is_configured() and self._should_run_memory_gate(route_decision, message.text):
             try:
                 memory_gate = self.llm_service.should_recall_memories(base_workspace_context, message.text)
                 if bool(memory_gate.get("should_recall")):
@@ -301,7 +342,14 @@ class FeishuWorkflowService:
             try:
                 if task_run_id:
                     self.task_run_service.update_task_run(task_run_id, stage="intent_resolution")
-                llm_result = self.llm_service.resolve_workspace_request(workspace_context, message.text)
+                resolution_context = self._workspace_context_for_route(
+                    route_decision,
+                    message,
+                    workspace_context,
+                    active_episode_id=active_episode_id,
+                )
+                llm_result = self._resolve_llm_result_for_route(route_decision, resolution_context, message.text)
+                self._apply_route_decision_to_llm_result(llm_result, route_decision)
                 protocol = self._normalize_request_protocol(llm_result)
                 if task_run_id:
                     self.task_run_service.upsert_step(
@@ -314,6 +362,8 @@ class FeishuWorkflowService:
                             "operation": protocol.operation,
                             "object": protocol.object,
                             "route": protocol.route,
+                            "route_source": route_decision.source,
+                            "route_confidence": route_decision.confidence,
                             "intent": llm_result.get("intent"),
                             "reason": llm_result.get("reason"),
                         },
@@ -321,7 +371,7 @@ class FeishuWorkflowService:
                 return self._execute_llm_request(
                     message,
                     llm_result,
-                    workspace_context,
+                    resolution_context,
                     active_episode_id,
                     task_run_id=task_run_id,
                 )
@@ -377,11 +427,209 @@ class FeishuWorkflowService:
             include_semantic_search=include_semantic_search,
         )
 
+    def _route_request(self, instruction: str) -> RouteDecision:
+        return self.request_router.route(
+            instruction,
+            llm_service=self.llm_service if self.llm_service.is_configured() else None,
+        )
+
+    def _apply_route_decision_to_llm_result(self, llm_result: dict, route_decision: RouteDecision) -> None:
+        protocol = self._protocol_from_route_decision(route_decision)
+        if protocol is None:
+            return
+        self._store_request_protocol(llm_result, protocol)
+        if route_decision.requested_outputs:
+            llm_result["requested_outputs"] = list(route_decision.requested_outputs)
+
+    def _resolve_llm_result_for_route(
+        self,
+        route_decision: RouteDecision,
+        workspace_context: str,
+        instruction: str,
+    ) -> dict:
+        route = route_decision.route
+        if route == "status":
+            return self._minimal_llm_result("read", "tasks", "status", instruction)
+        if route == "help":
+            return self._minimal_llm_result("help", "workspace", "help", instruction)
+        if route == "slides":
+            return self._minimal_llm_result("create", "slides", "slides", instruction)
+        if route in {"summary", "tasks", "risks"}:
+            try:
+                return self.llm_service.resolve_analysis_request(workspace_context, instruction, route)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Specialized analysis request failed, falling back to workspace resolver: %s", exc)
+        if route == "doc":
+            try:
+                return self.llm_service.resolve_doc_request(workspace_context, instruction)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Specialized doc request failed, falling back to workspace resolver: %s", exc)
+        return self.llm_service.resolve_workspace_request(workspace_context, instruction)
+
+    def _minimal_llm_result(self, operation: str, object_name: str, route: str, instruction: str) -> dict:
+        return {
+            "operation": operation,
+            "object": object_name,
+            "route": route,
+            "reason": "已由前置路由确定执行类型",
+            "plan": {
+                "goal": instruction[:80],
+                "steps": [
+                    {
+                        "id": "step_1",
+                        "type": self._required_step_for_protocol(
+                            RequestProtocol(operation=operation, object=object_name, route=route)
+                        ),
+                        "title": self._default_plan_step_title(
+                            self._required_step_for_protocol(
+                                RequestProtocol(operation=operation, object=object_name, route=route)
+                            ),
+                            route,
+                        ),
+                        "depends_on": [],
+                    }
+                ],
+            },
+        }
+
+    def _should_run_memory_gate(self, route_decision: RouteDecision, instruction: str) -> bool:
+        if route_decision.route in {"status", "help"}:
+            return False
+        text = str(instruction or "").strip()
+        historical_keywords = (
+            "之前",
+            "以前",
+            "上次",
+            "上轮",
+            "历史",
+            "过去",
+            "早些时候",
+            "前面",
+            "为什么",
+            "变化",
+            "对比",
+            "相比",
+            "还记得",
+        )
+        return any(keyword in text for keyword in historical_keywords)
+
+    def _workspace_context_for_route(
+        self,
+        route_decision: RouteDecision,
+        message: FeishuMessageContext,
+        workspace_context: str,
+        *,
+        active_episode_id: int | None,
+    ) -> str:
+        if route_decision.route != "doc":
+            return workspace_context
+        return self._build_doc_update_context(
+            message,
+            workspace_context,
+            active_episode_id=active_episode_id,
+        )
+
+    def _build_doc_update_context(
+        self,
+        message: FeishuMessageContext,
+        workspace_context: str,
+        *,
+        active_episode_id: int | None,
+    ) -> str:
+        try:
+            current_doc = self.session_document_service.get_current_document(message.session_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to load current document context for IM doc update: %s", exc)
+            current_doc = None
+
+        latest_discussion = self.memory_service.build_discussion_block(
+            message.session_id,
+            episode_id=active_episode_id,
+            exclude_message_id=message.message_id,
+        )
+        update_guidance = ""
+        if current_doc and current_doc.get("document_id"):
+            update_guidance = (
+                "[文档更新策略]\n"
+                "- 先比较“当前协作文档”和“本次待同步讨论”，识别新增、修改或删除的信息。\n"
+                "- 对发生变化的章节，输出该章节更新后的完整内容，保留仍然有效的既有条目。\n"
+                "- 不要把普通“更新文档”理解成重新生成一份泛泛总结。\n"
+                "- 如果讨论中出现新的负责人、截止时间、状态或风险，请同步到对应章节。\n"
+                "- 如果没有实质变化，可以返回与当前文档一致的章节内容。"
+            )
+
+        latest_block = ""
+        if latest_discussion:
+            latest_block = latest_discussion.replace("[近期群聊讨论]", "[本次待同步讨论]", 1)
+
+        return self._join_context_blocks(
+            workspace_context,
+            self._format_current_document_context(current_doc),
+            latest_block,
+            update_guidance,
+        )
+
+    def _clarification_from_route_decision(self, route_decision: RouteDecision) -> dict:
+        reason = route_decision.reason or "当前请求没有明确说明要生成哪种协作产物。"
+        return {
+            "question": "你希望我接下来怎么整理这段内容？",
+            "reason": reason,
+            "options": ["整理成飞书文档", "生成汇报 PPT 大纲", "只做讨论总结", "整理任务清单"],
+            "blocking": True,
+        }
+
+    def _protocol_from_route_decision(self, route_decision: RouteDecision) -> RequestProtocol | None:
+        if route_decision.route == "status":
+            return RequestProtocol(operation="read", object="tasks", route="status")
+        if route_decision.route == "tasks":
+            return RequestProtocol(operation="analyze", object="tasks", route="tasks")
+        if route_decision.route == "summary":
+            return RequestProtocol(operation="analyze", object="summary", route="summary")
+        if route_decision.route == "risks":
+            return RequestProtocol(operation="analyze", object="risks", route="risks")
+        if route_decision.route == "doc":
+            return RequestProtocol(operation="create", object="doc", route="doc")
+        if route_decision.route == "slides":
+            return RequestProtocol(operation="create", object="slides", route="slides")
+        if route_decision.route == "help":
+            return RequestProtocol(operation="help", object="workspace", route="help")
+        if route_decision.route == "unknown" and route_decision.needs_clarification:
+            return RequestProtocol(operation="unknown", object="workspace", route="unknown")
+        return None
+
     def _team_id_for_message(self, message: FeishuMessageContext) -> str:
         return self.memory_service.normalize_team_id(getattr(message, "tenant_key", None))
 
     def _join_context_blocks(self, *blocks: str) -> str:
         return "\n\n".join(block.strip() for block in blocks if block and block.strip())
+
+    def _format_current_document_context(self, current_doc: dict | None) -> str:
+        if not isinstance(current_doc, dict) or not current_doc.get("document_id"):
+            return ""
+        lines = ["[当前协作文档]"]
+        title = str(current_doc.get("title") or "").strip()
+        if title:
+            lines.append(f"标题：{title}")
+        version = current_doc.get("version")
+        if version:
+            lines.append(f"版本：v{version}")
+        url = str(current_doc.get("url") or "").strip()
+        if url:
+            lines.append(f"链接：{url}")
+        snapshot = current_doc.get("section_snapshot")
+        if isinstance(snapshot, list) and snapshot:
+            lines.append("章节快照：")
+            for section in snapshot:
+                if not isinstance(section, dict):
+                    continue
+                heading = str(section.get("heading") or "未命名章节").strip()
+                paragraphs = section.get("paragraphs") if isinstance(section.get("paragraphs"), list) else []
+                lines.append(f"- {heading}")
+                for paragraph in paragraphs[:4]:
+                    text = str(paragraph).strip()
+                    if text:
+                        lines.append(f"  - {text}")
+        return "\n".join(lines)
 
     def _context_tasks_for_message(self, message: FeishuMessageContext) -> list:
         tasks = self.memory_service.get_current_tasks(message.session_id)
@@ -417,6 +665,10 @@ class FeishuWorkflowService:
             object=raw_object or "workspace",
             route=route,
         )
+        self._store_request_protocol(llm_result, protocol)
+        return protocol
+
+    def _store_request_protocol(self, llm_result: dict, protocol: RequestProtocol) -> None:
         llm_result["operation"] = protocol.operation
         llm_result["object"] = protocol.object
         llm_result["route"] = protocol.route
@@ -425,7 +677,61 @@ class FeishuWorkflowService:
             "object": protocol.object,
             "route": protocol.route,
         }
-        return protocol
+
+    def _adjust_protocol_for_instruction(
+        self,
+        protocol: RequestProtocol,
+        *,
+        instruction: str,
+        llm_result: dict,
+    ) -> RequestProtocol:
+        if protocol.object in {"doc", "slides"}:
+            return protocol
+        if not (
+            self._instruction_requests_doc(instruction)
+            or self._llm_result_has_doc_package(llm_result)
+            or self._llm_plan_contains_step(llm_result, "sync_doc")
+        ):
+            return protocol
+
+        operation = "update" if protocol.operation == "update" else "create"
+        adjusted = RequestProtocol(operation=operation, object="doc", route="doc")
+        self._store_request_protocol(llm_result, adjusted)
+        return adjusted
+
+    def _instruction_requests_doc(self, instruction: str) -> bool:
+        text = str(instruction or "").strip().lower()
+        if not text:
+            return False
+        explicit_doc_keywords = (
+            "文档",
+            "doc",
+            "document",
+            "飞书文档",
+            "协作文档",
+            "需求文档",
+            "写成材料",
+            "整理成材料",
+            "沉淀成材料",
+        )
+        return any(keyword in text for keyword in explicit_doc_keywords)
+
+    def _llm_result_has_doc_package(self, llm_result: dict) -> bool:
+        doc = llm_result.get("doc") if isinstance(llm_result, dict) else None
+        return isinstance(doc, dict) and isinstance(doc.get("sections"), list) and bool(doc.get("sections"))
+
+    def _llm_plan_contains_step(self, llm_result: dict, step_type: str) -> bool:
+        raw_plan = llm_result.get("plan") if isinstance(llm_result, dict) else None
+        raw_steps = raw_plan.get("steps") if isinstance(raw_plan, dict) else None
+        if not isinstance(raw_steps, list):
+            return False
+        for item in raw_steps:
+            if not isinstance(item, dict):
+                continue
+            normalized = self._normalize_plan_step_type(str(item.get("type") or item.get("step_type") or ""))
+            if normalized == step_type:
+                return True
+        return False
 
     def _normalize_token(self, value: object) -> str:
         return str(value or "").strip().lower().replace("-", "_")
@@ -576,6 +882,12 @@ class FeishuWorkflowService:
         filtered_steps = [step for step in plan.steps if step.step_type in allowed_steps]
         required_step = self._required_step_for_protocol(protocol)
         if filtered_steps and any(step.step_type == required_step for step in filtered_steps):
+            filtered_steps = self._append_optional_plan_steps_for_protocol(
+                filtered_steps,
+                protocol=protocol,
+                instruction=instruction,
+                llm_result=llm_result,
+            )
             return ExecutionPlan(goal=plan.goal, primary_intent=protocol.route, steps=filtered_steps)
         return self._build_fallback_plan(
             intent=protocol.route,
@@ -594,6 +906,11 @@ class FeishuWorkflowService:
         task_run_id: str | None = None,
     ) -> dict:
         protocol = self._normalize_request_protocol(llm_result)
+        protocol = self._adjust_protocol_for_instruction(
+            protocol,
+            instruction=message.text,
+            llm_result=llm_result,
+        )
         intent = protocol.route
         reason = str(llm_result.get("reason") or "").strip()
         if task_run_id:
@@ -655,6 +972,29 @@ class FeishuWorkflowService:
             base_artifacts=[plan_artifact] if plan_artifact else None,
         )
 
+    def _append_optional_plan_steps_for_protocol(
+        self,
+        steps: list[PlannerStep],
+        *,
+        protocol: RequestProtocol,
+        instruction: str,
+        llm_result: dict,
+    ) -> list[PlannerStep]:
+        if protocol.route != "doc" or not self._should_include_slides_step("doc", instruction, llm_result):
+            return steps
+        if any(step.step_type == "generate_slides" for step in steps):
+            return steps
+        dependency = steps[-1].step_id if steps else None
+        return [
+            *steps,
+            PlannerStep(
+                step_id=f"step_{len(steps) + 1}",
+                step_type="generate_slides",
+                title="基于当前文档生成演示稿",
+                depends_on=[dependency] if dependency else [],
+            ),
+        ]
+
     def _extract_clarification_request(self, llm_result: dict) -> dict | None:
         raw = llm_result.get("clarification")
         if not isinstance(raw, dict) or not bool(raw.get("needed")):
@@ -698,6 +1038,11 @@ class FeishuWorkflowService:
                 protocol = self._normalize_request_protocol(llm_result)
             else:
                 protocol = self._infer_protocol_from_legacy_result(llm_result, self._normalize_token(intent))
+        protocol = self._adjust_protocol_for_instruction(
+            protocol,
+            instruction=instruction,
+            llm_result=llm_result,
+        )
         raw_plan = llm_result.get("plan")
         if isinstance(raw_plan, dict):
             normalized = self._normalize_execution_plan(
@@ -853,6 +1198,11 @@ class FeishuWorkflowService:
             return True
         if intent != "doc":
             return False
+        requested_outputs = llm_result.get("requested_outputs")
+        if isinstance(requested_outputs, list) and "slides" in {
+            str(item).strip().lower() for item in requested_outputs
+        }:
+            return True
         if isinstance(llm_result.get("slides"), dict) and llm_result.get("slides", {}).get("slides"):
             return True
         return self._is_outline_request(instruction)
@@ -965,6 +1315,7 @@ class FeishuWorkflowService:
                     llm_result=llm_result,
                     workspace_context=workspace_context,
                     active_episode_id=active_episode_id,
+                    task_run_id=task_run_id,
                 )
             except Exception as exc:  # noqa: BLE001
                 if task_run_id:
@@ -1027,6 +1378,7 @@ class FeishuWorkflowService:
         llm_result: dict,
         workspace_context: str,
         active_episode_id: int | None,
+        task_run_id: str | None,
     ) -> dict:
         if step.step_type == "generate_slides":
             return self._prepare_slides_execution(
@@ -1041,6 +1393,7 @@ class FeishuWorkflowService:
                 workspace_context=workspace_context,
                 active_episode_id=active_episode_id,
                 reason=plan.goal,
+                task_run_id=task_run_id,
             )
         if step.step_type == "answer_status":
             return self._prepare_status_execution(message, llm_result=llm_result)
@@ -1091,6 +1444,7 @@ class FeishuWorkflowService:
         workspace_context: str,
         active_episode_id: int | None,
         reason: str,
+        task_run_id: str | None = None,
     ) -> dict:
         package, analysis = self._build_doc_response_package(
             session_id=message.session_id,
@@ -1105,20 +1459,24 @@ class FeishuWorkflowService:
             str(package.get("title") or "协同文档"),
             stats_as_of=str(package.get("stats_as_of") or "").strip() or None,
         )
-        sync_lines = self._sync_package_to_doc(package)
+        sync_lines = self._sync_package_to_session_doc(
+            package,
+            session_id=message.session_id,
+            episode_id=active_episode_id,
+            instruction=message.text,
+            task_run_id=task_run_id,
+        )
+        artifact = self._build_document_artifact(
+            session_id=message.session_id,
+            package=package,
+            sync_lines=sync_lines,
+            fallback_provider="local",
+        )
         reply_preview = self._format_doc_reply(package, sync_lines)
         return {
             "reply_preview": reply_preview,
             "analysis": analysis,
-            "artifacts": [
-                {
-                    "artifact_type": "document",
-                    "provider": "feishu_doc" if any("文档链接" in line for line in sync_lines) else "local",
-                    "title": str(package.get("title") or "协同文档"),
-                    "url": self._extract_first_url(sync_lines),
-                    "preview": package,
-                }
-            ],
+            "artifacts": [artifact],
             "close_title": str(package.get("title") or "doc"),
         }
 
@@ -1360,9 +1718,184 @@ class FeishuWorkflowService:
         self._persist_task_run_result(task_run_id, message_text=resumed_instruction, result=result, session_id=detail.session_id)
         return result
 
+    def revise_document_from_task_run(
+        self,
+        source_task_run_id: str,
+        *,
+        instruction: str,
+        requested_by: str = "pilot_workbench",
+    ):
+        cleaned_instruction = " ".join((instruction or "").split()).strip()
+        if not cleaned_instruction:
+            raise ValueError("Document revision instruction cannot be empty.")
+
+        source_detail = self.task_run_service.get_task_run(source_task_run_id)
+        if source_detail is None:
+            return None
+
+        session_id = source_detail.session_id
+        task_run = self.task_run_service.create_task_run(
+            session_id=session_id,
+            title=self._task_run_title(cleaned_instruction, "doc_revision"),
+            source_type="workbench",
+            source_ref=source_task_run_id,
+            created_by=requested_by,
+            intent="doc",
+            metadata={
+                "source_task_run_id": source_task_run_id,
+                "revision_instruction": cleaned_instruction,
+                "requested_by": requested_by,
+            },
+        )
+        self.task_run_service.upsert_step(
+            task_run.task_run_id,
+            step_key="request_received",
+            title="接收文档修订指令",
+            step_type="input",
+            status="done",
+            input_payload={
+                "source_task_run_id": source_task_run_id,
+                "instruction": cleaned_instruction,
+                "requested_by": requested_by,
+            },
+        )
+        self.task_run_service.update_task_run(
+            task_run.task_run_id,
+            stage="building_context",
+            status="running",
+        )
+
+        synthetic_message_id = f"workbench:{task_run.task_run_id}"
+        self.memory_service.save_user_message(
+            session_id=session_id,
+            message_id=synthetic_message_id,
+            sender_id=requested_by,
+            content=cleaned_instruction,
+            embed=False,
+        )
+        workspace_context = self.memory_service.build_workspace_context(
+            session_id,
+            include_pending=True,
+            exclude_message_id=synthetic_message_id,
+            query_text=cleaned_instruction,
+            include_semantic_search=False,
+            episode_id=None,
+        )
+        try:
+            current_doc = self.session_document_service.get_current_document(session_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to load current document context for revision: %s", exc)
+            current_doc = None
+        workspace_context = self._join_context_blocks(
+            workspace_context,
+            self._format_current_document_context(current_doc),
+        )
+        self.task_run_service.upsert_step(
+            task_run.task_run_id,
+            step_key="workspace_context",
+            title="构建文档修订上下文",
+            step_type="context",
+            status="done",
+            output_payload={"context_length": len(workspace_context)},
+        )
+
+        llm_result: dict = {}
+        if self.llm_service.is_configured():
+            try:
+                self.task_run_service.update_task_run(task_run.task_run_id, stage="doc_revision_planning")
+                llm_result = self.llm_service.resolve_workspace_request(
+                    workspace_context,
+                    self._build_document_revision_instruction(cleaned_instruction, current_doc=current_doc),
+                )
+                llm_result["intent"] = "doc"
+                self.task_run_service.upsert_step(
+                    task_run.task_run_id,
+                    step_key="intent_resolution",
+                    title="识别文档修订目标",
+                    step_type="intent",
+                    status="done",
+                    output_payload={
+                        "intent": llm_result.get("intent"),
+                        "reason": llm_result.get("reason"),
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Document revision planning failed, falling back to deterministic doc sync: %s", exc)
+                self.task_run_service.upsert_step(
+                    task_run.task_run_id,
+                    step_key="intent_resolution",
+                    title="识别文档修订目标",
+                    step_type="intent",
+                    status="failed",
+                    error=str(exc),
+                )
+
+        self.task_run_service.update_task_run(task_run.task_run_id, stage="doc_revision_processing")
+        synthetic_message = SimpleNamespace(
+            session_id=session_id,
+            message_id=synthetic_message_id,
+            text=cleaned_instruction,
+            chat_id=None,
+        )
+        try:
+            result = self._prepare_doc_execution(
+                synthetic_message,
+                llm_result=llm_result,
+                workspace_context=workspace_context,
+                active_episode_id=None,
+                reason="根据工作台指令修订当前协作文档",
+                task_run_id=task_run.task_run_id,
+            )
+            result["mode"] = "doc"
+            result["session_id"] = session_id
+            result["episode_id"] = None
+            result["reply_sent"] = False
+            result["reply_error"] = None
+            self._persist_task_run_result(
+                task_run.task_run_id,
+                message_text=cleaned_instruction,
+                result=result,
+                session_id=session_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.task_run_service.update_task_run(
+                task_run.task_run_id,
+                stage="failed",
+                status="failed",
+                latest_error=str(exc),
+            )
+            self.task_run_service.upsert_step(
+                task_run.task_run_id,
+                step_key="response_generated",
+                title="生成文档修订结果",
+                step_type="workflow",
+                status="failed",
+                error=str(exc),
+            )
+            raise
+
+        return self.task_run_service.get_task_run(task_run.task_run_id)
+
     def _build_confirmation_resume_instruction(self, instruction: str, answer_value: str) -> str:
         base = instruction.strip() or "继续刚才的任务"
         return f"{base}\n\n[用户刚刚确认]\n{answer_value}"
+
+    def _build_document_revision_instruction(self, instruction: str, *, current_doc: dict | None = None) -> str:
+        title = str((current_doc or {}).get("title") or "").strip()
+        version = (current_doc or {}).get("version")
+        current_note = ""
+        if title:
+            current_note = f"当前文档：{title}"
+            if version:
+                current_note += f"（v{version}）"
+            current_note += "。"
+        return (
+            "请基于当前协作文档执行一次文档修订。"
+            "优先复用已有文档结构，只输出需要更新后的文档内容；"
+            "如果用户指定了章节，请只改相关章节。"
+            f"{current_note}\n\n"
+            f"用户修订要求：{instruction}"
+        )
 
     def _persist_task_run_result(self, task_run_id: str, *, message_text: str, result: dict, session_id: str) -> None:
         if result["reply_preview"]:
@@ -1381,6 +1914,7 @@ class FeishuWorkflowService:
                 status=str(artifact.get("status") or "ready"),
                 url=str(artifact.get("url") or "").strip() or None,
                 preview=artifact.get("preview") if isinstance(artifact.get("preview"), dict) else None,
+                version=max(int(artifact.get("version") or 1), 1),
             )
         summary_text = (
             result["analysis"].summary
@@ -1745,7 +2279,19 @@ class FeishuWorkflowService:
             reason="为文档同步生成结构化沉淀",
             source_message_id=message.message_id,
         )
-        sync_lines = self._sync_package_to_doc(package)
+        sync_lines = self._sync_package_to_session_doc(
+            package,
+            session_id=message.session_id,
+            episode_id=active_episode_id,
+            instruction=message.text,
+            task_run_id=task_run_id,
+        )
+        artifact = self._build_document_artifact(
+            session_id=message.session_id,
+            package=package,
+            sync_lines=sync_lines,
+            fallback_provider="fallback",
+        )
         reply_preview = self._format_doc_reply(package, sync_lines)
         result = self._deliver_reply(
             message,
@@ -1753,15 +2299,7 @@ class FeishuWorkflowService:
             reply_preview,
             analysis=analysis,
             episode_id=active_episode_id,
-            artifacts=[
-                {
-                    "artifact_type": "document",
-                    "provider": "feishu_doc" if any("文档链接" in line for line in sync_lines) else "fallback",
-                    "title": str(package.get("title") or "协同文档"),
-                    "url": self._extract_first_url(sync_lines),
-                    "preview": package,
-                }
-            ],
+            artifacts=[artifact],
         )
         if active_episode_id is not None and self._should_close_episode(result, reply_preview):
             self.memory_service.close_active_episode(message.session_id, title=str(package.get("title") or "doc"))
@@ -1777,14 +2315,15 @@ class FeishuWorkflowService:
         episode_id: int | None,
     ) -> dict:
         stats_as_of = self._resolve_doc_stats_as_of(session_id, episode_id=episode_id)
-        provided = llm_result.get("doc")
-        if isinstance(provided, dict) and isinstance(provided.get("sections"), list) and provided.get("sections"):
-            base_title = str(provided.get("title") or "").strip() or self._default_doc_title(instruction, stats_as_of=stats_as_of)
-            return {
-                "title": self._compose_doc_title(base_title, stats_as_of=stats_as_of),
-                "stats_as_of": stats_as_of,
-                "sections": provided.get("sections", []),
-            }
+        provided_package = self._document_package_from_llm_result(
+            session_id=session_id,
+            instruction=instruction,
+            llm_result=llm_result,
+            episode_id=episode_id,
+            stats_as_of=stats_as_of,
+        )
+        if provided_package:
+            return provided_package
 
         wants_outline = any(keyword in instruction for keyword in ("汇报", "路演", "大纲", "PPT", "ppt", "演示"))
         if wants_outline:
@@ -1821,6 +2360,15 @@ class FeishuWorkflowService:
         reason: str,
         source_message_id: str | None,
     ) -> tuple[dict, AnalyzeResponse | None]:
+        provided_package = self._document_package_from_llm_result(
+            session_id=session_id,
+            instruction=instruction,
+            llm_result=llm_result,
+            episode_id=episode_id,
+        )
+        if provided_package:
+            return provided_package, None
+
         if self._is_outline_request(instruction):
             package = self._build_document_package_from_workspace(
                 session_id=session_id,
@@ -1853,6 +2401,32 @@ class FeishuWorkflowService:
         stats_as_of = self._resolve_doc_stats_as_of(session_id, episode_id=episode_id)
         package = self._document_from_analysis(analysis, instruction, stats_as_of=stats_as_of)
         return package, analysis
+
+    def _document_package_from_llm_result(
+        self,
+        *,
+        session_id: str,
+        instruction: str,
+        llm_result: dict,
+        episode_id: int | None,
+        stats_as_of: str | None = None,
+    ) -> dict | None:
+        provided = llm_result.get("doc") if isinstance(llm_result, dict) else None
+        if not isinstance(provided, dict):
+            return None
+        sections = provided.get("sections")
+        if not isinstance(sections, list) or not sections:
+            return None
+        resolved_stats_as_of = stats_as_of or self._resolve_doc_stats_as_of(session_id, episode_id=episode_id)
+        base_title = str(provided.get("title") or "").strip() or self._default_doc_title(
+            instruction,
+            stats_as_of=resolved_stats_as_of,
+        )
+        return {
+            "title": self._compose_doc_title(base_title, stats_as_of=resolved_stats_as_of),
+            "stats_as_of": resolved_stats_as_of,
+            "sections": self._normalize_doc_sections(sections),
+        }
 
     def _is_outline_request(self, instruction: str) -> bool:
         return any(keyword in instruction for keyword in ("汇报", "路演", "大纲", "PPT", "ppt", "演示"))
@@ -1891,7 +2465,7 @@ class FeishuWorkflowService:
         return {
             "title": self._default_doc_title(instruction, stats_as_of=stats_as_of),
             "stats_as_of": stats_as_of,
-            "sections": sections,
+            "sections": self._normalize_doc_sections(sections),
         }
 
     def _document_from_presentation(self, package: dict, instruction: str, *, stats_as_of: str | None = None) -> dict:
@@ -1935,7 +2509,434 @@ class FeishuWorkflowService:
         return {
             "title": self._default_doc_title(instruction, fallback=theme, stats_as_of=stats_as_of),
             "stats_as_of": stats_as_of,
-            "sections": sections,
+            "sections": self._normalize_doc_sections(sections),
+        }
+
+    def _normalize_doc_sections(self, sections: list[dict]) -> list[dict]:
+        canonical_aliases = {
+            "摘要": "讨论摘要",
+            "总结": "讨论摘要",
+            "概述": "讨论摘要",
+            "背景": "讨论摘要",
+            "待办": "任务清单",
+            "任务": "任务清单",
+            "行动项": "下一步建议",
+            "后续动作": "下一步建议",
+            "风险": "风险与卡点",
+            "卡点": "风险与卡点",
+        }
+        preferred_order = [
+            "文档说明",
+            "讨论摘要",
+            "任务清单",
+            "风险与卡点",
+            "下一步建议",
+            "演示重点",
+            "建议补充素材",
+        ]
+        grouped: dict[str, list[str]] = {}
+        appearance_order: list[str] = []
+        for section in sections:
+            if not isinstance(section, dict):
+                continue
+            raw_heading = str(section.get("heading") or "").strip()
+            canonical_heading = canonical_aliases.get(raw_heading, raw_heading or "未命名章节")
+            paragraphs = section.get("paragraphs") if isinstance(section.get("paragraphs"), list) else []
+            cleaned: list[str] = []
+            for item in paragraphs:
+                text = str(item).strip()
+                if text and text not in cleaned:
+                    cleaned.append(text)
+            if not raw_heading and not cleaned:
+                continue
+            if canonical_heading not in grouped:
+                grouped[canonical_heading] = []
+                appearance_order.append(canonical_heading)
+            for text in cleaned:
+                if text not in grouped[canonical_heading]:
+                    grouped[canonical_heading].append(text)
+
+        ordered_headings = [heading for heading in preferred_order if heading in grouped]
+        ordered_headings.extend(heading for heading in appearance_order if heading not in ordered_headings)
+        return [
+            {"heading": heading, "paragraphs": grouped[heading]}
+            for heading in ordered_headings
+            if grouped.get(heading)
+        ]
+
+    def _sync_package_to_session_doc(
+        self,
+        package: dict,
+        *,
+        session_id: str,
+        episode_id: int | None,
+        instruction: str,
+        task_run_id: str | None = None,
+    ) -> list[str]:
+        title = str(package.get("title") or "collab_doc").strip() or "collab_doc"
+        sections = self._normalize_doc_sections(
+            package.get("sections") if isinstance(package.get("sections"), list) else [],
+        )
+        package["sections"] = sections
+
+        if not self.doc_api.is_configured():
+            logger.warning("Feishu doc sync skipped because FEISHU_DOC_ENABLED is not enabled.")
+            return ["- Feishu doc sync is disabled. Set FEISHU_DOC_ENABLED=true first."]
+
+        current_doc = self.session_document_service.get_current_document(session_id)
+        current_snapshot = current_doc.get("section_snapshot") if isinstance(current_doc, dict) else None
+        if current_doc and current_doc.get("document_id"):
+            try:
+                update_sections, changed_headings, targeted_headings = self._build_incremental_doc_sections(
+                    package,
+                    instruction=instruction,
+                    previous_snapshot=current_snapshot if isinstance(current_snapshot, list) else None,
+                )
+                if len(update_sections) <= 1:
+                    remembered = self.session_document_service.save_current_document(
+                        session_id,
+                        document_id=str(current_doc["document_id"]),
+                        url=str(current_doc.get("url") or "").strip() or None,
+                        title=str(current_doc.get("title") or title),
+                        episode_id=episode_id,
+                        task_run_id=task_run_id,
+                        version=int(current_doc.get("version") or 1),
+                        sync_mode="noop",
+                        section_snapshot=self.session_document_service.build_section_snapshot(
+                            current_snapshot if isinstance(current_snapshot, list) else sections,
+                        ),
+                    )
+                    return self._build_doc_sync_lines(
+                        "noop",
+                        remembered,
+                        changed_headings=targeted_headings,
+                    )
+
+                appended = self.doc_api.append_sections_to_document(
+                    str(current_doc["document_id"]),
+                    str(current_doc.get("title") or title),
+                    update_sections,
+                )
+                version = int(current_doc.get("version") or 1) + 1
+                merged_snapshot = self._merge_doc_section_snapshots(
+                    current_snapshot if isinstance(current_snapshot, list) else [],
+                    sections,
+                )
+                remembered = self.session_document_service.save_current_document(
+                    session_id,
+                    document_id=str(appended["document_id"]),
+                    url=str(appended.get("url") or current_doc.get("url") or "").strip() or None,
+                    title=str(current_doc.get("title") or title),
+                    episode_id=episode_id,
+                    task_run_id=task_run_id,
+                    version=version,
+                    sync_mode="updated",
+                    section_snapshot=merged_snapshot,
+                )
+                return self._build_doc_sync_lines(
+                    "updated",
+                    remembered,
+                    appended_block_count=appended["appended_block_count"],
+                    changed_headings=changed_headings,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Feishu doc append failed, recreating document: %s", exc)
+
+        try:
+            created = self.doc_api.create_document_from_sections(title, sections)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Feishu doc sync failed: %s", exc)
+            return [f"- Document sync failed: {exc}"]
+
+        remembered = self.session_document_service.save_current_document(
+            session_id,
+            document_id=str(created["document_id"]),
+            url=str(created.get("url") or "").strip() or None,
+            title=str(created.get("title") or title),
+            episode_id=episode_id,
+            task_run_id=task_run_id,
+            version=1,
+            sync_mode="created",
+            section_snapshot=self.session_document_service.build_section_snapshot(sections),
+        )
+        return self._build_doc_sync_lines(
+            "created",
+            remembered,
+            folder_scope=str(created.get("folder_scope") or "").strip(),
+            folder_url=str(created.get("folder_url") or "").strip() or None,
+            folder_note=str(created.get("folder_note") or "").strip() or None,
+        )
+
+    def _build_incremental_doc_sections(
+        self,
+        package: dict,
+        *,
+        instruction: str,
+        previous_snapshot: list[dict] | None = None,
+    ) -> tuple[list[dict], list[str], list[str]]:
+        timestamp = str(package.get("stats_as_of") or self._doc_title_timestamp()).strip()
+        sections = package.get("sections") if isinstance(package.get("sections"), list) else []
+        targeted_headings = self._resolve_doc_update_targets(instruction, sections)
+        incremental_sections: list[dict] = [
+            {
+                "heading": f"Update ({timestamp})",
+                "paragraphs": self._build_doc_update_header_lines(
+                    instruction=instruction,
+                    targeted_headings=targeted_headings,
+                ),
+            }
+        ]
+        previous_map = self._section_snapshot_map(previous_snapshot or [])
+        changed_headings: list[str] = []
+        for section in sections:
+            if not isinstance(section, dict):
+                continue
+            heading = str(section.get("heading") or "supplement").strip() or "supplement"
+            if targeted_headings and heading not in targeted_headings:
+                continue
+            paragraphs = section.get("paragraphs") if isinstance(section.get("paragraphs"), list) else []
+            cleaned = [str(item).strip() for item in paragraphs if str(item).strip()]
+            if not cleaned:
+                continue
+            if previous_map.get(heading) == cleaned:
+                continue
+            changed_headings.append(heading)
+            incremental_sections.append({"heading": f"refresh: {heading}", "paragraphs": cleaned})
+        return incremental_sections, changed_headings, targeted_headings
+
+    def _build_doc_update_header_lines(
+        self,
+        *,
+        instruction: str,
+        targeted_headings: list[str],
+    ) -> list[str]:
+        lines = [f"Trigger: {instruction.strip() or 'supplement collaborative document'}"]
+        if targeted_headings:
+            lines.append(f"Target sections: {', '.join(targeted_headings)}")
+        return lines
+
+    def _resolve_doc_update_targets(
+        self,
+        instruction: str,
+        sections: list[dict],
+    ) -> list[str]:
+        normalized_instruction = instruction.strip().lower()
+        if not normalized_instruction:
+            return []
+
+        explicit_matches: list[str] = []
+        available_headings = [
+            str(section.get("heading") or "").strip()
+            for section in sections
+            if isinstance(section, dict) and str(section.get("heading") or "").strip()
+        ]
+        for heading in available_headings:
+            if heading and heading.lower() in normalized_instruction:
+                explicit_matches.append(heading)
+        if explicit_matches:
+            return explicit_matches
+
+        keyword_map = {
+            "文档说明": ("主题", "场景", "说明", "受众"),
+            "讨论摘要": ("摘要", "总结", "背景", "概述", "说明"),
+            "任务清单": ("任务", "待办", "todo", "负责人", "排期"),
+            "风险与卡点": ("风险", "卡点", "阻塞", "问题"),
+            "下一步建议": ("下一步", "建议", "行动项", "跟进"),
+            "演示重点": ("重点", "亮点", "强调"),
+            "建议补充素材": ("素材", "图片", "图表", "补充素材"),
+        }
+        targeted: list[str] = []
+        for heading in available_headings:
+            keywords = keyword_map.get(heading)
+            if keywords and any(keyword in normalized_instruction for keyword in keywords):
+                targeted.append(heading)
+        return targeted
+
+    def _section_snapshot_map(self, snapshot: list[dict]) -> dict[str, list[str]]:
+        result: dict[str, list[str]] = {}
+        for section in snapshot:
+            if not isinstance(section, dict):
+                continue
+            heading = str(section.get("heading") or "").strip()
+            paragraphs = section.get("paragraphs") if isinstance(section.get("paragraphs"), list) else []
+            cleaned = [str(item).strip() for item in paragraphs if str(item).strip()]
+            result[heading] = cleaned
+        return result
+
+    def _merge_doc_section_snapshots(
+        self,
+        previous_snapshot: list[dict],
+        updated_sections: list[dict],
+    ) -> list[dict[str, list[str]]]:
+        merged: dict[str, list[str]] = {}
+        order: list[str] = []
+
+        for source in (previous_snapshot, updated_sections):
+            for section in source:
+                if not isinstance(section, dict):
+                    continue
+                heading = str(section.get("heading") or "").strip()
+                paragraphs = section.get("paragraphs") if isinstance(section.get("paragraphs"), list) else []
+                cleaned = [str(item).strip() for item in paragraphs if str(item).strip()]
+                if not heading and not cleaned:
+                    continue
+                if heading not in merged:
+                    order.append(heading)
+                merged[heading] = cleaned
+
+        return [{"heading": heading, "paragraphs": merged[heading]} for heading in order if merged.get(heading)]
+
+    def _build_doc_sync_lines(
+        self,
+        mode: str,
+        document_info: dict,
+        *,
+        appended_block_count: int | None = None,
+        changed_headings: list[str] | None = None,
+        folder_scope: str | None = None,
+        folder_url: str | None = None,
+        folder_note: str | None = None,
+    ) -> list[str]:
+        title = str(document_info.get("title") or "collab_doc").strip()
+        url = str(document_info.get("url") or "").strip() or None
+        version = document_info.get("version")
+
+        if mode == "updated":
+            lines = [f"- Updated document: {title}"]
+            if appended_block_count is not None:
+                lines.append(f"- Appended blocks: {appended_block_count}")
+            if changed_headings:
+                lines.append(f"- Updated sections: {', '.join(changed_headings)}")
+            if version is not None:
+                lines.append(f"- Current version: v{version}")
+        elif mode == "noop":
+            lines = [f"- No content changes detected. Keep current document: {title}"]
+            if changed_headings:
+                lines.append(f"- Requested sections are already up to date: {', '.join(changed_headings)}")
+            if version is not None:
+                lines.append(f"- Current version: v{version}")
+        else:
+            lines = [f"- Created document: {title}"]
+            if version is not None:
+                lines.append(f"- Current version: v{version}")
+            if folder_scope == "explicit" and folder_url:
+                lines.append(f"- Output folder: {folder_url}")
+            if folder_note:
+                lines.append(f"- {folder_note}")
+
+        if url:
+            lines.append(f"- Document URL: {url}")
+        return lines
+
+    def _build_document_artifact(
+        self,
+        *,
+        session_id: str,
+        package: dict,
+        sync_lines: list[str],
+        fallback_provider: str,
+    ) -> dict:
+        current_doc = self.session_document_service.get_current_document(session_id) or {}
+        sync_failed = self._is_document_sync_failed(sync_lines)
+        if sync_failed:
+            preview = dict(package)
+            previous_document = self._previous_document_preview(current_doc)
+            sync_preview = self._build_document_sync_preview(
+                {},
+                url=None,
+                sync_lines=sync_lines,
+                forced_mode="sync_failed",
+                error=self._extract_document_sync_error(sync_lines),
+            )
+            if previous_document:
+                sync_preview["previous_document"] = previous_document
+            preview["sync"] = sync_preview
+            return {
+                "artifact_type": "document",
+                "provider": fallback_provider,
+                "status": "sync_failed",
+                "title": str(package.get("title") or "协同文档"),
+                "url": None,
+                "preview": preview,
+                "version": max(int(current_doc.get("version") or 1), 1),
+            }
+
+        url = str(current_doc.get("url") or self._extract_first_url(sync_lines) or "").strip() or None
+        version = max(int(current_doc.get("version") or 1), 1)
+        preview = dict(package)
+        preview["sync"] = self._build_document_sync_preview(current_doc, url=url, sync_lines=sync_lines)
+        return {
+            "artifact_type": "document",
+            "provider": "feishu_doc" if url else fallback_provider,
+            "title": str(current_doc.get("title") or package.get("title") or "协同文档"),
+            "url": url,
+            "preview": preview,
+            "version": version,
+        }
+
+    def _build_document_sync_preview(
+        self,
+        document_info: dict,
+        *,
+        url: str | None,
+        sync_lines: list[str],
+        forced_mode: str | None = None,
+        error: str | None = None,
+    ) -> dict:
+        mode = str(forced_mode or document_info.get("sync_mode") or "").strip()
+        if not mode:
+            if any("Updated document" in line for line in sync_lines):
+                mode = "updated"
+            elif any("No content changes detected" in line for line in sync_lines):
+                mode = "noop"
+            elif any("Created document" in line for line in sync_lines):
+                mode = "created"
+            else:
+                mode = "local_only"
+        preview = {
+            "mode": mode,
+            "document_id": str(document_info.get("document_id") or "").strip() or None,
+            "title": str(document_info.get("title") or "").strip() or None,
+            "url": url,
+            "version": max(int(document_info.get("version") or 1), 1),
+            "updated_at": str(document_info.get("updated_at") or "").strip() or None,
+            "summary": [line.strip() for line in sync_lines if str(line).strip()],
+        }
+        if error:
+            preview["error"] = error
+        return preview
+
+    def _is_document_sync_failed(self, sync_lines: list[str]) -> bool:
+        normalized = "\n".join(str(line or "").lower() for line in sync_lines)
+        failure_markers = (
+            "document sync failed",
+            "sync failed",
+            "failed:",
+            "文档创建失败",
+            "同步失败",
+            "未启用",
+            "disabled",
+            "skipped",
+        )
+        return any(marker in normalized for marker in failure_markers)
+
+    def _extract_document_sync_error(self, sync_lines: list[str]) -> str | None:
+        for line in sync_lines:
+            text = str(line or "").strip().lstrip("-").strip()
+            lowered = text.lower()
+            if any(marker in lowered for marker in ("failed", "失败", "disabled", "skipped", "未启用")):
+                return text
+        return None
+
+    def _previous_document_preview(self, current_doc: dict) -> dict | None:
+        if not isinstance(current_doc, dict) or not current_doc.get("document_id"):
+            return None
+        return {
+            "document_id": str(current_doc.get("document_id") or "").strip() or None,
+            "title": str(current_doc.get("title") or "").strip() or None,
+            "url": str(current_doc.get("url") or "").strip() or None,
+            "version": max(int(current_doc.get("version") or 1), 1),
+            "updated_at": str(current_doc.get("updated_at") or "").strip() or None,
         }
 
     def _sync_package_to_doc(self, package: dict) -> list[str]:
