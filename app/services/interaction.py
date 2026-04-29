@@ -14,6 +14,12 @@ class InteractionService:
     TASK_KEYWORDS = ("待办", "任务清单", "任务列表", "action items", "todo", "to-do")
     RISK_KEYWORDS = ("风险", "阻塞", "卡点", "问题点", "风险项")
     STATUS_KEYWORDS = (
+        "查看任务",
+        "查询任务",
+        "任务列表",
+        "任务清单",
+        "待办列表",
+        "待办清单",
         "谁负责",
         "没负责人",
         "未分配",

@@ -212,6 +212,58 @@ class LLMTaskOperationTests(unittest.TestCase):
         self.assertEqual(plan.primary_intent, "doc")
         self.assertEqual([step.step_type for step in plan.steps], ["sync_doc", "generate_slides"])
 
+    def test_status_query_forces_answer_status_plan(self) -> None:
+        message = type(
+            "FakeMessage",
+            (),
+            {"session_id": "s1", "message_id": "m1", "text": "查看任务列表", "chat_id": "c1", "chat_type": "p2p"},
+        )()
+        with patch.object(
+            self.service,
+            "_prepare_status_execution",
+            return_value={
+                "reply_preview": "【当前协作状态】",
+                "analysis": None,
+                "artifacts": [],
+                "close_title": None,
+            },
+        ) as prepare_status, patch.object(
+            self.service,
+            "_deliver_reply",
+            return_value={
+                "session_id": "s1",
+                "episode_id": None,
+                "mode": "status",
+                "analysis": None,
+                "reply_preview": "【当前协作状态】",
+                "reply_sent": False,
+                "reply_error": None,
+                "artifacts": [],
+            },
+        ):
+            result = self.service._execute_llm_request(
+                message,
+                {
+                    "intent": "tasks",
+                    "reason": "模型误判成整理任务",
+                    "tasks": [],
+                    "plan": {
+                        "steps": [
+                            {
+                                "id": "step_1",
+                                "type": "analyze_discussion",
+                                "title": "整理任务",
+                            }
+                        ]
+                    },
+                },
+                "[workspace]",
+                None,
+            )
+
+        self.assertEqual(result["mode"], "status")
+        prepare_status.assert_called_once()
+
     def test_execute_llm_request_runs_planner_steps_in_order(self) -> None:
         message = type(
             "FakeMessage",

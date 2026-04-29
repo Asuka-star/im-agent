@@ -48,6 +48,14 @@ class FeishuWorkflowService:
     def handle_message(self, message: FeishuMessageContext) -> dict:
         started_at = time.perf_counter()
         active_episode_id: int | None = None
+        if message.chat_type == "group":
+            try:
+                self.memory_service.register_team_group_session(
+                    self._team_id_for_message(message),
+                    message.session_id,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to register group session for team memory: %s", exc)
         if message.chat_type == "group" and not message.is_mentioned:
             active_episode = self.memory_service.ensure_active_episode(message.session_id)
             active_episode_id = active_episode.id
@@ -251,13 +259,10 @@ class FeishuWorkflowService:
     def _handle_mentioned_request(self, message: FeishuMessageContext, *, task_run_id: str | None = None) -> dict:
         active_episode = self.memory_service.get_active_episode(message.session_id)
         active_episode_id = active_episode.id if active_episode else None
-        base_workspace_context = self.memory_service.build_workspace_context(
-            message.session_id,
-            include_pending=True,
-            exclude_message_id=message.message_id,
-            query_text=message.text,
+        base_workspace_context = self._build_workspace_context_for_message(
+            message,
+            active_episode_id=active_episode_id,
             include_semantic_search=False,
-            episode_id=active_episode_id,
         )
         workspace_context = base_workspace_context
         if task_run_id:
@@ -274,13 +279,10 @@ class FeishuWorkflowService:
             try:
                 memory_gate = self.llm_service.should_recall_memories(base_workspace_context, message.text)
                 if bool(memory_gate.get("should_recall")):
-                    workspace_context = self.memory_service.build_workspace_context(
-                        message.session_id,
-                        include_pending=True,
-                        exclude_message_id=message.message_id,
-                        query_text=message.text,
+                    workspace_context = self._build_workspace_context_for_message(
+                        message,
+                        active_episode_id=active_episode_id,
                         include_semantic_search=True,
-                        episode_id=active_episode_id,
                     )
                     if task_run_id:
                         self.task_run_service.update_task_run(task_run_id, stage="semantic_recall")
@@ -327,6 +329,76 @@ class FeishuWorkflowService:
             self.task_run_service.update_task_run(task_run_id, stage="fallback")
         return self._handle_fallback_request(message, active_episode_id, task_run_id=task_run_id)
 
+    def _build_workspace_context_for_message(
+        self,
+        message: FeishuMessageContext,
+        *,
+        active_episode_id: int | None,
+        include_semantic_search: bool,
+    ) -> str:
+        context = self.memory_service.build_workspace_context(
+            message.session_id,
+            include_pending=True,
+            exclude_message_id=message.message_id,
+            query_text=message.text,
+            include_semantic_search=include_semantic_search,
+            episode_id=active_episode_id,
+        )
+        team_context = self._build_team_context_for_message(
+            message,
+            include_semantic_search=include_semantic_search,
+        )
+        return self._join_context_blocks(context, team_context)
+
+    def _build_team_context_for_message(
+        self,
+        message: FeishuMessageContext,
+        *,
+        include_semantic_search: bool = False,
+    ) -> str:
+        if message.chat_type != "p2p":
+            return ""
+        return self.memory_service.build_team_workspace_context(
+            self._team_id_for_message(message),
+            current_session_id=message.session_id,
+            query_text=message.text,
+            include_semantic_search=include_semantic_search,
+        )
+
+    def _team_id_for_message(self, message: FeishuMessageContext) -> str:
+        return self.memory_service.normalize_team_id(getattr(message, "tenant_key", None))
+
+    def _join_context_blocks(self, *blocks: str) -> str:
+        return "\n\n".join(block.strip() for block in blocks if block and block.strip())
+
+    def _context_tasks_for_message(self, message: FeishuMessageContext) -> list:
+        tasks = self.memory_service.get_current_tasks(message.session_id)
+        if tasks or message.chat_type != "p2p":
+            return tasks
+        return self.memory_service.get_team_current_tasks(
+            self._team_id_for_message(message),
+            current_session_id=message.session_id,
+        )
+
+    def _context_payload_for_message(self, message: FeishuMessageContext) -> dict:
+        payload = self.memory_service.load_memory_payload(message.session_id)
+        if payload or message.chat_type != "p2p":
+            return payload
+        return self.memory_service.load_team_memory_payload(
+            self._team_id_for_message(message),
+            current_session_id=message.session_id,
+        )
+
+    def _is_status_query(self, text: str) -> bool:
+        normalized = " ".join((text or "").lower().split())
+        if not normalized:
+            return False
+        if "整理" in normalized or "生成" in normalized or "提取" in normalized:
+            return False
+        status_verbs = ("查看", "查询", "看看", "看下", "现在", "当前", "还有", "哪些", "谁负责", "进展", "状态")
+        task_terms = ("任务", "待办", "todo", "to-do", "负责人", "截止", "列表", "清单")
+        return any(verb in normalized for verb in status_verbs) and any(term in normalized for term in task_terms)
+
     def _execute_llm_request(
         self,
         message: FeishuMessageContext,
@@ -338,6 +410,21 @@ class FeishuWorkflowService:
     ) -> dict:
         intent = str(llm_result.get("intent") or "").strip().lower()
         reason = str(llm_result.get("reason") or "").strip()
+        if self._is_status_query(message.text):
+            intent = "status"
+            llm_result["intent"] = "status"
+            llm_result["status_answer"] = ""
+            llm_result["plan"] = {
+                "goal": "查询当前任务状态",
+                "primary_intent": "status",
+                "steps": [
+                    {
+                        "id": "step_1",
+                        "type": "answer_status",
+                        "title": "回答当前任务状态",
+                    }
+                ],
+            }
         if task_run_id:
             self.task_run_service.update_task_run(
                 task_run_id,
@@ -833,8 +920,8 @@ class FeishuWorkflowService:
     def _prepare_status_execution(self, message: FeishuMessageContext, *, llm_result: dict) -> dict:
         status_answer = str(llm_result.get("status_answer") or "").strip()
         if not status_answer:
-            tasks = self.memory_service.get_current_tasks(message.session_id)
-            payload = self.memory_service.load_memory_payload(message.session_id)
+            tasks = self._context_tasks_for_message(message)
+            payload = self._context_payload_for_message(message)
             status_answer = self._format_status_reply(message.text, tasks, payload)
         return {
             "reply_preview": status_answer,
@@ -1361,8 +1448,8 @@ class FeishuWorkflowService:
             return self._handle_fallback_doc(message, active_episode_id, task_run_id=task_run_id)
 
         if decision.mode == "status":
-            tasks = self.memory_service.get_current_tasks(message.session_id)
-            payload = self.memory_service.load_memory_payload(message.session_id)
+            tasks = self._context_tasks_for_message(message)
+            payload = self._context_payload_for_message(message)
             reply_preview = self._format_status_reply(message.text, tasks, payload)
             return self._deliver_reply(message, "status", reply_preview, analysis=None)
 
@@ -1397,12 +1484,10 @@ class FeishuWorkflowService:
         *,
         task_run_id: str | None = None,
     ) -> dict:
-        workspace_context = self.memory_service.build_workspace_context(
-            message.session_id,
-            include_pending=True,
-            exclude_message_id=message.message_id,
-            query_text=message.text,
-            episode_id=active_episode_id,
+        workspace_context = self._build_workspace_context_for_message(
+            message,
+            active_episode_id=active_episode_id,
+            include_semantic_search=False,
         )
         if not workspace_context.strip():
             reply = "我这边还没有拿到可用的讨论素材。先在群里把目标、分工和结论聊出来，再让我生成汇报大纲会更准确。"
@@ -1441,12 +1526,10 @@ class FeishuWorkflowService:
         *,
         task_run_id: str | None = None,
     ) -> dict:
-        workspace_context = self.memory_service.build_workspace_context(
-            message.session_id,
-            include_pending=True,
-            exclude_message_id=message.message_id,
-            query_text=message.text,
-            episode_id=active_episode_id,
+        workspace_context = self._build_workspace_context_for_message(
+            message,
+            active_episode_id=active_episode_id,
+            include_semantic_search=False,
         )
         package, analysis = self._build_doc_response_package(
             session_id=message.session_id,

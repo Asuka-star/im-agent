@@ -42,7 +42,7 @@ class EventHandlerTests(unittest.TestCase):
 
     def test_mentioning_other_user_does_not_trigger_bot_mode(self) -> None:
         payload = {
-            "header": {"event_type": "im.message.receive_v1", "event_id": "evt-1"},
+            "header": {"event_type": "im.message.receive_v1", "event_id": "evt-1", "tenant_key": "tenant-demo"},
             "event": {
                 "sender": {"sender_id": {"user_id": "speaker-1"}},
                 "message": {
@@ -59,6 +59,7 @@ class EventHandlerTests(unittest.TestCase):
 
         context = self.handler.extract_message_context(self.handler.parse_event(payload))
         assert context is not None
+        self.assertEqual(context.tenant_key, "tenant-demo")
         self.assertFalse(context.is_mentioned)
         self.assertEqual(context.mentioned_user_names, ["张三"])
 

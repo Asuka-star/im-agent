@@ -10,6 +10,7 @@ from app.db.database import SessionLocal
 from app.db.models import Episode, Memory, MemoryChunk, Message, Session, Task, TaskChangeLog, UserAlias
 from app.schemas.analyze import AnalyzeResponse
 from app.schemas.task import TaskItem
+from app.services.app_state import AppStateService
 from app.services.embeddings import EmbeddingService
 
 logger = logging.getLogger(__name__)
@@ -18,8 +19,136 @@ logger = logging.getLogger(__name__)
 class MemoryService:
     """Stores discussion history, active episodes, task snapshots, and memory context."""
 
+    TEAM_GROUP_SESSIONS_KEY_PREFIX = "team_group_sessions"
+
     def __init__(self) -> None:
         self.embedding_service = EmbeddingService()
+        self.app_state = AppStateService()
+
+    def register_team_group_session(self, team_id: str | None, session_id: str) -> None:
+        normalized_team_id = self.normalize_team_id(team_id)
+        normalized_session_id = (session_id or "").strip()
+        if not normalized_session_id:
+            return
+
+        sessions = self.get_team_group_sessions(normalized_team_id)
+        if normalized_session_id not in sessions:
+            sessions.append(normalized_session_id)
+            self.app_state.set_value(
+                self._team_group_sessions_key(normalized_team_id),
+                json.dumps(sessions, ensure_ascii=False),
+            )
+
+    def get_team_group_sessions(self, team_id: str | None) -> list[str]:
+        raw = self.app_state.get_value(self._team_group_sessions_key(self.normalize_team_id(team_id)))
+        if not raw:
+            return []
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return []
+        if not isinstance(parsed, list):
+            return []
+        result: list[str] = []
+        for item in parsed:
+            value = str(item or "").strip()
+            if value and value not in result:
+                result.append(value)
+        return result
+
+    def normalize_team_id(self, team_id: str | None) -> str:
+        return (team_id or "").strip() or "default"
+
+    def build_team_workspace_context(
+        self,
+        team_id: str | None,
+        *,
+        current_session_id: str | None = None,
+        query_text: str | None = None,
+        include_semantic_search: bool = False,
+        max_sessions: int = 6,
+    ) -> str:
+        current = (current_session_id or "").strip()
+        group_sessions = [
+            session_id
+            for session_id in self.get_team_group_sessions(team_id)[-max_sessions:]
+            if session_id and session_id != current
+        ]
+        if not group_sessions:
+            return ""
+
+        sections: list[str] = []
+        for session_id in group_sessions:
+            context = self.build_workspace_context(
+                session_id,
+                include_pending=True,
+                query_text=query_text,
+                include_semantic_search=include_semantic_search,
+            )
+            if context:
+                sections.append(f"[群聊会话: {session_id}]\n{context}")
+
+        if not sections:
+            return ""
+        return "[团队群聊上下文]\n" + "\n\n".join(sections)
+
+    def get_team_current_tasks(
+        self,
+        team_id: str | None,
+        *,
+        current_session_id: str | None = None,
+    ) -> list[Task]:
+        current = (current_session_id or "").strip()
+        group_sessions = [
+            session_id
+            for session_id in self.get_team_group_sessions(team_id)
+            if session_id and session_id != current
+        ]
+        if not group_sessions:
+            return []
+        with SessionLocal() as session:
+            return (
+                session.execute(
+                    select(Task)
+                    .where(Task.session_id.in_(group_sessions))
+                    .order_by(Task.session_id.asc(), Task.id.asc())
+                )
+                .scalars()
+                .all()
+            )
+
+    def load_team_memory_payload(
+        self,
+        team_id: str | None,
+        *,
+        current_session_id: str | None = None,
+    ) -> dict:
+        current = (current_session_id or "").strip()
+        group_sessions = [
+            session_id
+            for session_id in self.get_team_group_sessions(team_id)
+            if session_id and session_id != current
+        ]
+        if not group_sessions:
+            return {}
+        with SessionLocal() as session:
+            memory = (
+                session.execute(
+                    select(Memory)
+                    .where(Memory.session_id.in_(group_sessions), Memory.payload.is_not(None))
+                    .order_by(desc(Memory.id))
+                    .limit(1)
+                )
+                .scalars()
+                .first()
+            )
+        if memory is None or not memory.payload:
+            return {}
+        try:
+            payload = json.loads(memory.payload)
+        except json.JSONDecodeError:
+            return {}
+        return payload if isinstance(payload, dict) else {}
 
     def ensure_session(self, session_id: str) -> None:
         with SessionLocal() as session:
@@ -29,6 +158,9 @@ class MemoryService:
             if existing is None:
                 session.add(Session(session_id=session_id))
                 session.commit()
+
+    def _team_group_sessions_key(self, team_id: str) -> str:
+        return f"{self.TEAM_GROUP_SESSIONS_KEY_PREFIX}:{team_id}"
 
     def clear_session_memory(self, session_id: str, *, keep_aliases: bool = True) -> dict:
         """Clear persisted memory for one discussion session.

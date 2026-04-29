@@ -80,6 +80,7 @@ class FeishuMentionedUser(BaseModel):
 class FeishuMessageContext(BaseModel):
     event_id: str | None = None
     event_type: str | None = None
+    tenant_key: str | None = None
     message_id: str | None = None
     chat_id: str | None = None
     chat_type: str | None = None

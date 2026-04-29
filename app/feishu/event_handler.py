@@ -90,6 +90,11 @@ class FeishuEventHandler:
         return FeishuMessageContext(
             event_id=envelope.header.event_id if envelope.header else None,
             event_type=event_type,
+            tenant_key=(
+                envelope.header.tenant_key
+                if envelope.header and envelope.header.tenant_key
+                else sender.tenant_key
+            ),
             message_id=message.message_id,
             chat_id=message.chat_id,
             chat_type=message.chat_type,
