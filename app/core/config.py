@@ -36,11 +36,27 @@ class Settings(BaseSettings):
     feishu_bitable_notes_field: str = Field(default="备注", alias="FEISHU_BITABLE_NOTES_FIELD")
     feishu_bitable_session_field: str = Field(default="会话ID", alias="FEISHU_BITABLE_SESSION_FIELD")
 
+    speech_to_text_provider: str = Field(default="deepgram", alias="SPEECH_TO_TEXT_PROVIDER")
+
     deepgram_enabled: bool = Field(default=False, alias="DEEPGRAM_ENABLED")
     deepgram_api_key: str = Field(default="", alias="DEEPGRAM_API_KEY")
     deepgram_base_url: str = Field(default="https://api.deepgram.com/v1", alias="DEEPGRAM_BASE_URL")
     deepgram_model: str = Field(default="nova-3", alias="DEEPGRAM_MODEL")
     deepgram_language: str = Field(default="zh-CN", alias="DEEPGRAM_LANGUAGE")
+
+    volcengine_asr_enabled: bool = Field(default=False, alias="VOLCENGINE_ASR_ENABLED")
+    volcengine_asr_api_key: str = Field(default="", alias="VOLCENGINE_ASR_API_KEY")
+    volcengine_asr_app_key: str = Field(default="", alias="VOLCENGINE_ASR_APP_KEY")
+    volcengine_asr_access_key: str = Field(default="", alias="VOLCENGINE_ASR_ACCESS_KEY")
+    volcengine_asr_base_url: str = Field(
+        default="https://openspeech.bytedance.com",
+        alias="VOLCENGINE_ASR_BASE_URL",
+    )
+    volcengine_asr_resource_id: str = Field(
+        default="volc.bigasr.auc_turbo",
+        alias="VOLCENGINE_ASR_RESOURCE_ID",
+    )
+    volcengine_asr_model_name: str = Field(default="bigmodel", alias="VOLCENGINE_ASR_MODEL_NAME")
 
     llm_api_key: str = Field(default="", alias="LLM_API_KEY")
     llm_base_url: str = Field(default="https://openrouter.ai/api/v1", alias="LLM_BASE_URL")

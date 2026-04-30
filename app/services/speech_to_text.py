@@ -1,5 +1,7 @@
+import base64
 import logging
 from typing import Any
+import uuid
 
 import httpx
 
@@ -9,15 +11,33 @@ logger = logging.getLogger(__name__)
 
 
 class SpeechToTextService:
-    """Deepgram wrapper for inbound voice messages."""
+    """Speech-to-text wrapper for inbound voice messages."""
 
     def __init__(self) -> None:
+        self.provider = (settings.speech_to_text_provider or "deepgram").strip().lower()
         self.api_key = settings.deepgram_api_key
         self.base_url = (settings.deepgram_base_url or "").rstrip("/")
         self.model = settings.deepgram_model
         self.language = (settings.deepgram_language or "").strip()
+        self.volcengine_api_key = settings.volcengine_asr_api_key
+        self.volcengine_app_key = settings.volcengine_asr_app_key
+        self.volcengine_access_key = settings.volcengine_asr_access_key
+        self.volcengine_base_url = (settings.volcengine_asr_base_url or "").rstrip("/")
+        self.volcengine_resource_id = settings.volcengine_asr_resource_id
+        self.volcengine_model_name = settings.volcengine_asr_model_name
 
     def is_configured(self) -> bool:
+        if self.provider == "volcengine":
+            return bool(
+                settings.volcengine_asr_enabled
+                and self.volcengine_base_url
+                and self.volcengine_resource_id
+                and (
+                    self.volcengine_api_key
+                    or (self.volcengine_app_key and self.volcengine_access_key)
+                )
+            )
+
         return bool(
             settings.deepgram_enabled
             and self.api_key
@@ -26,14 +46,24 @@ class SpeechToTextService:
         )
 
     def unavailable_notice(self) -> str:
+        if self.provider == "volcengine":
+            if not settings.volcengine_asr_enabled:
+                return "当前没有启用语音识别，请直接发送文本消息。"
+            if not (
+                self.volcengine_api_key
+                or (self.volcengine_app_key and self.volcengine_access_key)
+            ):
+                return "当前语音识别配置不完整，请直接发送文本消息。"
+            return "当前语音识别暂时不可用，请直接发送文本消息。"
+
         if not settings.deepgram_enabled:
-            return "\u5f53\u524d\u6ca1\u6709\u542f\u7528\u8bed\u97f3\u8bc6\u522b\uff0c\u8bf7\u76f4\u63a5\u53d1\u9001\u6587\u672c\u6d88\u606f\u3002"
+            return "当前没有启用语音识别，请直接发送文本消息。"
         if not self.api_key:
-            return "\u5f53\u524d\u8bed\u97f3\u8bc6\u522b\u914d\u7f6e\u4e0d\u5b8c\u6574\uff0c\u8bf7\u76f4\u63a5\u53d1\u9001\u6587\u672c\u6d88\u606f\u3002"
-        return "\u5f53\u524d\u8bed\u97f3\u8bc6\u522b\u6682\u65f6\u4e0d\u53ef\u7528\uff0c\u8bf7\u76f4\u63a5\u53d1\u9001\u6587\u672c\u6d88\u606f\u3002"
+            return "当前语音识别配置不完整，请直接发送文本消息。"
+        return "当前语音识别暂时不可用，请直接发送文本消息。"
 
     def failure_notice(self) -> str:
-        return "\u8fd9\u6761\u8bed\u97f3\u6d88\u606f\u5904\u7406\u5931\u8d25\u4e86\uff0c\u8bf7\u76f4\u63a5\u53d1\u9001\u6587\u672c\u6d88\u606f\u3002"
+        return "这条语音消息处理失败了，请直接发送文本消息。"
 
     def transcribe_bytes(
         self,
@@ -43,6 +73,8 @@ class SpeechToTextService:
     ) -> str:
         if not self.is_configured():
             raise RuntimeError(self.unavailable_notice())
+        if self.provider == "volcengine":
+            return self._transcribe_with_volcengine(content=content)
 
         headers = {
             "Authorization": f"Token {self.api_key}",
@@ -74,6 +106,61 @@ class SpeechToTextService:
             len(text),
         )
         return text
+
+    def _transcribe_with_volcengine(self, *, content: bytes) -> str:
+        headers = {
+            "X-Api-Resource-Id": self.volcengine_resource_id,
+            "X-Api-Request-Id": str(uuid.uuid4()),
+            "X-Api-Sequence": "-1",
+        }
+        if self.volcengine_api_key:
+            headers["X-Api-Key"] = self.volcengine_api_key
+        else:
+            headers["X-Api-App-Key"] = self.volcengine_app_key
+            headers["X-Api-Access-Key"] = self.volcengine_access_key
+
+        body = {
+            "user": {"uid": self.volcengine_api_key or self.volcengine_app_key},
+            "audio": {"data": base64.b64encode(content).decode("ascii")},
+            "request": {"model_name": self.volcengine_model_name},
+        }
+        timeout = httpx.Timeout(120.0, connect=10.0)
+        with httpx.Client(timeout=timeout) as client:
+            response = client.post(
+                f"{self.volcengine_base_url}/api/v3/auc/bigmodel/recognize/flash",
+                headers=headers,
+                json=body,
+            )
+            response.raise_for_status()
+            status_code = response.headers.get("X-Api-Status-Code")
+            if status_code != "20000000":
+                message = response.headers.get("X-Api-Message", "")
+                logid = response.headers.get("X-Tt-Logid", "")
+                raise RuntimeError(
+                    f"Volcengine ASR failed: status={status_code} message={message} logid={logid}"
+                )
+            payload = response.json()
+
+        text = self._extract_volcengine_text(payload)
+        logger.info(
+            "Volcengine transcription succeeded: chars=%s logid=%s",
+            len(text),
+            response.headers.get("X-Tt-Logid", ""),
+        )
+        return text
+
+    def _extract_volcengine_text(self, payload: Any) -> str:
+        if not isinstance(payload, dict):
+            raise RuntimeError("Volcengine response was not a JSON object.")
+
+        result = payload.get("result")
+        if not isinstance(result, dict):
+            raise RuntimeError("Volcengine response did not include result.")
+
+        transcript = str(result.get("text") or "").strip()
+        if not transcript:
+            raise RuntimeError("Volcengine returned empty text.")
+        return transcript
 
     def _extract_text(self, payload: Any) -> str:
         if not isinstance(payload, dict):
