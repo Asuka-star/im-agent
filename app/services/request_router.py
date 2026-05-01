@@ -21,7 +21,7 @@ class RouteDecision:
 class RequestRouter:
     """Routes high-frequency collaboration requests before deep LLM planning."""
 
-    ROUTES = {"status", "summary", "tasks", "risks", "doc", "slides", "help", "unknown"}
+    ROUTES = {"status", "summary", "tasks", "risks", "doc", "slides", "canvas", "help", "unknown"}
 
     HELP_KEYWORDS = ("怎么用", "你能做什么", "能做什么", "help", "帮助", "使用说明")
     DOC_KEYWORDS = (
@@ -51,6 +51,21 @@ class RequestRouter:
         "报告大纲",
         "路演稿",
         "演讲稿",
+    )
+    CANVAS_KEYWORDS = (
+        "canvas",
+        "whiteboard",
+        "board",
+        "flowchart",
+        "diagram",
+        "architecture diagram",
+        "mind map",
+        "白板",
+        "画布",
+        "流程图",
+        "架构图",
+        "思维导图",
+        "画一张图",
     )
     STATUS_KEYWORDS = (
         "进度",
@@ -118,6 +133,16 @@ class RequestRouter:
 
         doc_requested = self._is_doc_request(text, lowered)
         slides_requested = self._is_slides_request(text, lowered)
+        canvas_requested = self._is_canvas_request(text, lowered)
+
+        if canvas_requested:
+            return RouteDecision(
+                route="canvas",
+                source="rule",
+                confidence=0.94,
+                reason="Request asks for a canvas or diagram artifact.",
+                requested_outputs=("canvas",),
+            )
 
         if doc_requested:
             requested_outputs = ("doc", "slides") if slides_requested else ("doc",)
@@ -197,6 +222,9 @@ class RequestRouter:
             return True
         return "汇报材料" in text and "文档" not in text
 
+    def _is_canvas_request(self, text: str, lowered: str) -> bool:
+        return self._contains_any(text, lowered, self.CANVAS_KEYWORDS)
+
     def _is_doc_excluded(self, text: str, lowered: str) -> bool:
         return self._contains_any(
             text,
@@ -258,6 +286,10 @@ class RequestRouter:
             "feishu_doc": "doc",
             "ppt": "slides",
             "presentation": "slides",
+            "whiteboard": "canvas",
+            "board": "canvas",
+            "diagram": "canvas",
+            "flowchart": "canvas",
         }
         return aliases.get(route, route)
 
@@ -273,8 +305,8 @@ class RequestRouter:
         outputs: list[str] = []
         for item in raw_items:
             route = self._normalize_route(item)
-            if route in {"doc", "slides"} and route not in outputs:
+            if route in {"doc", "slides", "canvas"} and route not in outputs:
                 outputs.append(route)
-        if not outputs and fallback_route in {"doc", "slides"}:
+        if not outputs and fallback_route in {"doc", "slides", "canvas"}:
             outputs.append(fallback_route)
         return tuple(outputs)

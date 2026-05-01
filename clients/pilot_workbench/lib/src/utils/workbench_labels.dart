@@ -89,6 +89,8 @@ String localizeIntent(String? intent) {
       return '演示稿';
     case 'doc':
       return '文档';
+    case 'canvas':
+      return 'Canvas';
     case 'help':
       return '帮助说明';
     case 'unknown':
@@ -132,6 +134,8 @@ String localizeStepType(String stepType) {
       return '系统';
     case 'reply':
       return '回复';
+    case 'generate_canvas':
+      return 'Canvas';
     default:
       return _humanizeIdentifier(stepType);
   }
@@ -143,6 +147,8 @@ String localizeArtifactType(String artifactType) {
       return '文档';
     case 'slides_package':
       return '演示稿包';
+    case 'canvas':
+      return 'Canvas';
     case 'note':
       return '备注';
     case 'reply':

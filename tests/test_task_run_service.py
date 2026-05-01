@@ -37,6 +37,17 @@ class _StubSessionDisplayService:
         return None
 
 
+class _StubSessionDocumentService:
+    def __init__(self, documents: list[dict] | None = None, error: Exception | None = None) -> None:
+        self.documents = documents or []
+        self.error = error
+
+    def list_documents(self, session_id: str) -> list[dict]:
+        if self.error is not None:
+            raise self.error
+        return self.documents
+
+
 class TaskRunServiceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
@@ -54,7 +65,8 @@ class TaskRunServiceTests(unittest.TestCase):
 
         self.session_display_service = _StubSessionDisplayService()
         self.service = TaskRunService(
-            session_display_service=self.session_display_service
+            session_display_service=self.session_display_service,
+            session_document_service=_StubSessionDocumentService(),
         )
 
     def tearDown(self) -> None:
@@ -158,6 +170,24 @@ class TaskRunServiceTests(unittest.TestCase):
         self.assertEqual(third_message["task_run"]["session_id"], "oc_demo")
         self.assertEqual(second_message["task_run"]["session_label"], "产品讨论群")
         self.assertEqual(third_message["task_run"]["session_label"], "产品讨论群")
+
+    def test_get_task_run_tolerates_session_document_failure(self) -> None:
+        service = TaskRunService(
+            session_display_service=self.session_display_service,
+            session_document_service=_StubSessionDocumentService(error=RuntimeError("doc history unavailable")),
+        )
+        created = service.create_task_run(
+            session_id="oc_demo",
+            title="创建协作任务",
+            source_type="group",
+        )
+
+        detail = service.get_task_run(created.task_run_id)
+
+        self.assertIsNotNone(detail)
+        assert detail is not None
+        self.assertEqual(detail.task_run_id, created.task_run_id)
+        self.assertEqual(detail.session_documents, [])
 
     def test_list_task_runs_can_filter_by_session_label_query(self) -> None:
         self.service.create_task_run(

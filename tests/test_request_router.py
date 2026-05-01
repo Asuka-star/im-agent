@@ -68,6 +68,20 @@ class RequestRouterTests(unittest.TestCase):
         self.assertIsNotNone(decision)
         self.assertEqual(decision.route, "slides")
 
+    def test_canvas_request_routes_to_canvas(self) -> None:
+        decision = self.router.route_by_rule("draw an architecture diagram on a canvas")
+
+        self.assertIsNotNone(decision)
+        self.assertEqual(decision.route, "canvas")
+        self.assertEqual(decision.requested_outputs, ("canvas",))
+
+    def test_chinese_canvas_request_routes_to_canvas(self) -> None:
+        decision = self.router.route_by_rule("帮我画一张系统架构图")
+
+        self.assertIsNotNone(decision)
+        self.assertEqual(decision.route, "canvas")
+        self.assertEqual(decision.requested_outputs, ("canvas",))
+
     def test_llm_route_result_is_normalized(self) -> None:
         decision = self.router.route_from_llm_result(
             {"route": "document", "confidence": 1.5, "reason": "用户要写成文档"}

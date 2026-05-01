@@ -28,6 +28,7 @@ class WorkbenchController extends ChangeNotifier {
   bool isLoadingList = false;
   bool isLoadingDetail = false;
   bool isSubmittingConfirmation = false;
+  bool isSubmittingDocumentRevision = false;
 
   SocketConnection? _sessionConnection;
   SocketConnection? _taskConnection;
@@ -138,6 +139,38 @@ class WorkbenchController extends ChangeNotifier {
       rethrow;
     } finally {
       isSubmittingConfirmation = false;
+      notifyListeners();
+    }
+  }
+
+  Future<TaskRunDetail> reviseDocument({
+    required String sourceTaskRunId,
+    required String instruction,
+    String? documentId,
+  }) async {
+    isSubmittingDocumentRevision = true;
+    errorMessage = null;
+    notifyListeners();
+
+    try {
+      final detail = await _api.reviseDocument(
+        taskRunId: sourceTaskRunId,
+        instruction: instruction,
+        documentId: documentId,
+      );
+      selectedTaskRun = detail;
+      _mergeSummary(_summaryFromDetail(detail));
+      lastUpdatedAt = DateTime.now();
+      if (_taskRealtimeEnabled) {
+        await _bindTaskSocket(detail.taskRunId);
+      }
+      await refreshTaskRuns(keepSelection: true);
+      return detail;
+    } catch (error) {
+      errorMessage = localizeWorkbenchError(error);
+      rethrow;
+    } finally {
+      isSubmittingDocumentRevision = false;
       notifyListeners();
     }
   }

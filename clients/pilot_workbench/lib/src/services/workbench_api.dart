@@ -68,6 +68,29 @@ class WorkbenchApi {
     _ensureSuccess(response);
   }
 
+  Future<TaskRunDetail> reviseDocument({
+    required String taskRunId,
+    required String instruction,
+    String? documentId,
+    String requestedBy = 'pilot_workbench',
+  }) async {
+    final response = await _client.post(
+      _buildUri('/task-runs/$taskRunId/revise-document'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({
+        'instruction': instruction,
+        'requested_by': requestedBy,
+        'document_id': documentId,
+      }),
+    );
+    _ensureSuccess(response);
+    final decoded = jsonDecode(utf8.decode(response.bodyBytes));
+    if (decoded is! Map<String, dynamic>) {
+      throw const FormatException('文档修订返回的不是有效任务对象。');
+    }
+    return TaskRunDetail.fromJson(decoded);
+  }
+
   Uri _buildUri(String path, {Map<String, String?>? queryParameters}) {
     final baseUri = Uri.parse(_baseUrl);
     final normalizedPath = path.startsWith('/') ? path.substring(1) : path;

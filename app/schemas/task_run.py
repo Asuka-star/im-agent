@@ -30,6 +30,18 @@ class ArtifactRecord(BaseModel):
     updated_at: datetime | None = None
 
 
+class SessionDocumentRecord(BaseModel):
+    session_id: str
+    document_id: str
+    url: str | None = None
+    title: str
+    version: int = 1
+    sync_mode: str
+    task_run_id: str | None = None
+    updated_at: datetime | None = None
+    is_current: bool = False
+
+
 class ConfirmationRequestRecord(BaseModel):
     confirmation_id: str
     prompt: str
@@ -67,6 +79,7 @@ class TaskRunDetail(TaskRunSummary):
     steps: list[TaskRunStepRecord] = Field(default_factory=list)
     artifacts: list[ArtifactRecord] = Field(default_factory=list)
     confirmations: list[ConfirmationRequestRecord] = Field(default_factory=list)
+    session_documents: list[SessionDocumentRecord] = Field(default_factory=list)
 
 
 class ConfirmationAnswerRequest(BaseModel):
@@ -80,3 +93,9 @@ class ConfirmationAnswerResponse(BaseModel):
     confirmation_id: str
     status: str
     answer_value: str
+
+
+class DocumentRevisionRequest(BaseModel):
+    instruction: str = Field(min_length=1, description="Natural-language instruction for revising the current document")
+    requested_by: str = Field(default="pilot_workbench", description="Who requested the document revision")
+    document_id: str | None = Field(default=None, description="Optional explicit target document id within the session")

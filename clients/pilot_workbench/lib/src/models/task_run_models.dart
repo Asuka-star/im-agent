@@ -149,6 +149,44 @@ class ArtifactRecord {
   Map<String, dynamic>? get preview => _decodeJsonMap(previewJson);
 }
 
+class SessionDocumentRecord {
+  SessionDocumentRecord({
+    required this.sessionId,
+    required this.documentId,
+    required this.title,
+    required this.version,
+    required this.syncMode,
+    required this.isCurrent,
+    this.url,
+    this.taskRunId,
+    this.updatedAt,
+  });
+
+  final String sessionId;
+  final String documentId;
+  final String title;
+  final int version;
+  final String syncMode;
+  final bool isCurrent;
+  final String? url;
+  final String? taskRunId;
+  final DateTime? updatedAt;
+
+  factory SessionDocumentRecord.fromJson(Map<String, dynamic> json) {
+    return SessionDocumentRecord(
+      sessionId: json['session_id'] as String? ?? '',
+      documentId: json['document_id'] as String? ?? '',
+      title: json['title'] as String? ?? '',
+      version: json['version'] as int? ?? 1,
+      syncMode: json['sync_mode'] as String? ?? 'created',
+      isCurrent: json['is_current'] as bool? ?? false,
+      url: json['url'] as String?,
+      taskRunId: json['task_run_id'] as String?,
+      updatedAt: _parseDateTime(json['updated_at']),
+    );
+  }
+}
+
 class ConfirmationRequestRecord {
   ConfirmationRequestRecord({
     required this.confirmationId,
@@ -205,6 +243,7 @@ class TaskRunDetail extends TaskRunSummary {
     required this.steps,
     required this.artifacts,
     required this.confirmations,
+    required this.sessionDocuments,
     this.metadataJson,
     super.intent,
     super.sessionLabel,
@@ -221,6 +260,7 @@ class TaskRunDetail extends TaskRunSummary {
   final List<TaskRunStepRecord> steps;
   final List<ArtifactRecord> artifacts;
   final List<ConfirmationRequestRecord> confirmations;
+  final List<SessionDocumentRecord> sessionDocuments;
 
   factory TaskRunDetail.fromJson(Map<String, dynamic> json) {
     return TaskRunDetail(
@@ -245,6 +285,9 @@ class TaskRunDetail extends TaskRunSummary {
       steps: _asList(json['steps']).map(TaskRunStepRecord.fromJson).toList(),
       artifacts: _asList(json['artifacts']).map(ArtifactRecord.fromJson).toList(),
       confirmations: _asList(json['confirmations']).map(ConfirmationRequestRecord.fromJson).toList(),
+      sessionDocuments: _asList(json['session_documents'])
+          .map(SessionDocumentRecord.fromJson)
+          .toList(),
     );
   }
 }

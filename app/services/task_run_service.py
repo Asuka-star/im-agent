@@ -1,4 +1,5 @@
 import json
+import logging
 import uuid
 from datetime import datetime, timezone
 
@@ -10,12 +11,17 @@ from app.schemas.task_run import (
     ArtifactRecord,
     ConfirmationAnswerResponse,
     ConfirmationRequestRecord,
+    SessionDocumentRecord,
     TaskRunDetail,
     TaskRunStepRecord,
     TaskRunSummary,
 )
 from app.services.realtime_hub import realtime_hub
 from app.services.session_display_service import SessionDisplayService
+from app.services.session_document_service import SessionDocumentService
+
+
+logger = logging.getLogger(__name__)
 
 
 class TaskRunService:
@@ -25,8 +31,10 @@ class TaskRunService:
         self,
         *,
         session_display_service: SessionDisplayService | None = None,
+        session_document_service: SessionDocumentService | None = None,
     ) -> None:
         self.session_display_service = session_display_service or SessionDisplayService()
+        self.session_document_service = session_document_service or SessionDocumentService()
 
     def create_task_run(
         self,
@@ -118,6 +126,7 @@ class TaskRunService:
                 steps=[self._step_from_row(item) for item in steps],
                 artifacts=[self._artifact_from_row(item) for item in artifacts],
                 confirmations=[self._confirmation_from_row(item) for item in confirmations],
+                session_documents=self._session_documents_for_session(row.session_id),
             )
 
     def update_task_run(
@@ -405,6 +414,29 @@ class TaskRunService:
             created_at=row.created_at,
             updated_at=row.updated_at,
         )
+
+    def _session_document_from_payload(self, payload: dict) -> SessionDocumentRecord:
+        return SessionDocumentRecord(
+            session_id=str(payload.get("session_id") or ""),
+            document_id=str(payload.get("document_id") or ""),
+            url=str(payload.get("url") or "").strip() or None,
+            title=str(payload.get("title") or ""),
+            version=max(int(payload.get("version") or 1), 1),
+            sync_mode=str(payload.get("sync_mode") or "created"),
+            task_run_id=str(payload.get("task_run_id") or "").strip() or None,
+            updated_at=datetime.fromisoformat(str(payload.get("updated_at")))
+            if str(payload.get("updated_at") or "").strip()
+            else None,
+            is_current=bool(payload.get("is_current")),
+        )
+
+    def _session_documents_for_session(self, session_id: str) -> list[SessionDocumentRecord]:
+        try:
+            payloads = self.session_document_service.list_documents(session_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to load session documents for task run detail: session_id=%s error=%s", session_id, exc)
+            return []
+        return [self._session_document_from_payload(item) for item in payloads]
 
     def _publish_task_run_event(self, task_run_id: str, *, event_type: str) -> None:
         detail = self.get_task_run(task_run_id)

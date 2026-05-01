@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -905,7 +906,7 @@ class _DetailPanel extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  _SummaryCard(detail: detail),
+                  _SummaryCard(controller: controller, detail: detail),
                   const SizedBox(height: 16),
                   _StageTimeline(detail: detail),
                   const SizedBox(height: 16),
@@ -968,13 +969,15 @@ class _DetailPanel extends StatelessWidget {
 }
 
 class _SummaryCard extends StatelessWidget {
-  const _SummaryCard({required this.detail});
+  const _SummaryCard({required this.controller, required this.detail});
 
+  final WorkbenchController controller;
   final TaskRunDetail detail;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final documentArtifact = _latestDocumentArtifact(detail);
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(20),
@@ -1045,6 +1048,15 @@ class _SummaryCard extends StatelessWidget {
             ),
           const SizedBox(height: 14),
           _ActionHintCard(detail: detail),
+          if (documentArtifact != null) ...[
+            const SizedBox(height: 14),
+            _CurrentDocumentCard(
+              controller: controller,
+              sourceTaskRunId: detail.taskRunId,
+              artifact: documentArtifact,
+              sessionDocuments: detail.sessionDocuments,
+            ),
+          ],
           if ((detail.latestReplyPreview ?? '').isNotEmpty) ...[
             const SizedBox(height: 14),
             SelectionArea(
@@ -1066,6 +1078,640 @@ class _SummaryCard extends StatelessWidget {
               ),
             ),
           ],
+        ],
+      ),
+    );
+  }
+}
+
+class _CurrentDocumentCard extends StatelessWidget {
+  const _CurrentDocumentCard({
+    required this.controller,
+    required this.sourceTaskRunId,
+    required this.artifact,
+    required this.sessionDocuments,
+  });
+
+  final WorkbenchController controller;
+  final String sourceTaskRunId;
+  final ArtifactRecord artifact;
+  final List<SessionDocumentRecord> sessionDocuments;
+
+  @override
+  Widget build(BuildContext context) {
+    final selectedDocument = _preferredSessionDocument(sessionDocuments);
+    final preview = artifact.preview;
+    final sync = preview?['sync'] is Map<String, dynamic>
+        ? preview!['sync'] as Map<String, dynamic>
+        : const <String, dynamic>{};
+    final url = _stringValue(selectedDocument?.url ?? sync['url'] ?? artifact.url);
+    final syncTitle = _stringValue(selectedDocument?.title ?? sync['title'] ?? artifact.title);
+    final title = syncTitle.isNotEmpty ? syncTitle : artifact.title;
+    final version = selectedDocument?.version ?? ((sync['version'] is num) ? (sync['version'] as num).toInt() : artifact.version);
+    final mode = _stringValue(selectedDocument?.syncMode ?? sync['mode']);
+    final updatedAt = selectedDocument?.updatedAt ?? DateTime.tryParse(_stringValue(sync['updated_at']));
+    final targetLabel = selectedDocument?.isCurrent == false ? '已选历史文档' : '当前协作文档';
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.12)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.description_rounded, color: Color(0xFF8CCDEB)),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  targetLabel,
+                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+              _Badge(label: 'v$version', color: const Color(0xFF8CCDEB)),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Text(
+            title,
+            style: Theme.of(context).textTheme.bodyLarge?.copyWith(
+              color: Colors.white.withValues(alpha: 0.92),
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              _Badge(
+                label: _localizeDocSyncMode(mode),
+                color: _docSyncModeColor(mode, synced: url.isNotEmpty),
+              ),
+              if (updatedAt != null)
+                _Badge(
+                  label: '更新于 ${_formatDateTime(updatedAt)}',
+                  color: const Color(0xFF73C8A9),
+                ),
+              if (sessionDocuments.length > 1)
+                _Badge(
+                  label: '共 ${sessionDocuments.length} 份文档',
+                  color: const Color(0xFFB89B5E),
+                ),
+            ],
+          ),
+          if (url.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            SelectionArea(
+              child: Text(
+                url,
+                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                  color: const Color(0xFFBFE6F1),
+                  height: 1.45,
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+            _ActionStrip(
+              actions: [
+                _InlineAction(
+                  icon: Icons.copy_rounded,
+                  label: '复制文档链接',
+                  onPressed: () async {
+                    await Clipboard.setData(ClipboardData(text: url));
+                    if (context.mounted) {
+                      ScaffoldMessenger.of(
+                        context,
+                      ).showSnackBar(const SnackBar(content: Text('文档链接已复制')));
+                    }
+                  },
+                ),
+                _InlineAction(
+                  icon: controller.isSubmittingDocumentRevision
+                      ? Icons.hourglass_top_rounded
+                      : Icons.edit_note_rounded,
+                  label: controller.isSubmittingDocumentRevision
+                      ? '修订中...'
+                      : '提交修订',
+                  onPressed: controller.isSubmittingDocumentRevision
+                      ? null
+                      : () => _openRevisionDialog(context, selectedDocument),
+                ),
+              ],
+            ),
+          ] else ...[
+            const SizedBox(height: 12),
+            _ActionStrip(
+              actions: [
+                _InlineAction(
+                  icon: controller.isSubmittingDocumentRevision
+                      ? Icons.hourglass_top_rounded
+                      : Icons.edit_note_rounded,
+                  label: controller.isSubmittingDocumentRevision
+                      ? '修订中...'
+                      : '提交修订',
+                  onPressed: controller.isSubmittingDocumentRevision
+                      ? null
+                      : () => _openRevisionDialog(context, selectedDocument),
+                ),
+              ],
+            ),
+          ],
+          if (sessionDocuments.length > 1) ...[
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    '最近文档',
+                    style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                      color: Colors.white.withValues(alpha: 0.92),
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+                TextButton.icon(
+                  onPressed: () => _openHistoryDialog(context),
+                  icon: const Icon(Icons.timeline_rounded, size: 18),
+                  label: const Text('查看全部'),
+                  style: TextButton.styleFrom(
+                    foregroundColor: const Color(0xFFBFE6F1),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Text(
+              '按更新时间查看当前会话下的文档版本，可以从任意一份继续发起修订。',
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                color: Colors.white.withValues(alpha: 0.62),
+                height: 1.45,
+              ),
+            ),
+            const SizedBox(height: 10),
+            ...sessionDocuments
+                .take(4)
+                .map(
+                  (document) => Padding(
+                    padding: const EdgeInsets.only(bottom: 10),
+                    child: _DocumentHistoryTile(
+                      document: document,
+                      isBusy: controller.isSubmittingDocumentRevision,
+                      onRevise: () => _openRevisionDialog(context, document),
+                    ),
+                  ),
+                ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Future<void> _openHistoryDialog(BuildContext context) async {
+    await showDialog<void>(
+      context: context,
+      builder: (context) {
+        return Dialog(
+          backgroundColor: const Color(0xFF10181D),
+          insetPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 32),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 760, maxHeight: 720),
+            child: Padding(
+              padding: const EdgeInsets.all(20),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          '文档历史时间线',
+                          style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                            color: Colors.white,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                      IconButton(
+                        onPressed: () => Navigator.of(context).pop(),
+                        icon: const Icon(Icons.close_rounded, color: Colors.white70),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    '共 ${sessionDocuments.length} 份文档。这里会保留当前会话里生成过或继续修订过的协作文档，你可以直接从任意版本继续修改。',
+                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                      color: Colors.white.withValues(alpha: 0.68),
+                      height: 1.45,
+                    ),
+                  ),
+                  const SizedBox(height: 18),
+                  Expanded(
+                    child: ListView.separated(
+                      itemCount: sessionDocuments.length,
+                      separatorBuilder: (_, _) => const SizedBox(height: 12),
+                      itemBuilder: (context, index) {
+                        final document = sessionDocuments[index];
+                        return _DocumentTimelineTile(
+                          index: sessionDocuments.length - index,
+                          document: document,
+                          isBusy: controller.isSubmittingDocumentRevision,
+                          onRevise: () {
+                            Navigator.of(context).pop();
+                            _openRevisionDialog(context, document);
+                          },
+                        );
+                      },
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _openRevisionDialog(
+    BuildContext context,
+    SessionDocumentRecord? selectedDocument,
+  ) async {
+    final textController = TextEditingController();
+    var selectedDocumentId =
+        selectedDocument?.documentId ??
+        (sessionDocuments.isNotEmpty ? sessionDocuments.first.documentId : '');
+    final request = await showDialog<_DocumentRevisionRequest>(
+      context: context,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setState) {
+            return AlertDialog(
+              backgroundColor: const Color(0xFFFFFCF6),
+              title: const Text('修订协作文档'),
+              content: SizedBox(
+                width: 440,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '用一句自然语言描述要怎么改。若当前会话里已有多份文档，可以先选定目标文档，再生成新的修订任务。',
+                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                        color: const Color(0xFF72808A),
+                        height: 1.45,
+                      ),
+                    ),
+                    if (sessionDocuments.isNotEmpty) ...[
+                      const SizedBox(height: 14),
+                      DropdownButtonFormField<String>(
+                        initialValue: selectedDocumentId.isNotEmpty ? selectedDocumentId : null,
+                        decoration: const InputDecoration(
+                          labelText: '目标文档',
+                          border: OutlineInputBorder(),
+                        ),
+                        items: sessionDocuments
+                            .map(
+                              (item) => DropdownMenuItem<String>(
+                                value: item.documentId,
+                                child: Text(
+                                  item.isCurrent
+                                      ? '${item.title} · 当前'
+                                      : '${item.title} · v${item.version}',
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                            )
+                            .toList(),
+                        onChanged: (value) {
+                          setState(() {
+                            selectedDocumentId = value ?? '';
+                          });
+                        },
+                      ),
+                    ],
+                    const SizedBox(height: 14),
+                    TextField(
+                      controller: textController,
+                      minLines: 3,
+                      maxLines: 5,
+                      autofocus: true,
+                      decoration: const InputDecoration(
+                        hintText: '例如：补充风险部分，并把表达改得更适合评委阅读',
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(),
+                  child: const Text('取消'),
+                ),
+                FilledButton.icon(
+                  onPressed: () => Navigator.of(context).pop(
+                    _DocumentRevisionRequest(
+                      instruction: textController.text.trim(),
+                      documentId: selectedDocumentId.trim().isEmpty
+                          ? null
+                          : selectedDocumentId.trim(),
+                    ),
+                  ),
+                  icon: const Icon(Icons.send_rounded),
+                  label: const Text('提交修订'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+    textController.dispose();
+    if (request == null || request.instruction.isEmpty || !context.mounted) {
+      return;
+    }
+
+    try {
+      final detail = await controller.reviseDocument(
+        sourceTaskRunId: sourceTaskRunId,
+        instruction: request.instruction,
+        documentId: request.documentId,
+      );
+      if (!context.mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('已创建文档修订任务：${detail.title}')));
+    } catch (_) {
+      if (!context.mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('提交文档修订失败，请稍后重试')));
+    }
+  }
+}
+
+class _DocumentRevisionRequest {
+  const _DocumentRevisionRequest({
+    required this.instruction,
+    required this.documentId,
+  });
+
+  final String instruction;
+  final String? documentId;
+}
+
+class _DocumentHistoryTile extends StatelessWidget {
+  const _DocumentHistoryTile({
+    required this.document,
+    required this.isBusy,
+    required this.onRevise,
+  });
+
+  final SessionDocumentRecord document;
+  final bool isBusy;
+  final VoidCallback onRevise;
+
+  @override
+  Widget build(BuildContext context) {
+    final url = _stringValue(document.url);
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.06),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  document.title.isNotEmpty ? document.title : document.documentId,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+              _Badge(
+                label: document.isCurrent ? '当前' : 'v${document.version}',
+                color: document.isCurrent
+                    ? const Color(0xFF8CCDEB)
+                    : const Color(0xFFB89B5E),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              _Badge(
+                label: _localizeDocSyncMode(document.syncMode),
+                color: _docSyncModeColor(
+                  document.syncMode,
+                  synced: url.isNotEmpty,
+                ),
+              ),
+              if (document.updatedAt != null)
+                _Badge(
+                  label: _formatDateTime(document.updatedAt),
+                  color: const Color(0xFF73C8A9),
+                ),
+            ],
+          ),
+          if (url.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            SelectableText(
+              url,
+              maxLines: 2,
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                color: const Color(0xFFBFE6F1),
+                height: 1.4,
+              ),
+            ),
+          ],
+          const SizedBox(height: 10),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: FilledButton.tonalIcon(
+              onPressed: isBusy ? null : onRevise,
+              icon: Icon(
+                isBusy ? Icons.hourglass_top_rounded : Icons.edit_note_rounded,
+                size: 18,
+              ),
+              label: Text(isBusy ? '修订中...' : '修订这份'),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _DocumentTimelineTile extends StatelessWidget {
+  const _DocumentTimelineTile({
+    required this.index,
+    required this.document,
+    required this.isBusy,
+    required this.onRevise,
+  });
+
+  final int index;
+  final SessionDocumentRecord document;
+  final bool isBusy;
+  final VoidCallback onRevise;
+
+  @override
+  Widget build(BuildContext context) {
+    final url = _stringValue(document.url);
+    final title = document.title.isNotEmpty ? document.title : document.documentId;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.05),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.09)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 36,
+            height: 36,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: document.isCurrent
+                  ? const Color(0xFF8CCDEB).withValues(alpha: 0.18)
+                  : const Color(0xFFB89B5E).withValues(alpha: 0.16),
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Text(
+              '$index',
+              style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                color: Colors.white,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        title,
+                        style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                    _Badge(
+                      label: document.isCurrent ? '当前' : 'v${document.version}',
+                      color: document.isCurrent
+                          ? const Color(0xFF8CCDEB)
+                          : const Color(0xFFB89B5E),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    _Badge(
+                      label: _localizeDocSyncMode(document.syncMode),
+                      color: _docSyncModeColor(document.syncMode, synced: url.isNotEmpty),
+                    ),
+                    if (document.updatedAt != null)
+                      _Badge(
+                        label: _formatDateTime(document.updatedAt),
+                        color: const Color(0xFF73C8A9),
+                      ),
+                    if ((document.taskRunId ?? '').isNotEmpty)
+                      _Badge(
+                        label: 'Task ${document.taskRunId}',
+                        color: const Color(0xFFEF8354),
+                      ),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                SelectableText(
+                  document.documentId,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: Colors.white.withValues(alpha: 0.6),
+                    height: 1.4,
+                  ),
+                ),
+                if (url.isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  SelectableText(
+                    url,
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: const Color(0xFFBFE6F1),
+                      height: 1.4,
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 12),
+                Wrap(
+                  spacing: 10,
+                  runSpacing: 10,
+                  children: [
+                    FilledButton.tonalIcon(
+                      onPressed: isBusy ? null : onRevise,
+                      icon: Icon(
+                        isBusy ? Icons.hourglass_top_rounded : Icons.edit_note_rounded,
+                        size: 18,
+                      ),
+                      label: Text(isBusy ? '修订中...' : '从这份继续修订'),
+                    ),
+                    if (url.isNotEmpty)
+                      OutlinedButton.icon(
+                        onPressed: () async {
+                          await Clipboard.setData(ClipboardData(text: url));
+                          if (context.mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(content: Text('文档链接已复制')),
+                            );
+                          }
+                        },
+                        icon: const Icon(Icons.copy_rounded, size: 18),
+                        label: const Text('复制链接'),
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: const Color(0xFFBFE6F1),
+                          side: BorderSide(color: Colors.white.withValues(alpha: 0.14)),
+                        ),
+                      ),
+                  ],
+                ),
+              ],
+            ),
+          ),
         ],
       ),
     );
@@ -1405,6 +2051,8 @@ class _ArtifactTile extends StatelessWidget {
         return _DocumentPreview(preview: preview, url: artifact.url);
       case 'slides_package':
         return _SlidesPreview(preview: preview);
+      case 'canvas':
+        return _CanvasPreview(preview: preview, url: artifact.url);
       default:
         return _GenericPreview(preview: preview);
     }
@@ -1790,6 +2438,817 @@ class _SlidesPreview extends StatelessWidget {
           ),
         );
       },
+    );
+  }
+}
+
+class _CanvasPreview extends StatelessWidget {
+  const _CanvasPreview({required this.preview, required this.url});
+
+  final Map<String, dynamic> preview;
+  final String? url;
+
+  @override
+  Widget build(BuildContext context) {
+    final title = _stringValue(preview['title']);
+    final schema = _stringValue(preview['schema']);
+    final version = _stringValue(preview['version']);
+    final exports = preview['exports'] is Map<String, dynamic>
+        ? preview['exports'] as Map<String, dynamic>
+        : const <String, dynamic>{};
+    final svgUrl = _stringValue(exports['svg']);
+    final shapes =
+        (preview['shapes'] as List?)
+            ?.whereType<Map<String, dynamic>>()
+            .toList() ??
+        const <Map<String, dynamic>>[];
+    final nodes = shapes
+        .where((shape) => _stringValue(shape['type']) != 'arrow')
+        .toList();
+    final arrows = shapes
+        .where((shape) => _stringValue(shape['type']) == 'arrow')
+        .toList();
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF8FBFC),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: const Color(0xFFD8E2E8)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.account_tree_rounded, color: Color(0xFF116A7B)),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  title.isNotEmpty ? title : 'Canvas',
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+              IconButton(
+                tooltip: 'Open canvas preview',
+                onPressed: () => _openCanvasDialog(
+                  context,
+                  title: title.isNotEmpty ? title : 'Canvas',
+                  shapes: shapes,
+                  svgUrl: svgUrl,
+                ),
+                icon: const Icon(Icons.open_in_full_rounded),
+                color: const Color(0xFF116A7B),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              _CanvasMetric(label: 'Nodes', value: nodes.length.toString()),
+              _CanvasMetric(label: 'Links', value: arrows.length.toString()),
+              if (version.isNotEmpty)
+                _CanvasMetric(label: 'Version', value: version),
+              if (schema.isNotEmpty)
+                _CanvasMetric(label: 'Schema', value: schema),
+              if (svgUrl.isNotEmpty) _CanvasMetric(label: 'Export', value: 'SVG'),
+            ],
+          ),
+          if (nodes.isNotEmpty) ...[
+            const SizedBox(height: 14),
+            _CanvasBoard(shapes: shapes),
+            const SizedBox(height: 12),
+            ...nodes.take(3).map((shape) => _CanvasShapeTile(shape: shape)),
+            if (nodes.length > 3)
+              Text(
+                '+ ${nodes.length - 3} more nodes',
+                style: Theme.of(
+                  context,
+                ).textTheme.bodySmall?.copyWith(color: const Color(0xFF72808A)),
+              ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  void _openCanvasDialog(
+    BuildContext context, {
+    required String title,
+    required List<Map<String, dynamic>> shapes,
+    required String svgUrl,
+  }) {
+    showDialog<void>(
+      context: context,
+      builder: (context) => _CanvasDetailDialog(
+        title: title,
+        preview: preview,
+        shapes: shapes,
+        url: url,
+        svgUrl: svgUrl,
+      ),
+    );
+  }
+}
+
+class _CanvasMetric extends StatelessWidget {
+  const _CanvasMetric({required this.label, required this.value});
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+      decoration: BoxDecoration(
+        color: const Color(0xFFEAF5F6),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Text(
+        '$label: $value',
+        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+          color: const Color(0xFF116A7B),
+          fontWeight: FontWeight.w700,
+        ),
+      ),
+    );
+  }
+}
+
+class _CanvasDetailDialog extends StatelessWidget {
+  const _CanvasDetailDialog({
+    required this.title,
+    required this.preview,
+    required this.shapes,
+    required this.url,
+    required this.svgUrl,
+  });
+
+  final String title;
+  final Map<String, dynamic> preview;
+  final List<Map<String, dynamic>> shapes;
+  final String? url;
+  final String svgUrl;
+
+  @override
+  Widget build(BuildContext context) {
+    final size = MediaQuery.sizeOf(context);
+    final width = math.min(math.max(size.width - 48, 360), 980).toDouble();
+    final height = math.min(math.max(size.height - 80, 460), 760).toDouble();
+    final nodes = shapes
+        .where((shape) => _stringValue(shape['type']) != 'arrow')
+        .toList();
+    final arrows = shapes
+        .where((shape) => _stringValue(shape['type']) == 'arrow')
+        .toList();
+    final jsonText = const JsonEncoder.withIndent('  ').convert(preview);
+
+    return Dialog(
+      backgroundColor: const Color(0xFFFFFCF6),
+      insetPadding: const EdgeInsets.all(24),
+      child: SizedBox(
+        width: width,
+        height: height,
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  const Icon(
+                    Icons.account_tree_rounded,
+                    color: Color(0xFF116A7B),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ),
+                  IconButton(
+                    onPressed: () => Navigator.of(context).pop(),
+                    icon: const Icon(Icons.close_rounded),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  _CanvasMetric(label: 'Nodes', value: nodes.length.toString()),
+                  _CanvasMetric(
+                    label: 'Links',
+                    value: arrows.length.toString(),
+                  ),
+                  if ((url ?? '').isNotEmpty)
+                    _CanvasMetric(label: 'Artifact', value: 'JSON'),
+                  if (svgUrl.isNotEmpty)
+                    _CanvasMetric(label: 'Export', value: 'SVG'),
+                ],
+              ),
+              const SizedBox(height: 16),
+              Expanded(
+                child: LayoutBuilder(
+                  builder: (context, constraints) {
+                    final isNarrow = constraints.maxWidth < 760;
+                    final board = _CanvasBoard(
+                      shapes: shapes,
+                      height: isNarrow
+                          ? math.max(240, constraints.maxHeight * 0.48)
+                          : constraints.maxHeight,
+                    );
+                    final raw = _CanvasRawPanel(
+                      jsonText: jsonText,
+                      url: url,
+                      svgUrl: svgUrl,
+                    );
+                    if (isNarrow) {
+                      return Column(
+                        children: [
+                          board,
+                          const SizedBox(height: 14),
+                          Expanded(child: raw),
+                        ],
+                      );
+                    }
+                    return Row(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        Expanded(flex: 7, child: board),
+                        const SizedBox(width: 16),
+                        Expanded(flex: 4, child: raw),
+                      ],
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _CanvasRawPanel extends StatelessWidget {
+  const _CanvasRawPanel({
+    required this.jsonText,
+    required this.url,
+    required this.svgUrl,
+  });
+
+  final String jsonText;
+  final String? url;
+  final String svgUrl;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: const Color(0xFFE0E5E8)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  'Canvas JSON',
+                  style: Theme.of(
+                    context,
+                  ).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w800),
+                ),
+              ),
+              IconButton(
+                tooltip: 'Copy JSON',
+                onPressed: () async {
+                  await Clipboard.setData(ClipboardData(text: jsonText));
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('Canvas JSON 已复制')),
+                    );
+                  }
+                },
+                icon: const Icon(Icons.copy_rounded),
+              ),
+            ],
+          ),
+          if ((url ?? '').isNotEmpty) ...[
+            const SizedBox(height: 4),
+            SelectableText(
+              url!,
+              maxLines: 2,
+              style: Theme.of(
+                context,
+              ).textTheme.bodySmall?.copyWith(color: const Color(0xFF116A7B)),
+            ),
+          ],
+          if (svgUrl.isNotEmpty) ...[
+            const SizedBox(height: 6),
+            SelectableText(
+              svgUrl,
+              maxLines: 2,
+              style: Theme.of(
+                context,
+              ).textTheme.bodySmall?.copyWith(color: const Color(0xFF7B5A11)),
+            ),
+          ],
+          const SizedBox(height: 10),
+          Expanded(
+            child: SingleChildScrollView(
+              child: SelectableText(
+                jsonText,
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  fontFamily: 'Consolas',
+                  height: 1.45,
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _CanvasBoard extends StatelessWidget {
+  const _CanvasBoard({required this.shapes, this.height = 220});
+
+  final List<Map<String, dynamic>> shapes;
+  final double height;
+
+  @override
+  Widget build(BuildContext context) {
+    final nodes = shapes
+        .where((shape) => _stringValue(shape['type']) != 'arrow')
+        .map(_CanvasNode.fromShape)
+        .where((node) => node.id.isNotEmpty)
+        .toList();
+    final arrows = shapes
+        .where((shape) => _stringValue(shape['type']) == 'arrow')
+        .map(_CanvasArrow.fromShape)
+        .where((arrow) => arrow.from.isNotEmpty && arrow.to.isNotEmpty)
+        .toList();
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final width = constraints.maxWidth.isFinite
+            ? constraints.maxWidth
+            : 520.0;
+        final layout = _CanvasLayout.fit(nodes, arrows, Size(width, height));
+        return Container(
+          width: double.infinity,
+          height: height,
+          decoration: BoxDecoration(
+            color: const Color(0xFFEFF7F7),
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: const Color(0xFFD2E0E5)),
+          ),
+          clipBehavior: Clip.antiAlias,
+          child: Stack(
+            children: [
+              Positioned.fill(
+                child: CustomPaint(painter: _CanvasArrowPainter(layout)),
+              ),
+              for (final node in layout.nodes)
+                Positioned.fromRect(
+                  rect: node.rect,
+                  child: _CanvasBoardNode(node: node),
+                ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _CanvasBoardNode extends StatelessWidget {
+  const _CanvasBoardNode({required this.node});
+
+  final _CanvasPlacedNode node;
+
+  @override
+  Widget build(BuildContext context) {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: node.fill,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: node.stroke),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.08),
+            blurRadius: 12,
+            offset: const Offset(0, 6),
+          ),
+        ],
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        child: Center(
+          child: Text(
+            node.text.isNotEmpty ? node.text : node.id,
+            maxLines: 3,
+            overflow: TextOverflow.ellipsis,
+            textAlign: TextAlign.center,
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+              color: const Color(0xFF163B44),
+              fontWeight: FontWeight.w700,
+              height: 1.2,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _CanvasArrowPainter extends CustomPainter {
+  const _CanvasArrowPainter(this.layout);
+
+  final _CanvasLayout layout;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final gridPaint = Paint()
+      ..color = const Color(0xFFDDEBED)
+      ..strokeWidth = 1;
+    for (var x = 24.0; x < size.width; x += 32) {
+      canvas.drawLine(Offset(x, 0), Offset(x, size.height), gridPaint);
+    }
+    for (var y = 24.0; y < size.height; y += 32) {
+      canvas.drawLine(Offset(0, y), Offset(size.width, y), gridPaint);
+    }
+
+    for (final group in layout.groups) {
+      final fill = Paint()
+        ..color = group.color.withValues(alpha: 0.12)
+        ..style = PaintingStyle.fill;
+      final border = Paint()
+        ..color = group.color.withValues(alpha: 0.34)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.2;
+      final rect = RRect.fromRectAndRadius(
+        group.rect,
+        const Radius.circular(16),
+      );
+      canvas.drawRRect(rect, fill);
+      canvas.drawRRect(rect, border);
+      final labelPainter = TextPainter(
+        text: TextSpan(
+          text: group.label,
+          style: TextStyle(
+            color: group.color,
+            fontSize: 11,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+        textDirection: TextDirection.ltr,
+      )..layout(maxWidth: group.rect.width - 16);
+      labelPainter.paint(canvas, group.rect.topLeft + const Offset(10, 6));
+    }
+
+    for (final arrow in layout.arrows) {
+      final from = layout.nodeById[arrow.from]?.rect;
+      final to = layout.nodeById[arrow.to]?.rect;
+      if (from == null || to == null) {
+        continue;
+      }
+      final arrowPaint = Paint()
+        ..color = arrow.color
+        ..strokeWidth = 2.2
+        ..strokeCap = StrokeCap.round;
+      final start = Offset(from.right, from.center.dy);
+      final end = Offset(to.left, to.center.dy);
+      final controlGap = math.max(28.0, (end.dx - start.dx).abs() / 2);
+      final path = Path()
+        ..moveTo(start.dx, start.dy)
+        ..cubicTo(
+          start.dx + controlGap,
+          start.dy,
+          end.dx - controlGap,
+          end.dy,
+          end.dx,
+          end.dy,
+        );
+      canvas.drawPath(path, arrowPaint);
+      _drawArrowHead(canvas, arrowPaint, start, end);
+      if (arrow.label.isNotEmpty) {
+        final labelPainter = TextPainter(
+          text: TextSpan(
+            text: arrow.label,
+            style: TextStyle(
+              color: arrow.color,
+              fontSize: 10,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          textDirection: TextDirection.ltr,
+        )..layout(maxWidth: math.max(48, (end.dx - start.dx).abs()));
+        labelPainter.paint(
+          canvas,
+          Offset(
+            (start.dx + end.dx - labelPainter.width) / 2,
+            (start.dy + end.dy) / 2 - 18,
+          ),
+        );
+      }
+    }
+  }
+
+  void _drawArrowHead(Canvas canvas, Paint paint, Offset start, Offset end) {
+    final angle = math.atan2(end.dy - start.dy, end.dx - start.dx);
+    const size = 8.0;
+    final left = Offset(
+      end.dx - size * math.cos(angle - math.pi / 6),
+      end.dy - size * math.sin(angle - math.pi / 6),
+    );
+    final right = Offset(
+      end.dx - size * math.cos(angle + math.pi / 6),
+      end.dy - size * math.sin(angle + math.pi / 6),
+    );
+    canvas.drawLine(end, left, paint);
+    canvas.drawLine(end, right, paint);
+  }
+
+  @override
+  bool shouldRepaint(covariant _CanvasArrowPainter oldDelegate) {
+    return oldDelegate.layout != layout;
+  }
+}
+
+class _CanvasLayout {
+  const _CanvasLayout({
+    required this.nodes,
+    required this.arrows,
+    required this.groups,
+  });
+
+  final List<_CanvasPlacedNode> nodes;
+  final List<_CanvasArrow> arrows;
+  final List<_CanvasPlacedGroup> groups;
+
+  Map<String, _CanvasPlacedNode> get nodeById => {
+    for (final node in nodes) node.id: node,
+  };
+
+  static _CanvasLayout fit(
+    List<_CanvasNode> sourceNodes,
+    List<_CanvasArrow> arrows,
+    Size boardSize,
+  ) {
+    if (sourceNodes.isEmpty) {
+      return _CanvasLayout(nodes: const [], arrows: arrows, groups: const []);
+    }
+    final minX = sourceNodes.map((node) => node.x).reduce(math.min);
+    final minY = sourceNodes.map((node) => node.y).reduce(math.min);
+    final maxX = sourceNodes
+        .map((node) => node.x + node.width)
+        .reduce(math.max);
+    final maxY = sourceNodes
+        .map((node) => node.y + node.height)
+        .reduce(math.max);
+    final sourceWidth = math.max(maxX - minX, 1);
+    final sourceHeight = math.max(maxY - minY, 1);
+    final scale = math
+        .min(
+          (boardSize.width - 32) / sourceWidth,
+          (boardSize.height - 32) / sourceHeight,
+        )
+        .clamp(0.45, 1.2);
+    final contentWidth = sourceWidth * scale;
+    final contentHeight = sourceHeight * scale;
+    final offset = Offset(
+      (boardSize.width - contentWidth) / 2 - minX * scale,
+      (boardSize.height - contentHeight) / 2 - minY * scale,
+    );
+    final placedNodes = [
+      for (final node in sourceNodes)
+        _CanvasPlacedNode(
+          id: node.id,
+          text: node.text,
+          group: node.group,
+          fill: node.fill,
+          stroke: node.stroke,
+          rect: Rect.fromLTWH(
+            offset.dx + node.x * scale,
+            offset.dy + node.y * scale,
+            node.width * scale,
+            node.height * scale,
+          ),
+        ),
+    ];
+    return _CanvasLayout(
+      nodes: placedNodes,
+      arrows: arrows,
+      groups: _CanvasPlacedGroup.fromNodes(placedNodes),
+    );
+  }
+}
+
+class _CanvasNode {
+  const _CanvasNode({
+    required this.id,
+    required this.text,
+    required this.x,
+    required this.y,
+    required this.width,
+    required this.height,
+    required this.fill,
+    required this.stroke,
+    required this.group,
+  });
+
+  final String id;
+  final String text;
+  final double x;
+  final double y;
+  final double width;
+  final double height;
+  final Color fill;
+  final Color stroke;
+  final String group;
+
+  factory _CanvasNode.fromShape(Map<String, dynamic> shape) {
+    return _CanvasNode(
+      id: _stringValue(shape['id']),
+      text: _stringValue(shape['text']),
+      x: _doubleValue(shape['x'], 80),
+      y: _doubleValue(shape['y'], 120),
+      width: _doubleValue(shape['w'] ?? shape['width'], 168),
+      height: _doubleValue(shape['h'] ?? shape['height'], 72),
+      fill: _colorValue(
+        shape['color'] ?? shape['fill'],
+        const Color(0xFFEAF5FF),
+      ),
+      stroke: _colorValue(
+        shape['stroke'] ?? shape['border'],
+        const Color(0xFF5A9FD6),
+      ),
+      group: _stringValue(shape['group']),
+    );
+  }
+}
+
+class _CanvasPlacedNode {
+  const _CanvasPlacedNode({
+    required this.id,
+    required this.text,
+    required this.group,
+    required this.fill,
+    required this.stroke,
+    required this.rect,
+  });
+
+  final String id;
+  final String text;
+  final String group;
+  final Color fill;
+  final Color stroke;
+  final Rect rect;
+}
+
+class _CanvasPlacedGroup {
+  const _CanvasPlacedGroup({
+    required this.label,
+    required this.color,
+    required this.rect,
+  });
+
+  final String label;
+  final Color color;
+  final Rect rect;
+
+  static List<_CanvasPlacedGroup> fromNodes(List<_CanvasPlacedNode> nodes) {
+    final grouped = <String, List<_CanvasPlacedNode>>{};
+    for (final node in nodes) {
+      if (node.group.isEmpty) {
+        continue;
+      }
+      grouped.putIfAbsent(node.group, () => []).add(node);
+    }
+    return [
+      for (final entry in grouped.entries)
+        if (entry.value.length > 1)
+          _CanvasPlacedGroup(
+            label: entry.key,
+            color: entry.value.first.stroke,
+            rect: _boundsFor(entry.value).inflate(14),
+          ),
+    ];
+  }
+
+  static Rect _boundsFor(List<_CanvasPlacedNode> nodes) {
+    var rect = nodes.first.rect;
+    for (final node in nodes.skip(1)) {
+      rect = rect.expandToInclude(node.rect);
+    }
+    return rect;
+  }
+}
+
+class _CanvasArrow {
+  const _CanvasArrow({
+    required this.from,
+    required this.to,
+    required this.color,
+    required this.label,
+  });
+
+  final String from;
+  final String to;
+  final Color color;
+  final String label;
+
+  factory _CanvasArrow.fromShape(Map<String, dynamic> shape) {
+    return _CanvasArrow(
+      from: _stringValue(shape['from']),
+      to: _stringValue(shape['to']),
+      color: _colorValue(
+        shape['color'] ?? shape['stroke'],
+        const Color(0xFF2F7F8A),
+      ),
+      label: _stringValue(shape['label'] ?? shape['text']),
+    );
+  }
+}
+
+class _CanvasShapeTile extends StatelessWidget {
+  const _CanvasShapeTile({required this.shape});
+
+  final Map<String, dynamic> shape;
+
+  @override
+  Widget build(BuildContext context) {
+    final text = _stringValue(shape['text']);
+    final type = _stringValue(shape['type']);
+    final id = _stringValue(shape['id']);
+    final group = _stringValue(shape['group']);
+    final stroke = _colorValue(shape['stroke'], const Color(0xFF72808A));
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: stroke.withValues(alpha: 0.42)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.crop_square_rounded, size: 18, color: stroke),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  text.isNotEmpty ? text : (id.isNotEmpty ? id : 'Node'),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(
+                    context,
+                  ).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w700),
+                ),
+                if (type.isNotEmpty || id.isNotEmpty || group.isNotEmpty)
+                  Text(
+                    [
+                      type,
+                      id,
+                      if (group.isNotEmpty) group,
+                    ].where((item) => item.isNotEmpty).join(' / '),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: const Color(0xFF72808A),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -2375,7 +3834,7 @@ class _InlineAction {
 
   final IconData icon;
   final String label;
-  final VoidCallback onPressed;
+  final VoidCallback? onPressed;
 }
 
 class _ConfirmationTile extends StatelessWidget {
@@ -2865,6 +4324,78 @@ String _formatDateTime(DateTime? value) {
   final hour = local.hour.toString().padLeft(2, '0');
   final minute = local.minute.toString().padLeft(2, '0');
   return '$month-$day $hour:$minute';
+}
+
+ArtifactRecord? _latestDocumentArtifact(TaskRunDetail detail) {
+  for (final artifact in detail.artifacts.reversed) {
+    if (artifact.artifactType == 'document') {
+      return artifact;
+    }
+  }
+  return null;
+}
+
+SessionDocumentRecord? _preferredSessionDocument(
+  List<SessionDocumentRecord> documents,
+) {
+  for (final document in documents) {
+    if (document.isCurrent) {
+      return document;
+    }
+  }
+  return documents.isNotEmpty ? documents.first : null;
+}
+
+String _localizeDocSyncMode(String mode) {
+  switch (mode) {
+    case 'created':
+      return '已创建主文档';
+    case 'updated':
+      return '已更新主文档';
+    case 'noop':
+      return '文档已是最新';
+    case 'local_only':
+      return '仅本地生成';
+    default:
+      return '文档状态未知';
+  }
+}
+
+String _stringValue(Object? value) {
+  final text = value?.toString().trim() ?? '';
+  return text == 'null' ? '' : text;
+}
+
+double _doubleValue(Object? value, double fallback) {
+  if (value is num) {
+    return value.toDouble();
+  }
+  final parsed = double.tryParse(_stringValue(value));
+  return parsed ?? fallback;
+}
+
+Color _colorValue(Object? value, Color fallback) {
+  final text = _stringValue(value);
+  final match = RegExp(r'^#?([0-9a-fA-F]{6})$').firstMatch(text);
+  if (match == null) {
+    return fallback;
+  }
+  return Color(int.parse('FF${match.group(1)}', radix: 16));
+}
+
+Color _docSyncModeColor(String mode, {required bool synced}) {
+  switch (mode) {
+    case 'updated':
+      return const Color(0xFF73C8A9);
+    case 'noop':
+      return const Color(0xFFF6B26B);
+    case 'created':
+      return const Color(0xFF8CCDEB);
+    case 'local_only':
+      return const Color(0xFFC85D3A);
+    default:
+      return synced ? const Color(0xFF8CCDEB) : const Color(0xFFC85D3A);
+  }
 }
 
 String _stringifyPreviewValue(Object? value) {

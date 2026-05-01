@@ -281,6 +281,179 @@ class LLMTaskOperationTests(unittest.TestCase):
             },
         )
 
+    def test_doc_revision_with_multiple_session_documents_pauses_for_target_selection(self) -> None:
+        message = type(
+            "FakeMessage",
+            (),
+            {
+                "session_id": "s1",
+                "message_id": "m1",
+                "text": "帮我更新一下这份文档的风险部分",
+                "chat_id": "c1",
+                "chat_type": "group",
+            },
+        )()
+        confirmation = SimpleNamespace(confirmation_id="confirm_doc_choice")
+        with patch.object(
+            self.service.memory_service,
+            "get_active_episode",
+            return_value=None,
+        ), patch.object(
+            self.service,
+            "_build_workspace_context_for_message",
+            return_value="[workspace]",
+        ), patch.object(
+            self.service,
+            "_route_request",
+            return_value=RouteDecision(route="doc", source="rule", confidence=0.98),
+        ), patch.object(
+            self.service.session_document_service,
+            "list_documents",
+            return_value=[
+                {"document_id": "doc_1", "title": "项目周报", "version": 3, "is_current": True},
+                {"document_id": "doc_2", "title": "发布复盘", "version": 1, "is_current": False},
+            ],
+        ), patch.object(
+            self.service.task_run_service,
+            "upsert_step",
+        ), patch.object(
+            self.service.task_run_service,
+            "update_task_run",
+        ) as update_task_run, patch.object(
+            self.service.task_run_service,
+            "create_confirmation",
+            return_value=confirmation,
+        ) as create_confirmation, patch.object(
+            self.service.task_run_service,
+            "merge_task_run_metadata",
+        ), patch.object(
+            self.service.llm_service,
+            "is_configured",
+            return_value=True,
+        ), patch.object(
+            self.service.llm_service,
+            "resolve_workspace_request",
+        ) as resolve_workspace_request, patch.object(
+            self.service.llm_service,
+            "resolve_doc_request",
+        ) as resolve_doc_request, patch.object(
+            self.service,
+            "_deliver_reply",
+            return_value={
+                "session_id": "s1",
+                "episode_id": None,
+                "mode": "doc",
+                "analysis": None,
+                "reply_preview": "需要确认目标文档",
+                "reply_sent": False,
+                "reply_error": None,
+                "artifacts": [],
+            },
+        ):
+            result = self.service._handle_mentioned_request(message, task_run_id="run_doc_choice")
+
+        self.assertTrue(result["pending_confirmation"])
+        self.assertEqual(result["confirmation_id"], "confirm_doc_choice")
+        create_confirmation.assert_called_once()
+        self.assertIn("项目周报", create_confirmation.call_args.kwargs["options"][0])
+        resolve_workspace_request.assert_not_called()
+        resolve_doc_request.assert_not_called()
+        update_task_run.assert_any_call(
+            "run_doc_choice",
+            stage="awaiting_user_confirmation",
+            status="waiting_confirmation",
+        )
+
+    def test_doc_revision_with_explicit_document_title_uses_matched_target_document(self) -> None:
+        message = type(
+            "FakeMessage",
+            (),
+            {
+                "session_id": "s1",
+                "message_id": "m1",
+                "text": "please update the Release Review risk section",
+                "chat_id": "c1",
+                "chat_type": "group",
+            },
+        )()
+        matched_document = {"document_id": "doc_2", "title": "Release Review", "version": 1}
+        with patch.object(
+            self.service.memory_service,
+            "get_active_episode",
+            return_value=None,
+        ), patch.object(
+            self.service,
+            "_build_workspace_context_for_message",
+            return_value="[workspace]",
+        ), patch.object(
+            self.service,
+            "_resolve_target_document_for_instruction",
+            return_value=matched_document,
+        ), patch.object(
+            self.service,
+            "_route_request",
+            return_value=RouteDecision(route="doc", source="rule", confidence=0.98),
+        ), patch.object(
+            self.service.session_document_service,
+            "list_documents",
+            return_value=[
+                {"document_id": "doc_1", "title": "Project Weekly", "version": 3, "is_current": True},
+                matched_document,
+            ],
+        ), patch.object(
+            self.service.llm_service,
+            "is_configured",
+            return_value=True,
+        ), patch.object(
+            self.service,
+            "_resolve_llm_result_for_route",
+            return_value={"intent": "doc", "reason": "doc route", "doc": {"title": "Release Review", "sections": []}},
+        ), patch.object(
+            self.service,
+            "_execute_llm_request",
+            return_value={
+                "session_id": "s1",
+                "episode_id": None,
+                "mode": "doc",
+                "analysis": None,
+                "reply_preview": "ok",
+                "reply_sent": False,
+                "reply_error": None,
+                "artifacts": [],
+            },
+        ) as execute_llm_request, patch.object(
+            self.service.task_run_service,
+            "upsert_step",
+        ), patch.object(
+            self.service.task_run_service,
+            "update_task_run",
+        ):
+            result = self.service._handle_mentioned_request(message, task_run_id="run_doc_target")
+
+        self.assertEqual(result["mode"], "doc")
+        self.assertIs(execute_llm_request.call_args.kwargs["target_document"], matched_document)
+
+    def test_resolve_target_document_supports_relative_references(self) -> None:
+        documents = [
+            {"document_id": "doc_1", "title": "Project Weekly", "version": 3, "is_current": True},
+            {"document_id": "doc_2", "title": "Release Review", "version": 2, "is_current": False},
+            {"document_id": "doc_3", "title": "Risk Memo", "version": 1, "is_current": False},
+        ]
+        with patch.object(
+            self.service.session_document_service,
+            "list_documents",
+            return_value=documents,
+        ):
+            current_doc = self.service._resolve_target_document_for_instruction("s1", "请继续修改当前这份文档")
+            previous_doc = self.service._resolve_target_document_for_instruction("s1", "请把上一份也更新一下")
+            ordinal_doc = self.service._resolve_target_document_for_instruction("s1", "请修一下第3份文档")
+            version_doc = self.service._resolve_target_document_for_instruction("s1", "请更新 v2 那份")
+
+        self.assertIs(current_doc, documents[0])
+        self.assertIs(previous_doc, documents[1])
+        self.assertIs(ordinal_doc, documents[2])
+        self.assertIs(version_doc, documents[1])
+
     def test_fallback_plan_for_doc_can_chain_slides(self) -> None:
         plan = self.service._resolve_execution_plan(
             intent="doc",
@@ -866,10 +1039,10 @@ class LLMTaskOperationTests(unittest.TestCase):
             "is_configured",
             return_value=True,
         ), patch.object(
-            self.service.llm_service,
-            "resolve_workspace_request",
-            return_value={"intent": "doc", "reason": "已拿到补充确认"},
-        ) as resolve_workspace_request, patch.object(
+            self.service,
+            "_resolve_llm_result_for_route",
+            return_value={"intent": "doc", "reason": "???????"},
+        ) as resolve_llm_result_for_route, patch.object(
             self.service,
             "_execute_llm_request",
             return_value={
@@ -891,8 +1064,8 @@ class LLMTaskOperationTests(unittest.TestCase):
             )
 
         self.assertIsNotNone(result)
-        resolve_workspace_request.assert_called_once()
-        resumed_instruction = resolve_workspace_request.call_args.args[1]
+        resolve_llm_result_for_route.assert_called_once()
+        resumed_instruction = resolve_llm_result_for_route.call_args.args[2]
         self.assertIn("报名材料版", resumed_instruction)
         self.assertIn("用户刚刚确认", resumed_instruction)
         execute_llm_request.assert_called_once()
@@ -913,6 +1086,82 @@ class LLMTaskOperationTests(unittest.TestCase):
                 "answered_by": "tester",
             },
         )
+
+    def test_resume_after_confirmation_for_doc_selection_uses_target_document(self) -> None:
+        selected_doc = {"document_id": "doc_2", "title": "发布复盘", "version": 2}
+        with patch.object(
+            self.service.task_run_service,
+            "get_task_run",
+            return_value=SimpleNamespace(
+                session_id="s1",
+                trigger_message_id="m1",
+                metadata_json="{}",
+            ),
+        ), patch.object(
+            self.service.task_run_service,
+            "get_task_run_metadata",
+            return_value={
+                "resume_after_confirmation": {
+                    "intent": "doc",
+                    "instruction": "请继续修文档",
+                    "workspace_context": "[workspace]",
+                    "active_episode_id": 7,
+                    "question": "你要更新哪一份文档？",
+                    "reason": "当前会话里有多份协作文档",
+                    "options": ["项目周报 (v3, 当前)", "发布复盘 (v2)"],
+                    "confirmation_id": "confirm_doc_1",
+                }
+            },
+        ), patch.object(
+            self.service.session_document_service,
+            "list_documents",
+            return_value=[
+                {"document_id": "doc_1", "title": "项目周报", "version": 3, "is_current": True},
+                selected_doc,
+            ],
+        ), patch.object(
+            self.service.task_run_service,
+            "upsert_step",
+        ), patch.object(
+            self.service.task_run_service,
+            "update_task_run",
+        ), patch.object(
+            self.service.memory_service,
+            "save_assistant_message",
+        ), patch.object(
+            self.service.task_run_service,
+            "create_artifact",
+        ), patch.object(
+            self.service.llm_service,
+            "is_configured",
+            return_value=True,
+        ), patch.object(
+            self.service,
+            "_resolve_llm_result_for_route",
+            return_value={"intent": "doc", "reason": "doc schema", "doc": {"title": "发布复盘", "sections": []}},
+        ), patch.object(
+            self.service,
+            "_execute_llm_request",
+            return_value={
+                "session_id": "s1",
+                "episode_id": 7,
+                "mode": "doc",
+                "analysis": None,
+                "reply_preview": "继续处理",
+                "reply_sent": False,
+                "reply_error": None,
+                "artifacts": [],
+            },
+        ) as execute_llm_request:
+            result = self.service.resume_task_run_after_confirmation(
+                "run_123",
+                confirmation_id="confirm_doc_1",
+                answer_value="发布复盘 (v2)",
+                answered_by="tester",
+            )
+
+        self.assertIsNotNone(result)
+        self.assertIs(execute_llm_request.call_args.kwargs["target_document"], selected_doc)
 
     def test_revise_document_from_task_run_creates_workbench_run(self) -> None:
         source_detail = SimpleNamespace(session_id="s1", task_run_id="run_source")
@@ -981,8 +1230,138 @@ class LLMTaskOperationTests(unittest.TestCase):
                 "source_task_run_id": "run_source",
                 "instruction": "补充风险部分",
                 "requested_by": "tester",
+                "document_id": None,
             },
         )
+
+    def test_revise_document_from_task_run_uses_doc_resolver(self) -> None:
+        source_detail = SimpleNamespace(session_id="s1", task_run_id="run_source")
+        revision_detail = SimpleNamespace(task_run_id="run_revision")
+        final_detail = SimpleNamespace(task_run_id="run_revision", session_id="s1")
+        with patch.object(
+            self.service.task_run_service,
+            "get_task_run",
+            side_effect=[source_detail, final_detail],
+        ), patch.object(
+            self.service.task_run_service,
+            "create_task_run",
+            return_value=revision_detail,
+        ), patch.object(
+            self.service.task_run_service,
+            "upsert_step",
+        ), patch.object(
+            self.service.task_run_service,
+            "update_task_run",
+        ), patch.object(
+            self.service.memory_service,
+            "save_user_message",
+        ), patch.object(
+            self.service.memory_service,
+            "build_workspace_context",
+            return_value="[workspace]",
+        ), patch.object(
+            self.service.session_document_service,
+            "get_current_document",
+            return_value={"title": "Current Doc", "version": 2},
+        ), patch.object(
+            self.service.llm_service,
+            "is_configured",
+            return_value=True,
+        ), patch.object(
+            self.service.llm_service,
+            "resolve_doc_request",
+            return_value={"doc": {"title": "Current Doc", "sections": []}, "reason": "doc schema"},
+        ) as resolve_doc_request, patch.object(
+            self.service.llm_service,
+            "resolve_workspace_request",
+        ) as resolve_workspace_request, patch.object(
+            self.service,
+            "_prepare_doc_execution",
+            return_value={
+                "reply_preview": "updated",
+                "analysis": None,
+                "artifacts": [],
+            },
+        ) as prepare_doc, patch.object(
+            self.service,
+            "_persist_task_run_result",
+        ):
+            result = self.service.revise_document_from_task_run(
+                "run_source",
+                instruction="add risk section",
+                requested_by="tester",
+            )
+
+        self.assertIs(result, final_detail)
+        resolve_doc_request.assert_called_once()
+        self.assertEqual(resolve_doc_request.call_args.args[0], "[workspace]")
+        self.assertIn("add risk section", resolve_doc_request.call_args.args[1])
+        resolve_workspace_request.assert_not_called()
+        llm_result = prepare_doc.call_args.kwargs["llm_result"]
+        self.assertEqual(llm_result["operation"], "update")
+        self.assertEqual(llm_result["object"], "doc")
+        self.assertEqual(llm_result["route"], "doc")
+
+    def test_revise_document_from_task_run_can_target_specific_document_id(self) -> None:
+        source_detail = SimpleNamespace(session_id="s1", task_run_id="run_source")
+        revision_detail = SimpleNamespace(task_run_id="run_revision")
+        final_detail = SimpleNamespace(task_run_id="run_revision", session_id="s1")
+        selected_doc = {"document_id": "doc_target", "title": "Target Doc", "version": 3}
+        with patch.object(
+            self.service.task_run_service,
+            "get_task_run",
+            side_effect=[source_detail, final_detail],
+        ), patch.object(
+            self.service.task_run_service,
+            "create_task_run",
+            return_value=revision_detail,
+        ), patch.object(
+            self.service.task_run_service,
+            "upsert_step",
+        ), patch.object(
+            self.service.task_run_service,
+            "update_task_run",
+        ), patch.object(
+            self.service.memory_service,
+            "save_user_message",
+        ), patch.object(
+            self.service.memory_service,
+            "build_workspace_context",
+            return_value="[workspace]",
+        ), patch.object(
+            self.service.session_document_service,
+            "get_document",
+            return_value=selected_doc,
+        ) as get_document, patch.object(
+            self.service.llm_service,
+            "is_configured",
+            return_value=True,
+        ), patch.object(
+            self.service.llm_service,
+            "resolve_doc_request",
+            return_value={"doc": {"title": "Target Doc", "sections": []}, "reason": "doc schema"},
+        ), patch.object(
+            self.service,
+            "_prepare_doc_execution",
+            return_value={
+                "reply_preview": "updated",
+                "analysis": None,
+                "artifacts": [],
+            },
+        ) as prepare_doc, patch.object(
+            self.service,
+            "_persist_task_run_result",
+        ):
+            result = self.service.revise_document_from_task_run(
+                "run_source",
+                instruction="rename this section",
+                requested_by="tester",
+                document_id="doc_target",
+            )
+
+        self.assertIs(result, final_detail)
+        get_document.assert_called_once_with("s1", "doc_target")
+        self.assertIs(prepare_doc.call_args.kwargs["target_document"], selected_doc)
 
 
 if __name__ == "__main__":
