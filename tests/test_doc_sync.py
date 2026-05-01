@@ -1,8 +1,9 @@
 import json
 import unittest
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from app.schemas.analyze import AgentTrace, AnalyzeResponse
 from app.db.models import Task
@@ -701,6 +702,66 @@ class DocSyncTests(unittest.TestCase):
         self.assertIsNotNone(current_doc)
         self.assertEqual(current_doc["section_block_index"][1]["block_ids"], ["h3", "p3"])
 
+    def test_doc_tool_snapshot_only_merges_written_sections(self) -> None:
+        session_document_service = SessionDocumentService(state_service=_MemoryStateService())
+        session_document_service.save_current_document(
+            "doc_target_snapshot_session",
+            document_id="doc_target_snapshot",
+            url="https://feishu.cn/docx/doc_target_snapshot",
+            title="目标更新文档",
+            version=1,
+            sync_mode="created",
+            section_snapshot=[
+                {"heading": "讨论摘要", "paragraphs": ["旧摘要"]},
+                {"heading": "风险与卡点", "paragraphs": ["旧风险"]},
+            ],
+        )
+        doc_tool = DocTool(
+            doc_api=self.workflow.doc_api,
+            session_document_service=session_document_service,
+        )
+
+        with patch.object(
+            self.workflow.doc_api,
+            "is_configured",
+            return_value=True,
+        ), patch.object(
+            self.workflow.doc_api,
+            "replace_document_sections",
+            return_value={
+                "document_id": "doc_target_snapshot",
+                "url": "https://feishu.cn/docx/doc_target_snapshot",
+                "title": "目标更新文档",
+                "replaced_block_count": 1,
+                "inserted_block_count": 1,
+                "patched_headings": ["风险与卡点"],
+                "section_block_index": [],
+            },
+        ):
+            doc_tool.sync_package_to_session_doc(
+                {
+                    "title": "目标更新文档",
+                    "sections": [
+                        {"heading": "讨论摘要", "paragraphs": ["LLM 误改摘要"]},
+                        {"heading": "风险与卡点", "paragraphs": ["新风险"]},
+                    ],
+                },
+                session_id="doc_target_snapshot_session",
+                episode_id=None,
+                instruction="更新风险部分",
+                task_run_id="run_target_snapshot",
+            )
+
+        current_doc = session_document_service.get_current_document("doc_target_snapshot_session")
+        self.assertIsNotNone(current_doc)
+        self.assertEqual(
+            current_doc["section_snapshot"],
+            [
+                {"heading": "讨论摘要", "paragraphs": ["旧摘要"]},
+                {"heading": "风险与卡点", "paragraphs": ["新风险"]},
+            ],
+        )
+
     def test_doc_tool_passes_delete_and_rename_plan_to_doc_api(self) -> None:
         session_document_service = SessionDocumentService(state_service=_MemoryStateService())
         session_document_service.save_current_document(
@@ -760,6 +821,655 @@ class DocSyncTests(unittest.TestCase):
         self.assertEqual(replace_sections.call_args.kwargs["rename_map"], {"Risks": "Key Risks"})
         self.assertEqual(replace_sections.call_args.kwargs["target_headings"], ["Key Risks"])
 
+    def test_doc_tool_rewrites_same_content_for_formatting_request(self) -> None:
+        session_document_service = SessionDocumentService(state_service=_MemoryStateService())
+        session_document_service.save_current_document(
+            "doc_format_session",
+            document_id="doc_format",
+            url="https://feishu.cn/docx/doc_format",
+            title="格式文档",
+            version=1,
+            sync_mode="created",
+            section_snapshot=[
+                {"heading": "讨论摘要", "paragraphs": ["已有摘要"]},
+                {"heading": "任务清单", "paragraphs": ["已有任务"]},
+            ],
+        )
+        doc_tool = DocTool(
+            doc_api=self.workflow.doc_api,
+            session_document_service=session_document_service,
+        )
+
+        with patch.object(
+            self.workflow.doc_api,
+            "is_configured",
+            return_value=True,
+        ), patch.object(
+            self.workflow.doc_api,
+            "replace_document_sections",
+            return_value={
+                "document_id": "doc_format",
+                "url": "https://feishu.cn/docx/doc_format",
+                "title": "格式文档",
+                "replaced_block_count": 2,
+                "inserted_block_count": 2,
+                "patched_headings": ["讨论摘要", "任务清单"],
+                "section_block_index": [],
+            },
+        ) as replace_sections:
+            result = doc_tool.sync_package_to_session_doc(
+                {
+                    "title": "格式文档",
+                    "sections": [
+                        {"heading": "讨论摘要", "paragraphs": ["已有摘要"]},
+                        {"heading": "任务清单", "paragraphs": ["已有任务"]},
+                    ],
+                },
+                session_id="doc_format_session",
+                episode_id=None,
+                instruction="你能否来帮我整理一下文档，使文档的格式更加规范",
+                task_run_id="run_format",
+            )
+
+        replace_sections.assert_called_once()
+        self.assertEqual(replace_sections.call_args.kwargs["target_headings"], ["讨论摘要", "任务清单"])
+        self.assertEqual(result.mode, "updated")
+
+    def test_doc_tool_deletes_explicit_update_heading_from_natural_language(self) -> None:
+        session_document_service = SessionDocumentService(state_service=_MemoryStateService())
+        session_document_service.save_current_document(
+            "doc_delete_session",
+            document_id="doc_delete",
+            url="https://feishu.cn/docx/doc_delete",
+            title="删除文档",
+            version=1,
+            sync_mode="created",
+            section_snapshot=[
+                {"heading": "讨论摘要", "paragraphs": ["已有摘要"]},
+                {"heading": "Update (2026-04-29 15:43)", "paragraphs": ["旧更新"]},
+            ],
+        )
+        doc_tool = DocTool(
+            doc_api=self.workflow.doc_api,
+            session_document_service=session_document_service,
+        )
+
+        with patch.object(
+            self.workflow.doc_api,
+            "is_configured",
+            return_value=True,
+        ), patch.object(
+            self.workflow.doc_api,
+            "replace_document_sections",
+            return_value={
+                "document_id": "doc_delete",
+                "url": "https://feishu.cn/docx/doc_delete",
+                "title": "删除文档",
+                "replaced_block_count": 2,
+                "inserted_block_count": 0,
+                "deleted_headings": ["Update (2026-04-29 15:43)"],
+                "section_block_index": [],
+            },
+        ) as replace_sections:
+            result = doc_tool.sync_package_to_session_doc(
+                {
+                    "title": "删除文档",
+                    "sections": [
+                        {"heading": "讨论摘要", "paragraphs": ["已有摘要"]},
+                        {"heading": "Update (2026-04-29 15:43)", "paragraphs": ["旧更新"]},
+                    ],
+                },
+                session_id="doc_delete_session",
+                episode_id=None,
+                instruction="帮我删除Update (2026-04-29 15:43)栏一下的内容",
+                task_run_id="run_delete",
+            )
+
+        replace_sections.assert_called_once()
+        self.assertEqual(replace_sections.call_args.kwargs["delete_headings"], [])
+        self.assertEqual(replace_sections.call_args.kwargs["delete_ranges"][0]["scope"], "group")
+        self.assertEqual(replace_sections.call_args.kwargs["delete_ranges"][0]["anchor"], "Update (2026-04-29 15:43)")
+        self.assertEqual(replace_sections.call_args.kwargs["target_headings"], [])
+        self.assertEqual(result.mode, "updated")
+
+    def test_doc_tool_delete_only_plan_does_not_patch_llm_sections(self) -> None:
+        session_document_service = SessionDocumentService(state_service=_MemoryStateService())
+        session_document_service.save_current_document(
+            "doc_delete_only_session",
+            document_id="doc_delete_only",
+            url="https://feishu.cn/docx/doc_delete_only",
+            title="删除文档",
+            version=1,
+            sync_mode="created",
+            section_snapshot=[
+                {"heading": "讨论摘要", "paragraphs": ["已有摘要"]},
+                {"heading": "Update (2026-04-29 15:43)", "paragraphs": ["旧更新"]},
+                {"heading": "下一步建议", "paragraphs": ["已有建议"]},
+            ],
+        )
+        doc_tool = DocTool(
+            doc_api=self.workflow.doc_api,
+            session_document_service=session_document_service,
+        )
+
+        with patch.object(
+            self.workflow.doc_api,
+            "is_configured",
+            return_value=True,
+        ), patch.object(
+            self.workflow.doc_api,
+            "replace_document_sections",
+            return_value={
+                "document_id": "doc_delete_only",
+                "url": "https://feishu.cn/docx/doc_delete_only",
+                "title": "删除文档",
+                "replaced_block_count": 2,
+                "inserted_block_count": 0,
+                "deleted_headings": ["Update (2026-04-29 15:43)"],
+                "section_block_index": [],
+            },
+        ) as replace_sections:
+            result = doc_tool.sync_package_to_session_doc(
+                {
+                    "title": "删除文档",
+                    "sections": [
+                        {"heading": "讨论摘要", "paragraphs": ["LLM 误改摘要"]},
+                        {"heading": "下一步建议", "paragraphs": ["LLM 误改建议"]},
+                        {"heading": "建议补充素材", "paragraphs": ["LLM 误加内容"]},
+                    ],
+                },
+                session_id="doc_delete_only_session",
+                episode_id=None,
+                instruction="帮我删除Update (2026-04-29 15:43)栏以下的内容",
+                task_run_id="run_delete_only",
+            )
+
+        replace_sections.assert_called_once()
+        self.assertEqual(replace_sections.call_args.args[2], [])
+        self.assertEqual(replace_sections.call_args.kwargs["target_headings"], [])
+        self.assertEqual(replace_sections.call_args.kwargs["delete_headings"], [])
+        self.assertEqual(
+            replace_sections.call_args.kwargs["delete_ranges"],
+            [
+                {
+                    "scope": "group",
+                    "anchor": "Update (2026-04-29 15:43)",
+                    "query": "Update (2026-04-29 15:43)",
+                    "include_anchor": True,
+                    "stop_at": "",
+                    "label": "Update (2026-04-29 15:43) 这一组",
+                }
+            ],
+        )
+        self.assertEqual(result.mode, "updated")
+
+    def test_doc_tool_reports_unmatched_delete_range_without_fake_update(self) -> None:
+        session_document_service = SessionDocumentService(state_service=_MemoryStateService())
+        session_document_service.save_current_document(
+            "doc_unmatched_delete_range_session",
+            document_id="doc_unmatched_delete_range",
+            url="https://feishu.cn/docx/doc_unmatched_delete_range",
+            title="删除文档",
+            version=9,
+            sync_mode="created",
+            section_snapshot=[
+                {"heading": "项目背景", "paragraphs": ["保留"]},
+                {"heading": "后续计划", "paragraphs": ["保留计划"]},
+                {"heading": "Update (2026-04-29 15:43)", "paragraphs": ["旧更新"]},
+            ],
+        )
+        doc_tool = DocTool(
+            doc_api=self.workflow.doc_api,
+            session_document_service=session_document_service,
+        )
+
+        with patch.object(
+            self.workflow.doc_api,
+            "is_configured",
+            return_value=True,
+        ), patch.object(
+            self.workflow.doc_api,
+            "replace_document_sections",
+            return_value={
+                "document_id": "doc_unmatched_delete_range",
+                "url": "https://feishu.cn/docx/doc_unmatched_delete_range",
+                "title": "删除文档",
+                "replaced_block_count": 0,
+                "inserted_block_count": 0,
+                "deleted_headings": [],
+                "unmatched_delete_ranges": ["后续计划 之后"],
+                "section_block_index": [],
+            },
+        ) as replace_sections:
+            result = doc_tool.sync_package_to_session_doc(
+                {
+                    "title": "删除文档",
+                    "sections": [
+                        {"heading": "讨论摘要", "paragraphs": ["LLM 误生成摘要"]},
+                    ],
+                    "artifact_edit_plan": {
+                        "ops": [
+                            {
+                                "type": "delete",
+                                "target": {
+                                    "kind": "anchor_range",
+                                    "anchor": "后续计划",
+                                    "query": "后续计划",
+                                    "scope": "after",
+                                    "include_anchor": False,
+                                },
+                            }
+                        ]
+                    },
+                },
+                session_id="doc_unmatched_delete_range_session",
+                episode_id=None,
+                instruction="将文档里“后续计划”后面的内容全部删除",
+                task_run_id="run_unmatched_delete_range",
+            )
+
+        replace_sections.assert_called_once()
+        self.assertEqual(result.mode, "noop")
+        self.assertEqual(result.status, "needs_clarification")
+        self.assertIn("- Operation targets not matched: 删除：后续计划 之后", result.summary_lines)
+        self.assertEqual(result.document_info["version"], 9)
+        self.assertEqual(
+            result.document_info["section_snapshot"],
+            [
+                {"heading": "项目背景", "paragraphs": ["保留"]},
+                {"heading": "后续计划", "paragraphs": ["保留计划"]},
+                {"heading": "Update (2026-04-29 15:43)", "paragraphs": ["旧更新"]},
+            ],
+        )
+
+    def test_doc_tool_reports_unmatched_update_target_without_fake_append(self) -> None:
+        session_document_service = SessionDocumentService(state_service=_MemoryStateService())
+        session_document_service.save_current_document(
+            "doc_unmatched_update_session",
+            document_id="doc_unmatched_update",
+            url="https://feishu.cn/docx/doc_unmatched_update",
+            title="更新文档",
+            version=4,
+            sync_mode="created",
+            section_snapshot=[
+                {"heading": "项目背景", "paragraphs": ["保留"]},
+            ],
+        )
+        doc_tool = DocTool(
+            doc_api=self.workflow.doc_api,
+            session_document_service=session_document_service,
+        )
+
+        with patch.object(
+            self.workflow.doc_api,
+            "is_configured",
+            return_value=True,
+        ), patch.object(
+            self.workflow.doc_api,
+            "replace_document_sections",
+            return_value={
+                "document_id": "doc_unmatched_update",
+                "url": "https://feishu.cn/docx/doc_unmatched_update",
+                "title": "更新文档",
+                "replaced_block_count": 0,
+                "inserted_block_count": 0,
+                "unmatched_update_headings": ["后续计划"],
+                "section_block_index": [],
+            },
+        ) as replace_sections:
+            result = doc_tool.sync_package_to_session_doc(
+                {
+                    "title": "更新文档",
+                    "sections": [{"heading": "后续计划", "paragraphs": ["新计划"]}],
+                    "artifact_edit_plan": {
+                        "operations": [
+                            {
+                                "type": "update",
+                                "target": {"kind": "heading", "query": "后续计划"},
+                            }
+                        ]
+                    },
+                },
+                session_id="doc_unmatched_update_session",
+                episode_id=None,
+                instruction="更新文档里的后续计划",
+                task_run_id="run_unmatched_update",
+            )
+
+        replace_sections.assert_called_once()
+        self.assertEqual(replace_sections.call_args.kwargs["append_headings"], [])
+        self.assertEqual(result.mode, "noop")
+        self.assertEqual(result.status, "needs_clarification")
+        self.assertIn("- Operation targets not matched: 更新：后续计划", result.summary_lines)
+        self.assertEqual(result.document_info["version"], 4)
+
+    def test_doc_tool_multi_intent_delete_and_rewrite_keeps_both_operations(self) -> None:
+        session_document_service = SessionDocumentService(state_service=_MemoryStateService())
+        session_document_service.save_current_document(
+            "doc_multi_intent_session",
+            document_id="doc_multi_intent",
+            url="https://feishu.cn/docx/doc_multi_intent",
+            title="多意图文档",
+            version=1,
+            sync_mode="created",
+            section_snapshot=[
+                {"heading": "讨论摘要", "paragraphs": ["旧摘要"]},
+                {"heading": "Update (2026-04-29 15:43)", "paragraphs": ["旧更新"]},
+            ],
+        )
+        doc_tool = DocTool(
+            doc_api=self.workflow.doc_api,
+            session_document_service=session_document_service,
+        )
+
+        with patch.object(
+            self.workflow.doc_api,
+            "is_configured",
+            return_value=True,
+        ), patch.object(
+            self.workflow.doc_api,
+            "replace_document_sections",
+            return_value={
+                "document_id": "doc_multi_intent",
+                "url": "https://feishu.cn/docx/doc_multi_intent",
+                "title": "多意图文档",
+                "replaced_block_count": 3,
+                "inserted_block_count": 1,
+                "deleted_headings": ["Update (2026-04-29 15:43)"],
+                "patched_headings": ["讨论摘要"],
+                "section_block_index": [],
+            },
+        ) as replace_sections:
+            result = doc_tool.sync_package_to_session_doc(
+                {
+                    "title": "多意图文档",
+                    "sections": [
+                        {"heading": "讨论摘要", "paragraphs": ["新摘要"]},
+                    ],
+                },
+                session_id="doc_multi_intent_session",
+                episode_id=None,
+                instruction="删除 Update (2026-04-29 15:43) 栏，然后重新总结一下文档",
+                task_run_id="run_multi_intent",
+            )
+
+        replace_sections.assert_called_once()
+        self.assertEqual(replace_sections.call_args.kwargs["delete_headings"], [])
+        self.assertEqual(replace_sections.call_args.kwargs["delete_ranges"][0]["scope"], "group")
+        self.assertEqual(replace_sections.call_args.kwargs["delete_ranges"][0]["anchor"], "Update (2026-04-29 15:43)")
+        self.assertEqual(replace_sections.call_args.kwargs["target_headings"], ["讨论摘要"])
+        self.assertEqual(replace_sections.call_args.args[2], [{"heading": "讨论摘要", "paragraphs": ["新摘要"]}])
+        self.assertEqual(result.mode, "updated")
+
+    def test_doc_tool_structured_delete_plan_does_not_need_delete_keyword(self) -> None:
+        session_document_service = SessionDocumentService(state_service=_MemoryStateService())
+        session_document_service.save_current_document(
+            "doc_structured_delete_session",
+            document_id="doc_structured_delete",
+            url="https://feishu.cn/docx/doc_structured_delete",
+            title="Structured Doc",
+            version=1,
+            sync_mode="created",
+            section_snapshot=[
+                {"heading": "Summary", "paragraphs": ["Keep summary"]},
+                {"heading": "Old Section", "paragraphs": ["Remove me"]},
+            ],
+        )
+        doc_tool = DocTool(
+            doc_api=self.workflow.doc_api,
+            session_document_service=session_document_service,
+        )
+
+        with patch.object(
+            self.workflow.doc_api,
+            "is_configured",
+            return_value=True,
+        ), patch.object(
+            self.workflow.doc_api,
+            "replace_document_sections",
+            return_value={
+                "document_id": "doc_structured_delete",
+                "url": "https://feishu.cn/docx/doc_structured_delete",
+                "title": "Structured Doc",
+                "deleted_headings": ["Old Section"],
+                "section_block_index": [],
+            },
+        ) as replace_sections:
+            result = doc_tool.sync_package_to_session_doc(
+                {
+                    "title": "Structured Doc",
+                    "sections": [
+                        {"heading": "Summary", "paragraphs": ["LLM should not be written"]},
+                        {"heading": "New Hallucinated Section", "paragraphs": ["Skip me"]},
+                    ],
+                    "artifact_edit_plan": {
+                        "artifact_type": "doc",
+                        "mutation_required": True,
+                        "ops": [
+                            {
+                                "type": "delete",
+                                "target": {"kind": "heading", "queries": ["Old Section"]},
+                            }
+                        ],
+                    },
+                },
+                session_id="doc_structured_delete_session",
+                episode_id=None,
+                instruction="Apply the approved edit plan.",
+                task_run_id="run_structured_delete",
+            )
+
+        replace_sections.assert_called_once()
+        self.assertEqual(replace_sections.call_args.args[2], [])
+        self.assertEqual(replace_sections.call_args.kwargs["delete_headings"], ["Old Section"])
+        self.assertEqual(replace_sections.call_args.kwargs["target_headings"], [])
+        self.assertEqual(result.mode, "updated")
+
+    def test_doc_tool_passes_untracked_structured_delete_target_to_doc_api(self) -> None:
+        session_document_service = SessionDocumentService(state_service=_MemoryStateService())
+        session_document_service.save_current_document(
+            "doc_untracked_delete_session",
+            document_id="doc_untracked_delete",
+            url="https://feishu.cn/docx/doc_untracked_delete",
+            title="Structured Doc",
+            version=1,
+            sync_mode="created",
+            section_snapshot=[
+                {"heading": "Summary", "paragraphs": ["Keep summary"]},
+                {"heading": "Next Steps", "paragraphs": ["Keep next"]},
+            ],
+        )
+        doc_tool = DocTool(
+            doc_api=self.workflow.doc_api,
+            session_document_service=session_document_service,
+        )
+
+        with patch.object(
+            self.workflow.doc_api,
+            "is_configured",
+            return_value=True,
+        ), patch.object(
+            self.workflow.doc_api,
+            "replace_document_sections",
+            return_value={
+                "document_id": "doc_untracked_delete",
+                "url": "https://feishu.cn/docx/doc_untracked_delete",
+                "title": "Structured Doc",
+                "deleted_headings": ["Update (2026-04-29 15:43)"],
+                "section_block_index": [],
+            },
+        ) as replace_sections:
+            result = doc_tool.sync_package_to_session_doc(
+                {
+                    "title": "Structured Doc",
+                    "sections": [
+                        {"heading": "Summary", "paragraphs": ["Keep summary"]},
+                        {"heading": "Next Steps", "paragraphs": ["Keep next"]},
+                    ],
+                    "artifact_edit_plan": {
+                        "artifact_type": "doc",
+                        "mutation_required": True,
+                        "operations": [
+                            {
+                                "type": "delete",
+                                "target": {"kind": "heading", "queries": ["Update (2026-04-29 15:43)"]},
+                            }
+                        ],
+                    },
+                },
+                session_id="doc_untracked_delete_session",
+                episode_id=None,
+                instruction="Delete the old update group.",
+                task_run_id="run_untracked_delete",
+            )
+
+        replace_sections.assert_called_once()
+        self.assertEqual(replace_sections.call_args.args[2], [])
+        self.assertEqual(replace_sections.call_args.kwargs["target_headings"], [])
+        self.assertEqual(replace_sections.call_args.kwargs["delete_headings"], ["Update (2026-04-29 15:43)"])
+        self.assertEqual(result.mode, "updated")
+
+    def test_doc_tool_structured_rename_plan_does_not_need_rename_keyword(self) -> None:
+        session_document_service = SessionDocumentService(state_service=_MemoryStateService())
+        session_document_service.save_current_document(
+            "doc_structured_rename_session",
+            document_id="doc_structured_rename",
+            url="https://feishu.cn/docx/doc_structured_rename",
+            title="Structured Doc",
+            version=1,
+            sync_mode="created",
+            section_snapshot=[
+                {"heading": "Summary", "paragraphs": ["Keep summary"]},
+                {"heading": "Risks", "paragraphs": ["Old risk"]},
+            ],
+        )
+        doc_tool = DocTool(
+            doc_api=self.workflow.doc_api,
+            session_document_service=session_document_service,
+        )
+
+        with patch.object(
+            self.workflow.doc_api,
+            "is_configured",
+            return_value=True,
+        ), patch.object(
+            self.workflow.doc_api,
+            "replace_document_sections",
+            return_value={
+                "document_id": "doc_structured_rename",
+                "url": "https://feishu.cn/docx/doc_structured_rename",
+                "title": "Structured Doc",
+                "renamed_headings": ["Risks -> Key Risks"],
+                "patched_headings": ["Key Risks"],
+                "section_block_index": [],
+            },
+        ) as replace_sections:
+            result = doc_tool.sync_package_to_session_doc(
+                {
+                    "title": "Structured Doc",
+                    "sections": [
+                        {"heading": "Summary", "paragraphs": ["Keep summary"]},
+                        {"heading": "Key Risks", "paragraphs": ["Risk A"]},
+                    ],
+                    "artifact_edit_plan": {
+                        "artifact_type": "doc",
+                        "mutation_required": True,
+                        "ops": [
+                            {
+                                "type": "rename",
+                                "target": {"kind": "heading", "query": "Risks"},
+                                "payload": {"new_heading": "Key Risks"},
+                            }
+                        ],
+                    },
+                },
+                session_id="doc_structured_rename_session",
+                episode_id=None,
+                instruction="Apply the approved edit plan.",
+                task_run_id="run_structured_rename",
+            )
+
+        replace_sections.assert_called_once()
+        self.assertEqual(replace_sections.call_args.kwargs["rename_map"], {"Risks": "Key Risks"})
+        self.assertEqual(replace_sections.call_args.kwargs["target_headings"], ["Key Risks"])
+        self.assertEqual(result.mode, "updated")
+
+    def test_doc_tool_structured_append_and_delete_plan_keeps_both_operations(self) -> None:
+        session_document_service = SessionDocumentService(state_service=_MemoryStateService())
+        session_document_service.save_current_document(
+            "doc_structured_combo_session",
+            document_id="doc_structured_combo",
+            url="https://feishu.cn/docx/doc_structured_combo",
+            title="Structured Doc",
+            version=1,
+            sync_mode="created",
+            section_snapshot=[
+                {"heading": "Summary", "paragraphs": ["Keep summary"]},
+                {"heading": "Old Section", "paragraphs": ["Remove me"]},
+            ],
+        )
+        doc_tool = DocTool(
+            doc_api=self.workflow.doc_api,
+            session_document_service=session_document_service,
+        )
+
+        with patch.object(
+            self.workflow.doc_api,
+            "is_configured",
+            return_value=True,
+        ), patch.object(
+            self.workflow.doc_api,
+            "replace_document_sections",
+            return_value={
+                "document_id": "doc_structured_combo",
+                "url": "https://feishu.cn/docx/doc_structured_combo",
+                "title": "Structured Doc",
+                "deleted_headings": ["Old Section"],
+                "appended_headings": ["New Section"],
+                "patched_headings": ["New Section"],
+                "section_block_index": [],
+            },
+        ) as replace_sections:
+            result = doc_tool.sync_package_to_session_doc(
+                {
+                    "title": "Structured Doc",
+                    "sections": [
+                        {"heading": "Summary", "paragraphs": ["Keep summary"]},
+                        {"heading": "New Section", "paragraphs": ["Added context"]},
+                    ],
+                    "artifact_edit_plan": {
+                        "artifact_type": "doc",
+                        "mutation_required": True,
+                        "ops": [
+                            {
+                                "type": "delete",
+                                "target": {"kind": "heading", "queries": ["Old Section"]},
+                            },
+                            {
+                                "type": "append",
+                                "target": {"kind": "heading", "queries": ["New Section"]},
+                            },
+                        ],
+                    },
+                },
+                session_id="doc_structured_combo_session",
+                episode_id=None,
+                instruction="Apply the approved edit plan.",
+                task_run_id="run_structured_combo",
+            )
+
+        replace_sections.assert_called_once()
+        self.assertEqual(replace_sections.call_args.kwargs["delete_headings"], ["Old Section"])
+        self.assertEqual(replace_sections.call_args.kwargs["target_headings"], ["New Section"])
+        self.assertEqual(
+            replace_sections.call_args.args[2],
+            [
+                {"heading": "Summary", "paragraphs": ["Keep summary"]},
+                {"heading": "New Section", "paragraphs": ["Added context"]},
+            ],
+        )
+        self.assertEqual(result.mode, "updated")
+
     def test_incremental_doc_sections_can_target_risk_section_only(self) -> None:
         package = {
             "stats_as_of": "2026-04-28 11:20",
@@ -810,6 +1520,187 @@ class DocSyncTests(unittest.TestCase):
         self.assertEqual(preview["write_strategy"], "patch_matched_section_bodies")
         self.assertIn("patching matched section bodies", preview["strategy_note"])
 
+    def test_doc_reply_describes_delete_action_without_body_preview(self) -> None:
+        reply = self.workflow._format_doc_reply(
+            {
+                "title": "项目分工文档",
+                "sections": [{"heading": "讨论摘要", "paragraphs": ["不应该在删除回执里展开"]}],
+                "artifact_edit_plan": {
+                    "operations": [
+                        {
+                            "type": "delete",
+                            "target": {"queries": ["Update (2026-04-29 15:43)"]},
+                        }
+                    ]
+                },
+            },
+            [
+                "- Updated document: 项目分工文档",
+                "- Deleted sections: Update (2026-04-29 15:43)",
+                "- Current version: v10",
+                "- Document URL: https://feishu.cn/docx/doc_1",
+            ],
+        )
+
+        self.assertIn("本轮任务：", reply)
+        self.assertIn("- 删除：Update (2026-04-29 15:43)", reply)
+        self.assertIn("- 已删除：Update (2026-04-29 15:43)", reply)
+        self.assertIn("- 当前版本：v10", reply)
+        self.assertIn("- 链接：https://feishu.cn/docx/doc_1", reply)
+        self.assertNotIn("内容预览：", reply)
+
+    def test_doc_reply_explains_noop_result(self) -> None:
+        reply = self.workflow._format_doc_reply(
+            {
+                "title": "项目分工文档",
+                "sections": [{"heading": "讨论摘要", "paragraphs": ["已有内容"]}],
+                "artifact_edit_plan": {
+                    "operations": [
+                        {
+                            "type": "delete",
+                            "target": {"queries": ["Update (2026-04-29 15:43)"]},
+                        }
+                    ]
+                },
+            },
+            [
+                "- No content changes detected. Keep current document: 项目分工文档",
+                "- Current version: v9",
+                "- Document URL: https://feishu.cn/docx/doc_1",
+            ],
+        )
+
+        self.assertIn("- 删除：Update (2026-04-29 15:43)", reply)
+        self.assertIn("- 未检测到可写入变化，当前文档保持不变：项目分工文档", reply)
+        self.assertIn("可能原因", reply)
+        self.assertNotIn("No content changes detected", reply)
+
+    def test_doc_reply_describes_update_append_and_rename_actions(self) -> None:
+        reply = self.workflow._format_doc_reply(
+            {
+                "title": "项目分工文档",
+                "sections": [
+                    {"heading": "关键风险", "paragraphs": ["风险更新"]},
+                    {"heading": "验收标准", "paragraphs": ["新增验收口径"]},
+                ],
+                "artifact_edit_plan": {
+                    "operations": [
+                        {
+                            "type": "rename",
+                            "target": {"queries": ["风险与卡点"]},
+                            "payload": {"new_heading": "关键风险"},
+                        },
+                        {
+                            "type": "update",
+                            "target": {"queries": ["关键风险"]},
+                        },
+                        {
+                            "type": "append",
+                            "payload": {"heading": "验收标准"},
+                        },
+                    ]
+                },
+            },
+            [
+                "- Updated document: 项目分工文档",
+                "- Updated sections: 关键风险",
+                "- Appended new sections: 验收标准",
+                "- Renamed sections: 风险与卡点 -> 关键风险",
+                "- Current version: v11",
+                "- Document URL: https://feishu.cn/docx/doc_1",
+            ],
+        )
+
+        self.assertIn("- 重命名：风险与卡点 -> 关键风险", reply)
+        self.assertIn("- 更新：关键风险", reply)
+        self.assertIn("- 新增：验收标准", reply)
+        self.assertIn("- 已更新章节：关键风险", reply)
+        self.assertIn("- 已新增章节：验收标准", reply)
+        self.assertIn("- 已重命名：风险与卡点 -> 关键风险", reply)
+        self.assertIn("内容预览：", reply)
+
+    def test_doc_reply_infers_actions_from_sync_lines_without_edit_plan(self) -> None:
+        reply = self.workflow._format_doc_reply(
+            {
+                "title": "项目分工文档",
+                "sections": [{"heading": "任务清单", "paragraphs": ["新增任务"]}],
+            },
+            [
+                "- Updated document: 项目分工文档",
+                "- Appended new sections: 任务清单",
+                "- Patched section bodies: 讨论摘要",
+                "- Current version: v12",
+            ],
+        )
+
+        self.assertIn("本轮任务：", reply)
+        self.assertIn("- 新增：任务清单", reply)
+        self.assertIn("- 改写正文：讨论摘要", reply)
+        self.assertIn("- 已新增章节：任务清单", reply)
+        self.assertIn("- 已改写正文：讨论摘要", reply)
+
+    def test_doc_reply_describes_semantic_delete_range(self) -> None:
+        reply = self.workflow._format_doc_reply(
+            {
+                "title": "项目分工文档",
+                "sections": [],
+                "artifact_edit_plan": {
+                    "ops": [
+                        {
+                            "type": "delete",
+                            "target": {
+                                "kind": "anchor_range",
+                                "anchor": "后续计划",
+                                "query": "后续计划",
+                                "scope": "after",
+                                "include_anchor": False,
+                            },
+                        }
+                    ]
+                },
+            },
+            [
+                "- Updated document: 项目分工文档",
+                "- Deleted sections: 后续计划 之后",
+                "- Current version: v12",
+            ],
+        )
+
+        self.assertIn("- 删除：后续计划 之后", reply)
+        self.assertIn("- 已删除：后续计划 之后", reply)
+
+    def test_doc_reply_explains_unmatched_delete_range(self) -> None:
+        reply = self.workflow._format_doc_reply(
+            {
+                "title": "项目分工文档",
+                "sections": [],
+                "artifact_edit_plan": {
+                    "ops": [
+                        {
+                            "type": "delete",
+                            "target": {
+                                "kind": "anchor_range",
+                                "anchor": "后续计划",
+                                "query": "后续计划",
+                                "scope": "after",
+                                "include_anchor": False,
+                            },
+                        }
+                    ]
+                },
+            },
+            [
+                "- No content changes detected. Keep current document: 项目分工文档",
+                "- Operation targets not matched: 删除：后续计划 之后",
+                "- Current version: v9",
+            ],
+        )
+
+        self.assertIn("- 删除：后续计划 之后", reply)
+        self.assertIn("- 没有匹配到要操作的目标：删除：后续计划 之后。", reply)
+        self.assertIn("本轮未对这些目标做写入", reply)
+        self.assertIn("- 当前版本：v9", reply)
+
     def test_plan_doc_section_changes_can_mark_delete_and_rename(self) -> None:
         plan = self.workflow._doc_tool().plan_doc_section_changes(
             [
@@ -827,6 +1718,526 @@ class DocSyncTests(unittest.TestCase):
         self.assertEqual(plan["rename_map"], {"Risks": "Key Risks"})
         self.assertEqual(plan["deleted_headings"], ["Next Steps"])
         self.assertEqual(plan["changed_headings"], ["Key Risks"])
+
+    def test_plan_doc_section_changes_preserves_delete_after_range(self) -> None:
+        plan = self.workflow._doc_tool().plan_doc_section_changes(
+            [],
+            instruction="将文档里“后续计划”后面的内容全部删除",
+            previous_snapshot=[
+                {"heading": "项目背景", "paragraphs": ["保留"]},
+                {"heading": "后续计划", "paragraphs": ["保留计划"]},
+                {"heading": "Update (2026-04-29 15:43)", "paragraphs": ["删除"]},
+            ],
+        )
+
+        self.assertEqual(plan["deleted_headings"], [])
+        self.assertEqual(
+            plan["delete_ranges"],
+            [
+                {
+                    "scope": "after",
+                    "anchor": "后续计划",
+                    "query": "后续计划",
+                    "include_anchor": False,
+                    "stop_at": "",
+                    "label": "后续计划 之后",
+                }
+            ],
+        )
+
+    def test_merge_doc_section_snapshots_applies_delete_ranges(self) -> None:
+        merged = self.workflow._merge_doc_section_snapshots(
+            [
+                {"heading": "项目背景", "paragraphs": ["保留"]},
+                {"heading": "后续计划", "paragraphs": ["保留计划"]},
+                {"heading": "Update (2026-04-29 15:43)", "paragraphs": ["删除"]},
+            ],
+            [],
+            delete_ranges=[
+                {
+                    "scope": "after",
+                    "anchor": "后续计划",
+                    "include_anchor": False,
+                }
+            ],
+        )
+
+        self.assertEqual(
+            merged,
+            [
+                {"heading": "项目背景", "paragraphs": ["保留"]},
+                {"heading": "后续计划", "paragraphs": ["保留计划"]},
+            ],
+        )
+
+    def test_doc_tool_prefers_remote_section_snapshot_after_replace(self) -> None:
+        session_document_service = SessionDocumentService(state_service=_MemoryStateService())
+        session_document_service.save_current_document(
+            "doc_remote_snapshot_session",
+            document_id="doc_remote_snapshot",
+            url="https://feishu.cn/docx/doc_remote_snapshot",
+            title="项目文档",
+            version=1,
+            sync_mode="created",
+            section_snapshot=[
+                {"heading": "任务清单", "paragraphs": ["后端开发 | Zeleous", "前端开发 | zero"]},
+                {"heading": "下一步建议", "paragraphs": ["旧建议"]},
+            ],
+        )
+        doc_api = MagicMock()
+        doc_api.replace_document_sections.return_value = {
+            "document_id": "doc_remote_snapshot",
+            "url": "https://feishu.cn/docx/doc_remote_snapshot",
+            "title": "项目文档",
+            "replaced_block_count": 1,
+            "inserted_block_count": 0,
+            "deleted_headings": ["后端开发 之后"],
+            "section_block_index": [],
+            "section_snapshot": [
+                {"heading": "任务清单", "paragraphs": ["后端开发 | Zeleous"]},
+            ],
+        }
+        doc_tool = DocTool(doc_api=doc_api, session_document_service=session_document_service)
+
+        result = doc_tool.sync_package_to_session_doc(
+            {
+                "title": "项目文档",
+                "sections": [],
+                "artifact_edit_plan": {
+                    "ops": [
+                        {
+                            "type": "delete",
+                            "target": {
+                                "kind": "anchor_range",
+                                "scope": "after",
+                                "anchor": "后端开发",
+                                "query": "后端开发",
+                                "include_anchor": False,
+                            },
+                        }
+                    ]
+                },
+            },
+            session_id="doc_remote_snapshot_session",
+            episode_id=None,
+            instruction="把后端开发以后的内容删掉",
+        )
+
+        self.assertEqual(result.mode, "updated")
+        current_doc = session_document_service.get_current_document("doc_remote_snapshot_session")
+        self.assertEqual(
+            current_doc["section_snapshot"],
+            [{"heading": "任务清单", "paragraphs": ["后端开发 | Zeleous"]}],
+        )
+
+    def test_status_reads_tasks_from_current_document_snapshot(self) -> None:
+        self.workflow.session_document_service.save_current_document(
+            "doc_status_session",
+            document_id="doc_status",
+            url="https://feishu.cn/docx/doc_status",
+            title="项目分工文档",
+            version=3,
+            sync_mode="updated",
+            section_snapshot=[
+                {
+                    "heading": "任务清单",
+                    "paragraphs": [
+                        "后端开发 | 负责人: Zeleous | 截止: 2026-05-03 | 优先级: medium | 状态: draft",
+                    ],
+                }
+            ],
+        )
+        message = type(
+            "FakeMessage",
+            (),
+            {
+                "session_id": "doc_status_session",
+                "message_id": "m_doc_status",
+                "text": "后端开发是谁在负责",
+                "chat_id": "c1",
+                "chat_type": "group",
+            },
+        )()
+
+        tasks = self.workflow._context_tasks_for_message(message)
+        reply = self.workflow._format_status_reply(message.text, tasks, {})
+
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(tasks[0].title, "后端开发")
+        self.assertEqual(tasks[0].owner, "Zeleous")
+        self.assertIn("【任务负责人】", reply)
+        self.assertIn("后端开发：Zeleous", reply)
+
+    def test_status_task_list_uses_document_snapshot_after_deletion(self) -> None:
+        self.workflow.session_document_service.save_current_document(
+            "doc_status_deleted_session",
+            document_id="doc_status_deleted",
+            url="https://feishu.cn/docx/doc_status_deleted",
+            title="项目分工文档",
+            version=4,
+            sync_mode="updated",
+            section_snapshot=[
+                {
+                    "heading": "任务清单",
+                    "paragraphs": [
+                        "后端开发 | 负责人: Zeleous | 截止: 2026-05-03 | 优先级: medium | 状态: draft",
+                    ],
+                }
+            ],
+        )
+        message = type(
+            "FakeMessage",
+            (),
+            {
+                "session_id": "doc_status_deleted_session",
+                "message_id": "m_doc_status_deleted",
+                "text": "你说说看都有什么任务",
+                "chat_id": "c1",
+                "chat_type": "group",
+            },
+        )()
+
+        tasks = self.workflow._context_tasks_for_message(message)
+        reply = self.workflow._format_status_reply(message.text, tasks, {})
+
+        self.assertIn("【当前任务】", reply)
+        self.assertIn("后端开发", reply)
+        self.assertIn("Zeleous", reply)
+        self.assertNotIn("前端开发", reply)
+
+    def test_status_document_snapshot_ignores_stale_memory_tasks(self) -> None:
+        self.workflow.session_document_service.save_current_document(
+            "doc_status_authoritative_session",
+            document_id="doc_status_authoritative",
+            url="https://feishu.cn/docx/doc_status_authoritative",
+            title="Project Tasks",
+            version=3,
+            sync_mode="updated",
+            section_snapshot=[
+                {
+                    "heading": "Task list",
+                    "paragraphs": [
+                        "Backend development | owner: Zeleous | due: TBD | priority: medium | status: draft",
+                    ],
+                }
+            ],
+        )
+        memory_service = MagicMock()
+        memory_service.get_current_tasks.return_value = [
+            Task(
+                session_id="doc_status_authoritative_session",
+                title="Frontend development",
+                owner="zero",
+                due_date="TBD",
+                priority="medium",
+                status="draft",
+            )
+        ]
+        memory_service.get_active_episode.return_value = None
+        self.workflow.memory_service = memory_service
+        message = type(
+            "FakeMessage",
+            (),
+            {
+                "session_id": "doc_status_authoritative_session",
+                "message_id": "m_doc_status_authoritative",
+                "text": "show current tasks",
+                "chat_id": "c1",
+                "chat_type": "group",
+            },
+        )()
+
+        tasks = self.workflow._context_tasks_for_message(message)
+
+        self.assertEqual([task.title for task in tasks], ["Backend development"])
+        memory_service.get_current_tasks.assert_called_once()
+
+    def test_status_merges_memory_tasks_newer_than_document_snapshot(self) -> None:
+        self.workflow.session_document_service.save_current_document(
+            "doc_status_fresh_memory_session",
+            document_id="doc_status_fresh_memory",
+            url="https://feishu.cn/docx/doc_status_fresh_memory",
+            title="Project Tasks",
+            version=3,
+            sync_mode="updated",
+            section_snapshot=[
+                {
+                    "heading": "Task list",
+                    "paragraphs": [
+                        "Backend development | owner: Zeleous | due: TBD | priority: medium | status: draft",
+                    ],
+                }
+            ],
+        )
+        current_doc = self.workflow.session_document_service.get_current_document("doc_status_fresh_memory_session")
+        current_doc["updated_at"] = "2026-01-01T00:00:00+00:00"
+        self.workflow.session_document_service.state_service.set_value(
+            "session_doc:doc_status_fresh_memory_session",
+            json.dumps(current_doc, ensure_ascii=False),
+        )
+        memory_service = MagicMock()
+        memory_service.get_current_tasks.return_value = [
+            Task(
+                session_id="doc_status_fresh_memory_session",
+                title="Product coordination",
+                owner="Wang Wu",
+                due_date="TBD",
+                priority="medium",
+                status="draft",
+                created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+            )
+        ]
+        memory_service.get_active_episode.return_value = None
+        self.workflow.memory_service = memory_service
+        message = type(
+            "FakeMessage",
+            (),
+            {
+                "session_id": "doc_status_fresh_memory_session",
+                "message_id": "m_doc_status_fresh_memory",
+                "text": "show current tasks",
+                "chat_id": "c1",
+                "chat_type": "group",
+            },
+        )()
+
+        tasks = self.workflow._context_tasks_for_message(message)
+
+        self.assertEqual([task.title for task in tasks], ["Backend development", "Product coordination"])
+
+    def test_status_execution_persists_active_discussion_tasks(self) -> None:
+        memory_service = MagicMock()
+        memory_service.get_current_tasks.return_value = []
+        memory_service.get_active_episode.return_value = type("Episode", (), {"id": 11})()
+        memory_service.get_episode_messages.return_value = [
+            type(
+                "Message",
+                (),
+                {"content": "王五来做产品经理，来协调前端和后端的开发"},
+            )()
+        ]
+        memory_service.load_memory_payload.return_value = {}
+        self.workflow.memory_service = memory_service
+        self.workflow.llm_service = MagicMock()
+        self.workflow.llm_service.is_configured.return_value = False
+        message = type(
+            "FakeMessage",
+            (),
+            {
+                "session_id": "doc_status_persist_pending_session",
+                "message_id": "m_doc_status_persist_pending",
+                "text": "说一下目前都有什么任务",
+                "chat_id": "c1",
+                "chat_type": "group",
+            },
+        )()
+
+        self.workflow._prepare_status_execution(
+            message,
+            llm_result={},
+            active_episode_id=11,
+        )
+
+        saved_analysis = memory_service.save_round.call_args.kwargs["analysis"]
+        self.assertEqual(saved_analysis.tasks[0].owner, "王五")
+        self.assertIn("产品经理", saved_analysis.tasks[0].title)
+
+    def test_status_execution_ignores_llm_status_answer(self) -> None:
+        self.workflow.session_document_service.save_current_document(
+            "doc_status_local_answer_session",
+            document_id="doc_status_local_answer",
+            url="https://feishu.cn/docx/doc_status_local_answer",
+            title="Project Tasks",
+            version=3,
+            sync_mode="updated",
+            section_snapshot=[
+                {
+                    "heading": "Task list",
+                    "paragraphs": [
+                        "Backend development | owner: Zeleous | due: TBD | priority: medium | status: draft",
+                    ],
+                }
+            ],
+        )
+        memory_service = MagicMock()
+        memory_service.get_active_episode.return_value = None
+        memory_service.load_memory_payload.return_value = {}
+        self.workflow.memory_service = memory_service
+        message = type(
+            "FakeMessage",
+            (),
+            {
+                "session_id": "doc_status_local_answer_session",
+                "message_id": "m_doc_status_local_answer",
+                "text": "show current tasks",
+                "chat_id": "c1",
+                "chat_type": "group",
+            },
+        )()
+
+        result = self.workflow._prepare_status_execution(
+            message,
+            llm_result={"status_answer": "There are 8 tasks."},
+        )
+
+        self.assertIn("Backend development", result["reply_preview"])
+        self.assertNotIn("8 tasks", result["reply_preview"])
+
+    def test_status_uses_content_column_instead_of_speaker_as_task_title(self) -> None:
+        self.workflow.session_document_service.save_current_document(
+            "doc_status_speaker_session",
+            document_id="doc_status_speaker",
+            url="https://feishu.cn/docx/doc_status_speaker",
+            title="项目分工文档",
+            version=5,
+            sync_mode="updated",
+            section_snapshot=[
+                {
+                    "heading": "任务清单",
+                    "paragraphs": [
+                        "发言人 Zeleous | 内容 帮我整理代办 | 负责人: TBD | 截止: TBD | 优先级: medium | 状态: draft",
+                    ],
+                }
+            ],
+        )
+        message = type(
+            "FakeMessage",
+            (),
+            {
+                "session_id": "doc_status_speaker_session",
+                "message_id": "m_doc_status_speaker",
+                "text": "你说说看都有什么任务",
+                "chat_id": "c1",
+                "chat_type": "group",
+            },
+        )()
+
+        tasks = self.workflow._context_tasks_for_message(message)
+        reply = self.workflow._format_status_reply(message.text, tasks, {})
+
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(tasks[0].title, "帮我整理代办")
+        self.assertNotEqual(tasks[0].title, "发言人 Zeleous")
+        self.assertIn("帮我整理代办", reply)
+        self.assertNotIn("发言人 Zeleous | 负责人", reply)
+
+    def test_status_reads_tasks_from_pending_unmentioned_discussion(self) -> None:
+        memory_service = MagicMock()
+        memory_service.get_current_tasks.return_value = []
+        memory_service.get_active_episode.return_value = type("Episode", (), {"id": 11})()
+        memory_service.get_episode_messages.return_value = [
+            type(
+                "Message",
+                (),
+                {"content": "王五来做产品经理，来协调前端和后端的开发"},
+            )()
+        ]
+        self.workflow.memory_service = memory_service
+        self.workflow.llm_service = MagicMock()
+        self.workflow.llm_service.is_configured.return_value = False
+        message = type(
+            "FakeMessage",
+            (),
+            {
+                "session_id": "pending_status_session",
+                "message_id": "m_pending_status",
+                "text": "说一下目前都有什么任务",
+                "chat_id": "c1",
+                "chat_type": "group",
+            },
+        )()
+
+        tasks = self.workflow._context_tasks_for_message(message)
+        reply = self.workflow._format_status_reply(message.text, tasks, {})
+
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(tasks[0].owner, "王五")
+        self.assertEqual(tasks[0].title, "产品经理协调前后端开发")
+        self.assertIn("产品经理协调前后端开发", reply)
+        self.assertIn("王五", reply)
+
+    def test_status_prefers_llm_for_pending_discussion_task_extraction(self) -> None:
+        memory_service = MagicMock()
+        memory_service.get_current_tasks.return_value = []
+        memory_service.get_active_episode.return_value = type("Episode", (), {"id": 11})()
+        memory_service.get_episode_messages.return_value = [
+            type(
+                "Message",
+                (),
+                {"content": "王五来做产品经理，来协调前端和后端的开发"},
+            )()
+        ]
+        llm_service = MagicMock()
+        llm_service.is_configured.return_value = True
+        llm_service.extract_collaboration.return_value = {
+            "summary": "新增产品协调分工",
+            "tasks": [
+                {
+                    "title": "产品经理协调前后端开发",
+                    "owner": "王五",
+                    "priority": "medium",
+                    "due_date": "TBD",
+                    "status": "draft",
+                    "notes": "王五来做产品经理，来协调前端和后端的开发",
+                }
+            ],
+            "risks": [],
+            "next_actions": [],
+        }
+        self.workflow.memory_service = memory_service
+        self.workflow.llm_service = llm_service
+        message = type(
+            "FakeMessage",
+            (),
+            {
+                "session_id": "pending_status_llm_session",
+                "message_id": "m_pending_status_llm",
+                "text": "说一下目前都有什么任务",
+                "chat_id": "c1",
+                "chat_type": "group",
+            },
+        )()
+
+        tasks = self.workflow._context_tasks_for_message(message)
+
+        llm_service.extract_collaboration.assert_called_once()
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(tasks[0].owner, "王五")
+        self.assertEqual(tasks[0].title, "产品经理协调前后端开发")
+
+    def test_status_falls_back_to_local_pending_task_parser_when_llm_fails(self) -> None:
+        memory_service = MagicMock()
+        memory_service.get_current_tasks.return_value = []
+        memory_service.get_active_episode.return_value = type("Episode", (), {"id": 11})()
+        memory_service.get_episode_messages.return_value = [
+            type(
+                "Message",
+                (),
+                {"content": "王五来做产品经理，来协调前端和后端的开发"},
+            )()
+        ]
+        llm_service = MagicMock()
+        llm_service.is_configured.return_value = True
+        llm_service.extract_collaboration.side_effect = RuntimeError("llm down")
+        self.workflow.memory_service = memory_service
+        self.workflow.llm_service = llm_service
+        message = type(
+            "FakeMessage",
+            (),
+            {
+                "session_id": "pending_status_llm_fallback_session",
+                "message_id": "m_pending_status_llm_fallback",
+                "text": "说一下目前都有什么任务",
+                "chat_id": "c1",
+                "chat_type": "group",
+            },
+        )()
+
+        tasks = self.workflow._context_tasks_for_message(message)
+
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(tasks[0].owner, "王五")
+        self.assertEqual(tasks[0].title, "产品经理协调前后端开发")
 
     def test_merge_doc_section_snapshots_supports_delete_and_rename(self) -> None:
         merged = self.workflow._merge_doc_section_snapshots(

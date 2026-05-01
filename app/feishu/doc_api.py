@@ -230,13 +230,15 @@ class FeishuDocAPI:
         *,
         target_headings: list[str] | None = None,
         delete_headings: list[str] | None = None,
+        delete_ranges: list[dict[str, Any]] | None = None,
+        append_headings: list[str] | None = None,
         rename_map: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         root_children = self.list_child_blocks(document_id, document_id)
         ranges = self._section_ranges_from_blocks(root_children)
         range_by_heading = {item["heading"]: item for item in ranges}
         root_blocks_by_heading = {item["heading"]: root_children[int(item["start_index"])] for item in ranges if int(item["start_index"]) < len(root_children)}
-        wanted = {heading for heading in (target_headings or []) if heading}
+        wanted = {heading for heading in target_headings if heading} if target_headings is not None else None
         delete_targets = {heading for heading in (delete_headings or []) if heading}
         rename_targets = {
             str(old_heading).strip(): str(new_heading).strip()
@@ -248,7 +250,7 @@ class FeishuDocAPI:
             for section in sections
             if isinstance(section, dict)
             and str(section.get("heading") or "").strip()
-            and (not wanted or str(section.get("heading") or "").strip() in wanted)
+            and (wanted is None or str(section.get("heading") or "").strip() in wanted)
         ]
 
         replaced_count = 0
@@ -258,6 +260,11 @@ class FeishuDocAPI:
         deleted_headings: list[str] = []
         renamed_headings: list[str] = []
         patched_headings: list[str] = []
+        append_targets = {str(heading).strip() for heading in (append_headings or []) if str(heading).strip()}
+        unmatched_update_headings: list[str] = []
+        unmatched_delete_headings: list[str] = []
+        unmatched_rename_headings: list[str] = []
+        unmatched_delete_ranges: list[str] = []
         update_jobs: list[tuple[int, str, dict[str, Any]]] = []
         append_sections: list[dict] = []
         consumed_headings: set[str] = set()
@@ -283,8 +290,12 @@ class FeishuDocAPI:
                 consumed_headings.add(heading)
                 if old_heading:
                     consumed_headings.add(old_heading)
-            else:
+            elif old_heading:
+                unmatched_rename_headings.append(old_heading)
+            elif heading in append_targets or wanted is None:
                 append_sections.append(section)
+            else:
+                unmatched_update_headings.append(heading)
 
         for heading in delete_targets:
             if heading in consumed_headings:
@@ -301,12 +312,44 @@ class FeishuDocAPI:
                         },
                     )
                 )
+            else:
+                unmatched_delete_headings.append(heading)
+
+        for spec in delete_ranges or []:
+            if not isinstance(spec, dict):
+                continue
+            label = self._semantic_delete_range_label(spec)
+            semantic_range = self._resolve_semantic_delete_range(ranges, spec, total_blocks=len(root_children))
+            if semantic_range is None:
+                unmatched_delete_ranges.append(label)
+                continue
+            start_index, end_index, label = semantic_range
+            if end_index <= start_index:
+                unmatched_delete_ranges.append(label)
+                continue
+            update_jobs.append(
+                (
+                    start_index,
+                    "delete_range",
+                    {
+                        "range": {"start_index": start_index, "end_index": end_index},
+                        "heading": label,
+                    },
+                )
+            )
 
         for _, job_type, payload in sorted(update_jobs, key=lambda item: item[0], reverse=True):
             current_range = payload["range"]
             start_index = int(current_range["start_index"])
             end_index = int(current_range["end_index"])
-            if job_type == "delete":
+            if job_type in {"delete", "delete_range"}:
+                if job_type == "delete":
+                    start_index, end_index = self._expand_delete_range(
+                        ranges,
+                        heading=str(payload.get("heading") or ""),
+                        start_index=start_index,
+                        end_index=end_index,
+                    )
                 self.delete_child_blocks(
                     document_id,
                     block_id=document_id,
@@ -367,8 +410,117 @@ class FeishuDocAPI:
             "deleted_headings": list(reversed(deleted_headings)),
             "renamed_headings": list(reversed(renamed_headings)),
             "patched_headings": list(reversed(patched_headings)),
+            "unmatched_update_headings": unmatched_update_headings,
+            "unmatched_delete_headings": unmatched_delete_headings,
+            "unmatched_rename_headings": unmatched_rename_headings,
+            "unmatched_delete_ranges": unmatched_delete_ranges,
             "section_block_index": self._section_ranges_from_blocks(refreshed_children),
+            "section_snapshot": self._section_snapshot_from_blocks(refreshed_children),
         }
+
+    @staticmethod
+    def _semantic_delete_range_label(spec: dict[str, Any]) -> str:
+        label = str(spec.get("label") or "").strip()
+        if label:
+            return label
+        anchor = str(spec.get("anchor") or spec.get("query") or "").strip()
+        scope = str(spec.get("scope") or "").strip().lower()
+        stop_at = str(spec.get("stop_at") or "").strip()
+        if anchor and scope == "after":
+            return f"{anchor} 之后"
+        if anchor and scope == "before":
+            return f"{anchor} 之前"
+        if anchor and scope == "body":
+            return f"{anchor} 正文"
+        if anchor and scope == "group":
+            return f"{anchor} 这一组"
+        if anchor and scope == "between" and stop_at:
+            return f"{anchor} 到 {stop_at} 之间"
+        return anchor or "未命名范围"
+
+    def _expand_delete_range(
+        self,
+        ranges: list[dict[str, Any]],
+        *,
+        heading: str,
+        start_index: int,
+        end_index: int,
+    ) -> tuple[int, int]:
+        """Expand semantic update-log sections to include their refresh subsections."""
+
+        if not self._is_update_log_heading(heading):
+            return start_index, end_index
+        sorted_ranges = sorted(ranges, key=lambda item: int(item.get("start_index") or 0))
+        seen_target = False
+        expanded_end = end_index
+        for item in sorted_ranges:
+            current_start = int(item.get("start_index") or 0)
+            current_end = int(item.get("end_index") or 0)
+            current_heading = str(item.get("heading") or "").strip()
+            if current_start < start_index:
+                continue
+            if current_start == start_index:
+                seen_target = True
+                expanded_end = max(expanded_end, current_end)
+                continue
+            if not seen_target:
+                continue
+            if self._is_update_log_heading(current_heading):
+                break
+            if not current_heading.lower().startswith("refresh:"):
+                break
+            expanded_end = max(expanded_end, current_end)
+        return start_index, expanded_end
+
+    def _resolve_semantic_delete_range(
+        self,
+        ranges: list[dict[str, Any]],
+        spec: dict[str, Any],
+        *,
+        total_blocks: int,
+    ) -> tuple[int, int, str] | None:
+        scope = str(spec.get("scope") or "").strip().lower()
+        anchor = str(spec.get("anchor") or spec.get("query") or "").strip()
+        stop_at = str(spec.get("stop_at") or "").strip()
+        if not scope or not anchor:
+            return None
+        range_by_heading = {str(item.get("heading") or "").strip(): item for item in ranges}
+        anchor_range = range_by_heading.get(anchor)
+        if not anchor_range:
+            return None
+        anchor_start = int(anchor_range.get("start_index") or 0)
+        anchor_end = int(anchor_range.get("end_index") or anchor_start)
+        include_anchor = bool(spec.get("include_anchor"))
+        label = str(spec.get("label") or "").strip() or anchor
+
+        if scope in {"section", "group"}:
+            start_index, end_index = anchor_start, anchor_end
+            if scope == "group":
+                start_index, end_index = self._expand_delete_range(
+                    ranges,
+                    heading=anchor,
+                    start_index=start_index,
+                    end_index=end_index,
+                )
+            return start_index, end_index, label
+        if scope == "body":
+            return min(anchor_start + 1, anchor_end), anchor_end, label
+        if scope == "after":
+            return (anchor_start if include_anchor else anchor_end), total_blocks, label
+        if scope == "before":
+            return 0, (anchor_end if include_anchor else anchor_start), label
+        if scope == "between":
+            stop_range = range_by_heading.get(stop_at)
+            if not stop_range:
+                return None
+            stop_start = int(stop_range.get("start_index") or 0)
+            start_index = anchor_start if include_anchor else anchor_end
+            return min(start_index, stop_start), max(start_index, stop_start), label
+        return None
+
+    @staticmethod
+    def _is_update_log_heading(heading: str) -> bool:
+        return bool(re.match(r"^Update\s*\([^)]+\)$", str(heading or "").strip(), re.IGNORECASE))
 
     def _section_body_block_specs(self, section: dict[str, Any]) -> list[dict[str, Any]]:
         paragraphs = section.get("paragraphs") if isinstance(section.get("paragraphs"), list) else []
@@ -553,6 +705,28 @@ class FeishuDocAPI:
                 }
             )
         return ranges
+
+    def _section_snapshot_from_blocks(self, blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        snapshot: list[dict[str, Any]] = []
+        ranges = self._section_ranges_from_blocks(blocks)
+        for item in ranges:
+            heading = str(item.get("heading") or "").strip()
+            try:
+                start_index = max(int(item.get("start_index") or 0), 0)
+                end_index = max(int(item.get("end_index") or 0), 0)
+            except (TypeError, ValueError):
+                continue
+            if not heading or end_index < start_index:
+                continue
+            paragraphs: list[str] = []
+            for block in blocks[start_index + 1 : end_index]:
+                if not isinstance(block, dict):
+                    continue
+                text = self._block_text_content(block).strip()
+                if text:
+                    paragraphs.append(text)
+            snapshot.append({"heading": heading, "paragraphs": paragraphs})
+        return snapshot
 
     def _extract_response_children(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
         data = payload.get("data", {}) if isinstance(payload, dict) else {}

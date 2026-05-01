@@ -4,6 +4,7 @@ import json
 import logging
 import re
 
+from app.services.artifact_edit_plan import ArtifactEditPlan, ArtifactEditPlanner
 from app.services.presentation_artifact_service import PresentationArtifactService
 
 
@@ -96,35 +97,150 @@ class PresentationTool:
             return {}
         return payload if isinstance(payload, dict) else {}
 
-    def revise_deterministic(self, package: dict, instruction: str) -> dict:
+    def plan_revision(self, package: dict, instruction: str, llm_result: dict | None = None) -> ArtifactEditPlan:
+        slides = package.get("slides") if isinstance(package.get("slides"), list) else []
+        targets: list[str] = []
+        for index, slide in enumerate(slides, start=1):
+            title = str(slide.get("title") or "").strip() if isinstance(slide, dict) else ""
+            targets.extend([f"P{index}", f"第{index}页", f"第{index}张"])
+            if title:
+                targets.extend([title, f"P{index} {title}", f"第{index}页 {title}"])
+        return ArtifactEditPlanner.from_llm_result(
+            llm_result,
+            artifact_type="slides",
+            instruction=instruction,
+            available_targets=targets,
+        )
+
+    def revise_deterministic(
+        self,
+        package: dict,
+        instruction: str,
+        *,
+        edit_plan: ArtifactEditPlan | None = None,
+    ) -> dict:
+        edit_plan = edit_plan or self.plan_revision(package, instruction)
         revised = json.loads(json.dumps(package, ensure_ascii=False))
         revised["revision_instruction"] = instruction
+        revised["artifact_edit_plan"] = self.serialize_edit_plan(edit_plan)
         slides = revised.get("slides") if isinstance(revised.get("slides"), list) else []
-        target_index = self._target_slide_index(instruction, len(slides))
-        if target_index is not None and 0 <= target_index < len(slides) and isinstance(slides[target_index], dict):
-            slide = slides[target_index]
+
+        for operation in edit_plan.operations or []:
+            target_indices = self._operation_target_indices(operation.target, instruction, slides)
+            if operation.op_type == "delete":
+                for index in sorted(target_indices, reverse=True):
+                    if 0 <= index < len(slides):
+                        del slides[index]
+                continue
+            if operation.op_type == "append":
+                text = str(operation.payload.get("text") or instruction).strip() or instruction
+                slides.append(
+                    {
+                        "title": "补充说明",
+                        "bullets": [text],
+                        "speaker_notes": f"本页用于补充说明：{text}",
+                        "duration_sec": 45,
+                    }
+                )
+                continue
+            if operation.op_type == "compress":
+                max_count = operation.payload.get("max_count") or ArtifactEditPlanner.extract_requested_count(instruction)
+                if max_count and len(slides) > int(max_count):
+                    del slides[int(max_count) :]
+                continue
+            if operation.op_type in {"rewrite", "update", "rename", "reorder"}:
+                if not target_indices and self._target_is_specific(operation.target):
+                    continue
+                self._mark_slides_revised(slides, target_indices, instruction)
+
+        if not edit_plan.operations:
+            target_index = self._target_slide_index(instruction, len(slides))
+            if target_index is not None:
+                self._mark_slides_revised(slides, [target_index], instruction)
+            elif slides and isinstance(slides[-1], dict):
+                emphasis = revised.get("emphasis") if isinstance(revised.get("emphasis"), list) else []
+                revised["emphasis"] = [*emphasis, instruction]
+
+        max_count = ArtifactEditPlanner.extract_requested_count(instruction)
+        if max_count and len(slides) > max_count and "compress" in edit_plan.operation_types:
+            del slides[max_count:]
+        revised["slides"] = slides
+        return revised
+
+    @staticmethod
+    def serialize_edit_plan(edit_plan: ArtifactEditPlan) -> dict:
+        return {
+            "artifact_type": edit_plan.artifact_type,
+            "mutation_required": edit_plan.mutation_required,
+            "scope": edit_plan.scope,
+            "fallback": edit_plan.fallback,
+            "needs_clarification": edit_plan.needs_clarification,
+            "question": edit_plan.question,
+            "operations": [
+                {
+                    "type": operation.op_type,
+                    "target": operation.target,
+                    "payload": operation.payload,
+                    "reason": operation.reason,
+                }
+                for operation in edit_plan.operations
+            ],
+        }
+
+    @staticmethod
+    def package_changed(before: dict, after: dict) -> bool:
+        ignored = {"version", "revision_instruction", "artifact_edit_plan"}
+
+        def comparable(payload: dict) -> dict:
+            return {key: value for key, value in payload.items() if key not in ignored}
+
+        return comparable(before) != comparable(after)
+
+    def _operation_target_indices(self, target: dict, instruction: str, slides: list) -> list[int]:
+        label_to_index: dict[str, int] = {}
+        for index, slide in enumerate(slides):
+            title = str(slide.get("title") or "").strip() if isinstance(slide, dict) else ""
+            labels = [f"P{index + 1}", f"第{index + 1}页", f"第{index + 1}张"]
+            if title:
+                labels.extend([title, f"P{index + 1} {title}", f"第{index + 1}页 {title}"])
+            for label in labels:
+                key = ArtifactEditPlanner.match_key(label)
+                if key:
+                    label_to_index[key] = index
+
+        if isinstance(target, dict) and target.get("scope") == "all":
+            return list(range(len(slides)))
+
+        matched_labels = ArtifactEditPlanner.resolve_target_payload_mentions(
+            target if isinstance(target, dict) else {},
+            list(label_to_index.keys()),
+            allow_all=False,
+        )
+        if matched_labels:
+            return sorted({label_to_index[ArtifactEditPlanner.match_key(label)] for label in matched_labels})
+
+        page_index = self._target_slide_index(instruction, len(slides))
+        return [page_index] if page_index is not None else []
+
+    def _mark_slides_revised(self, slides: list, target_indices: list[int], instruction: str) -> None:
+        indices = target_indices or list(range(len(slides)))
+        for index in indices:
+            if not (0 <= index < len(slides)) or not isinstance(slides[index], dict):
+                continue
+            slide = slides[index]
             bullets = slide.get("bullets") if isinstance(slide.get("bullets"), list) else []
             note = str(slide.get("speaker_notes") or slide.get("notes") or "").strip()
             slide["speaker_notes"] = f"{note}\n修订要求：{instruction}".strip()
             if instruction not in {str(item).strip() for item in bullets}:
                 slide["bullets"] = [*bullets[:4], f"修订要求：{instruction}"]
-        elif "新增" in instruction or "加一页" in instruction or "加一张" in instruction:
-            slides.append(
-                {
-                    "title": "补充说明",
-                    "bullets": [instruction],
-                    "speaker_notes": f"本页用于补充说明：{instruction}",
-                    "duration_sec": 45,
-                }
-            )
-        elif slides and isinstance(slides[-1], dict):
-            emphasis = revised.get("emphasis") if isinstance(revised.get("emphasis"), list) else []
-            revised["emphasis"] = [*emphasis, instruction]
 
-        if any(token in instruction for token in ("压缩到5页", "压缩成5页", "缩成5页", "五页", "5 页")) and len(slides) > 5:
-            del slides[5:]
-        revised["slides"] = slides
-        return revised
+    @staticmethod
+    def _target_is_specific(target: dict) -> bool:
+        if not isinstance(target, dict) or target.get("scope") == "all":
+            return False
+        if isinstance(target.get("queries"), list) and target.get("queries"):
+            return True
+        return any(str(target.get(key) or "").strip() for key in ("query", "heading", "title", "name", "id", "label"))
 
     def _target_slide_index(self, instruction: str, total: int) -> int | None:
         match = re.search(r"(?:第|P)\s*(\d+)\s*(?:页|张|p)?", instruction, re.IGNORECASE)

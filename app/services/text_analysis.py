@@ -8,7 +8,7 @@ SENDER_PREFIX_RE = re.compile(r"^\s*[-*]?\s*[A-Za-z0-9_]{4,}:\s*")
 LEADING_FILLER_RE = re.compile(r"^(不对|另外|然后|还有|补充一个|补充|顺便|以及|目前|近期群聊讨论)\s*[，,:：]?\s*")
 DIALOG_OWNER_RE = re.compile(r"^(?P<owner>[\u4e00-\u9fa5A-Za-z0-9]{1,8})(?=你|同学|老师|这边|这个)")
 ACTION_OWNER_RE = re.compile(
-    r"^(?P<owner>[\u4e00-\u9fa5A-Za-z0-9]{1,8})(?=负责|完成|准备|处理|跟进|推进|搞|做)"
+    r"^(?P<owner>[\u4e00-\u9fa5A-Za-z0-9]{1,8}?)(?:来)?(?=负责|完成|准备|处理|跟进|推进|协调|搞|做)"
 )
 DUE_HINT_RE = re.compile(
     r"((?:本周|这周|下周)?(?:周[一二三四五六日天]|星期[一二三四五六日天])(?:前)?|今天|明天|后天|今晚|\d{4}-\d{2}-\d{2}|\d{1,2}月\d{1,2}[日号]?)"
@@ -25,6 +25,8 @@ TASK_KEYWORDS = (
     "推进",
     "修复",
     "整理",
+    "协调",
+    "产品经理",
     "开发",
     "联调",
     "后端",
@@ -312,12 +314,14 @@ def _extract_title(text: str, owner: str, due_hint: str) -> str:
     if due_hint and due_hint != "TBD":
         working = working.replace(due_hint, " ")
 
-    working = re.sub(r"(大概|预计|需要你|需要|尽快|马上|立即|搞定|完成|负责|本周|这周|下周)", " ", working)
+    working = re.sub(r"(大概|预计|需要你|需要|尽快|马上|立即|搞定|完成|负责|来做|做|本周|这周|下周)", " ", working)
     working = re.sub(r"[，。；;：:]", " ", working)
     working = " ".join(working.split())
     raw_working = working
 
     keyword_map = {
+        "产品经理": "产品经理协调前后端开发" if "前端" in text and "后端" in text else "产品经理协调",
+        "协调": "前后端开发协调" if "前端" in text and "后端" in text else "协作协调",
         "后端": "后端开发",
         "前端": "前端开发",
         "联调": "飞书联调",

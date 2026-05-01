@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any
+
+from app.services.artifact_edit_plan import ArtifactEditPlanner
 
 
 logger = logging.getLogger(__name__)
@@ -16,6 +19,7 @@ class RouteDecision:
     needs_clarification: bool = False
     reason: str = ""
     requested_outputs: tuple[str, ...] = ()
+    defer_to_llm: bool = False
 
 
 class RequestRouter:
@@ -87,6 +91,54 @@ class RequestRouter:
     TASK_ANALYSIS_KEYWORDS = ("整理任务", "提取任务", "提取待办", "生成任务", "更新任务", "同步任务")
     SUMMARY_KEYWORDS = ("总结", "纪要", "梳理", "回顾", "归纳", "结论")
     RISK_KEYWORDS = ("风险", "阻塞", "卡点", "问题点", "风险项")
+    ARTIFACT_OUTPUT_ACTIONS = (
+        "生成",
+        "写成",
+        "写到",
+        "写入",
+        "同步到",
+        "沉淀到",
+        "沉淀成",
+        "整理成",
+        "总结成",
+        "输出到",
+        "导出到",
+        "做成",
+        "转成",
+        "形成",
+        "产出",
+        "make",
+        "create",
+        "generate",
+        "write",
+        "sync",
+        "export",
+        "turn into",
+        "convert to",
+    )
+    ARTIFACT_LOCAL_TARGET_MARKERS = (
+        "里面",
+        "里",
+        "中的",
+        "中",
+        "以下",
+        "以上",
+        "后面",
+        "前面",
+        "之后",
+        "之前",
+        "栏",
+        "栏目",
+        "章节",
+        "部分",
+        "页面",
+        "节点",
+        "第",
+        "section",
+        "page",
+        "slide",
+        "node",
+    )
     VAGUE_REQUESTS = (
         "帮我整理",
         "整理一下",
@@ -102,7 +154,7 @@ class RequestRouter:
 
     def route(self, instruction: str, *, llm_service: Any | None = None) -> RouteDecision:
         rule_decision = self.route_by_rule(instruction)
-        if rule_decision is not None:
+        if rule_decision is not None and (not rule_decision.needs_clarification or not rule_decision.defer_to_llm):
             return rule_decision
 
         if llm_service is not None and getattr(llm_service, "is_configured", lambda: False)():
@@ -111,6 +163,9 @@ class RequestRouter:
                 return self.route_from_llm_result(result)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Lightweight request routing failed, using fallback route: %s", exc)
+
+        if rule_decision is not None:
+            return rule_decision
 
         if self._is_vague_request(instruction):
             return RouteDecision(
@@ -134,19 +189,40 @@ class RequestRouter:
         doc_requested = self._is_doc_request(text, lowered)
         slides_requested = self._is_slides_request(text, lowered)
         canvas_requested = self._is_canvas_request(text, lowered)
+        output_requested = self._is_artifact_output_request(
+            text,
+            lowered,
+            doc_requested=doc_requested,
+            slides_requested=slides_requested,
+            canvas_requested=canvas_requested,
+        )
 
-        if canvas_requested:
+        if (
+            (doc_requested or slides_requested or canvas_requested)
+            and not output_requested
+            and self._needs_artifact_edit_clarification(text, lowered)
+        ):
             return RouteDecision(
-                route="canvas",
+                route="unknown",
                 source="rule",
-                confidence=0.94,
-                reason="Request asks for a canvas or diagram artifact.",
-                requested_outputs=("canvas",),
+                confidence=0.42,
+                needs_clarification=True,
+                reason="用户指出了产物和局部范围，但没有明确要删除、移动、改写还是补充。",
+                defer_to_llm=True,
             )
 
+        requested_outputs = self._requested_outputs(
+            doc_requested=doc_requested,
+            slides_requested=slides_requested,
+            canvas_requested=canvas_requested,
+        )
+
         if doc_requested:
-            requested_outputs = ("doc", "slides") if slides_requested else ("doc",)
-            reason = "用户要求生成文档并补充演示稿。" if slides_requested else "用户明确要求生成或更新文档。"
+            reason = (
+                "用户要求生成文档并补充其他协作产物。"
+                if len(requested_outputs) > 1
+                else "用户明确要求生成或更新文档。"
+            )
             return RouteDecision(
                 route="doc",
                 source="rule",
@@ -156,12 +232,26 @@ class RequestRouter:
             )
 
         if slides_requested:
+            reason = (
+                "用户要求生成演示稿并补充画布产物。"
+                if canvas_requested
+                else "用户明确要求生成演示稿或汇报材料。"
+            )
             return RouteDecision(
                 route="slides",
                 source="rule",
                 confidence=0.96,
-                reason="用户明确要求生成演示稿或汇报材料。",
-                requested_outputs=("slides",),
+                reason=reason,
+                requested_outputs=requested_outputs,
+            )
+
+        if canvas_requested:
+            return RouteDecision(
+                route="canvas",
+                source="rule",
+                confidence=0.94,
+                reason="Request asks for a canvas or diagram artifact.",
+                requested_outputs=requested_outputs,
             )
 
         if self._is_status_request(text, lowered):
@@ -267,10 +357,46 @@ class RequestRouter:
             return not self._contains_any(text, lowered, self.TASK_ANALYSIS_KEYWORDS)
         return False
 
+    def _is_artifact_output_request(
+        self,
+        text: str,
+        lowered: str,
+        *,
+        doc_requested: bool,
+        slides_requested: bool,
+        canvas_requested: bool,
+    ) -> bool:
+        if not (doc_requested or slides_requested or canvas_requested):
+            return False
+        return self._contains_any(text, lowered, self.ARTIFACT_OUTPUT_ACTIONS)
+
+    def _needs_artifact_edit_clarification(self, text: str, lowered: str) -> bool:
+        action_text = re.sub(r"(?<![A-Za-z])update\s*\([^)]*\)", "", text, flags=re.IGNORECASE)
+        action_lowered = action_text.lower()
+        if any(marker in action_text or marker in action_lowered for marker in ArtifactEditPlanner.MUTATION_MARKERS):
+            return False
+        return self._contains_any(text, lowered, self.ARTIFACT_LOCAL_TARGET_MARKERS)
+
     def _is_vague_request(self, instruction: str) -> bool:
         text = (instruction or "").strip()
         lowered = text.lower()
         return self._contains_any(text, lowered, self.VAGUE_REQUESTS)
+
+    @staticmethod
+    def _requested_outputs(
+        *,
+        doc_requested: bool,
+        slides_requested: bool,
+        canvas_requested: bool,
+    ) -> tuple[str, ...]:
+        outputs: list[str] = []
+        if doc_requested:
+            outputs.append("doc")
+        if slides_requested:
+            outputs.append("slides")
+        if canvas_requested:
+            outputs.append("canvas")
+        return tuple(outputs)
 
     def _contains_any(self, text: str, lowered: str, keywords: tuple[str, ...]) -> bool:
         return any(keyword in text or keyword.lower() in lowered for keyword in keywords)

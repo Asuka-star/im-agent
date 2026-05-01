@@ -2,6 +2,7 @@ import json
 import logging
 import re
 import time
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -478,6 +479,18 @@ class FeishuWorkflowService:
         protocol = self._protocol_from_route_decision(route_decision)
         if protocol is None:
             return
+        existing_operation = self._normalize_operation(llm_result.get("operation") or llm_result.get("action"))
+        existing_object = self._normalize_object(llm_result.get("object") or llm_result.get("target"))
+        if (
+            route_decision.route in {"doc", "slides", "canvas"}
+            and existing_operation
+            and existing_object == route_decision.route
+        ):
+            protocol = RequestProtocol(
+                operation=existing_operation,
+                object=existing_object,
+                route=route_decision.route,
+            )
         self._store_request_protocol(llm_result, protocol)
         if route_decision.requested_outputs:
             llm_result["requested_outputs"] = list(route_decision.requested_outputs)
@@ -822,13 +835,340 @@ class FeishuWorkflowService:
         return DocTool.format_current_document_context(current_doc)
 
     def _context_tasks_for_message(self, message: FeishuMessageContext) -> list:
-        tasks = self.memory_service.get_current_tasks(message.session_id)
-        if tasks or message.chat_type != "p2p":
-            return tasks
-        return self.memory_service.get_team_current_tasks(
-            self._team_id_for_message(message),
-            current_session_id=message.session_id,
+        document_tasks = self._document_tasks_for_session(message.session_id)
+        document_updated_at = self._current_document_updated_at(message.session_id) if document_tasks else None
+        memory_tasks = []
+        try:
+            loaded_memory_tasks = self.memory_service.get_current_tasks(message.session_id)
+            memory_tasks = self._filter_memory_tasks_for_status(
+                loaded_memory_tasks,
+                document_updated_at=document_updated_at,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to load current task snapshot for status context: session_id=%s error=%s", message.session_id, exc)
+            memory_tasks = []
+        if not document_tasks and not memory_tasks and message.chat_type == "p2p":
+            try:
+                memory_tasks = self.memory_service.get_team_current_tasks(
+                    self._team_id_for_message(message),
+                    current_session_id=message.session_id,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to load team task snapshot for status context: session_id=%s error=%s", message.session_id, exc)
+                memory_tasks = []
+        pending_tasks = self._pending_discussion_tasks_for_message(message)
+        base_tasks = self._merge_status_task_sources(document_tasks, memory_tasks) if document_tasks else memory_tasks
+        merged = self._merge_status_task_sources(base_tasks, pending_tasks)
+        logger.info(
+            "Status task context resolved: session_id=%s document_tasks=%s memory_tasks=%s pending_tasks=%s final_tasks=%s source=%s",
+            message.session_id,
+            len(document_tasks),
+            len(memory_tasks),
+            len(pending_tasks),
+            len(merged),
+            "document" if document_tasks else "memory",
         )
+        return merged
+
+    def _current_document_updated_at(self, session_id: str) -> datetime | None:
+        try:
+            current_doc = self.session_document_service.get_current_document(session_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to load current document timestamp for status context: session_id=%s error=%s", session_id, exc)
+            return None
+        if not isinstance(current_doc, dict):
+            return None
+        return self._parse_datetime(current_doc.get("updated_at"))
+
+    def _filter_memory_tasks_for_status(self, tasks: list, *, document_updated_at: datetime | None) -> list:
+        if document_updated_at is None:
+            return tasks or []
+        fresh_tasks = []
+        for task in tasks or []:
+            task_created_at = self._parse_datetime(getattr(task, "created_at", None))
+            if task_created_at is not None and task_created_at > document_updated_at:
+                fresh_tasks.append(task)
+        return fresh_tasks
+
+    @staticmethod
+    def _parse_datetime(value: Any) -> datetime | None:
+        if isinstance(value, datetime):
+            return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+        if not value:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+        except ValueError:
+            return None
+
+    def _pending_discussion_tasks_for_message(self, message: FeishuMessageContext) -> list[TaskItem]:
+        try:
+            active_episode = self.memory_service.get_active_episode(message.session_id)
+            if active_episode is None:
+                return []
+            messages = self.memory_service.get_episode_messages(
+                message.session_id,
+                episode_id=active_episode.id,
+                exclude_message_id=message.message_id,
+                limit=20,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to load pending discussion tasks for status context: session_id=%s error=%s", message.session_id, exc)
+            return []
+        source_text = "\n".join(str(item.content or "").strip() for item in messages if str(item.content or "").strip())
+        if not source_text:
+            return []
+        if self.llm_service.is_configured():
+            try:
+                llm_result = self.llm_service.extract_collaboration(source_text)
+                llm_tasks = self._task_items_from_llm_payload(llm_result)
+                if llm_tasks:
+                    logger.info(
+                        "Pending discussion tasks extracted by LLM: session_id=%s tasks=%s",
+                        message.session_id,
+                        len(llm_tasks),
+                    )
+                    return normalize_task_dates(normalize_tasks(llm_tasks))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "LLM pending discussion task extraction failed, falling back to local parser: session_id=%s error=%s",
+                    message.session_id,
+                    exc,
+                )
+        return normalize_tasks(extract_tasks(source_text))
+
+    @staticmethod
+    def _merge_status_task_sources(primary: list, secondary: list) -> list:
+        merged: list[TaskItem] = []
+        seen: set[tuple[str, str]] = set()
+        for task in [*(primary or []), *(secondary or [])]:
+            title = str(getattr(task, "title", "") if not isinstance(task, dict) else task.get("title") or "").strip()
+            owner = str(getattr(task, "owner", "") if not isinstance(task, dict) else task.get("owner") or "").strip()
+            if not title:
+                continue
+            key = (title.lower(), owner.lower())
+            if key in seen:
+                continue
+            seen.add(key)
+            if isinstance(task, TaskItem):
+                merged.append(task)
+            elif isinstance(task, dict):
+                try:
+                    merged.append(TaskItem.model_validate(task))
+                except Exception:
+                    continue
+            else:
+                merged.append(
+                    TaskItem(
+                        title=title,
+                        owner=owner or "TBD",
+                        priority=str(getattr(task, "priority", "medium") or "medium"),
+                        due_date=str(getattr(task, "due_date", "TBD") or "TBD"),
+                        status=str(getattr(task, "status", "draft") or "draft"),
+                        notes=str(getattr(task, "notes", "") or ""),
+                    )
+                )
+        return merged
+
+    @staticmethod
+    def _task_items_from_llm_payload(payload: dict) -> list[TaskItem]:
+        raw_tasks = payload.get("tasks") if isinstance(payload, dict) else []
+        if not isinstance(raw_tasks, list):
+            return []
+        tasks: list[TaskItem] = []
+        for item in raw_tasks:
+            if not isinstance(item, dict):
+                continue
+            try:
+                tasks.append(TaskItem.model_validate(item))
+            except Exception:
+                continue
+        return tasks
+
+    def _document_tasks_for_session(self, session_id: str) -> list[TaskItem]:
+        try:
+            current_doc = self.session_document_service.get_current_document(session_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to load current document for status context: session_id=%s error=%s", session_id, exc)
+            return []
+        if not isinstance(current_doc, dict):
+            return []
+        snapshot = current_doc.get("section_snapshot")
+        if not isinstance(snapshot, list):
+            return []
+        return self._tasks_from_document_snapshot(snapshot)
+
+    def _tasks_from_document_snapshot(self, snapshot: list[dict]) -> list[TaskItem]:
+        tasks: list[TaskItem] = []
+        seen: set[tuple[str, str, str]] = set()
+        task_heading_markers = ("任务", "待办", "分工", "计划", "事项", "todo", "task")
+        for section in snapshot:
+            if not isinstance(section, dict):
+                continue
+            heading = str(section.get("heading") or "").strip()
+            paragraphs = section.get("paragraphs") if isinstance(section.get("paragraphs"), list) else []
+            in_task_section = any(marker in heading.lower() for marker in task_heading_markers)
+            pending_title = ""
+            for paragraph in paragraphs:
+                for raw_line in str(paragraph or "").splitlines():
+                    line = self._clean_document_task_line(raw_line)
+                    if not line:
+                        continue
+                    item = self._task_item_from_document_line(line, fallback_title=pending_title)
+                    if item is None and in_task_section and self._looks_like_task_title(line):
+                        pending_title = line
+                        continue
+                    if item is None:
+                        pending_title = ""
+                        continue
+                    key = (item.title.strip().lower(), item.owner.strip().lower(), item.due_date.strip().lower())
+                    if item.title and key not in seen:
+                        seen.add(key)
+                        tasks.append(item)
+                    pending_title = ""
+        return tasks
+
+    @staticmethod
+    def _clean_document_task_line(value: str) -> str:
+        text = str(value or "").strip()
+        text = re.sub(r"^\s*[-*]\s+", "", text)
+        text = re.sub(r"^\s*\d+[.)、]\s*", "", text)
+        text = text.strip()
+        if text.startswith("**") and text.endswith("**") and len(text) > 4:
+            text = text[2:-2].strip()
+        return text
+
+    @staticmethod
+    def _looks_like_task_title(line: str) -> bool:
+        text = str(line or "").strip()
+        if not text or len(text) > 40:
+            return False
+        if any(marker in text for marker in ("负责人", "截止", "到期", "优先级", "状态", "|")):
+            return False
+        if text.endswith(("。", "，", "；", ".", ",")):
+            return False
+        return True
+
+    def _task_item_from_document_line(self, line: str, *, fallback_title: str = "") -> TaskItem | None:
+        text = str(line or "").strip()
+        if not text:
+            return None
+        if "|" in text:
+            return self._task_item_from_pipe_row(text)
+        owner = self._field_value_from_text(text, ("负责人", "owner"))
+        due_date = self._field_value_from_text(text, ("截止", "到期", "due"))
+        priority = self._field_value_from_text(text, ("优先级", "priority")) or "medium"
+        status = self._field_value_from_text(text, ("状态", "status")) or "draft"
+        if not owner:
+            return None
+        title = fallback_title or self._title_before_first_field(text)
+        if not title:
+            return None
+        return TaskItem(title=title, owner=owner, due_date=due_date or "TBD", priority=priority, status=status)
+
+    def _task_item_from_pipe_row(self, line: str) -> TaskItem | None:
+        parts = [part.strip().strip("-") for part in str(line or "").split("|") if part.strip()]
+        if not parts:
+            return None
+        content_title = ""
+        speaker_note = ""
+        for part in parts:
+            if self._is_speaker_metadata(part):
+                speaker_note = part
+                continue
+            content_title = self._loose_labeled_value(part, ("内容", "任务内容", "任务描述", "描述", "需求"))
+            if content_title:
+                break
+        first_part_is_metadata = self._is_speaker_metadata(parts[0])
+        title = content_title if content_title else self._strip_inline_label(parts[0], ("任务", "事项", "标题"))
+        if first_part_is_metadata and not content_title:
+            title = ""
+        owner = ""
+        due_date = "TBD"
+        priority = "medium"
+        status = "draft"
+        notes: list[str] = []
+        for index, part in enumerate(parts[1:], start=1):
+            labeled_owner = self._field_value_from_text(part, ("负责人", "owner"))
+            labeled_due = self._field_value_from_text(part, ("截止", "到期", "due"))
+            labeled_priority = self._field_value_from_text(part, ("优先级", "priority"))
+            labeled_status = self._field_value_from_text(part, ("状态", "status"))
+            if labeled_owner:
+                owner = labeled_owner
+            elif labeled_due:
+                due_date = labeled_due
+            elif labeled_priority:
+                priority = labeled_priority
+            elif labeled_status:
+                status = labeled_status
+            elif index == 1 and not owner and not any(marker in part for marker in ("截止", "到期", "优先级", "状态")):
+                if not self._is_speaker_metadata(part) and not self._loose_labeled_value(
+                    part, ("内容", "任务内容", "任务描述", "描述", "需求")
+                ):
+                    owner = part
+            else:
+                if not self._loose_labeled_value(part, ("内容", "任务内容", "任务描述", "描述", "需求")):
+                    notes.append(part)
+        if not title:
+            return None
+        if speaker_note:
+            notes.append(speaker_note)
+        return TaskItem(
+            title=title,
+            owner=owner or "TBD",
+            due_date=due_date or "TBD",
+            priority=priority or "medium",
+            status=status or "draft",
+            notes="；".join(notes),
+        )
+
+    @staticmethod
+    def _is_speaker_metadata(text: str) -> bool:
+        value = str(text or "").strip()
+        if not value:
+            return False
+        return bool(re.match(r"^(发言人|发言者|用户|发送人|sender|speaker)\s*[:：]?\s*\S+", value, flags=re.IGNORECASE))
+
+    @staticmethod
+    def _loose_labeled_value(text: str, labels: tuple[str, ...]) -> str:
+        value = str(text or "").strip()
+        for label in labels:
+            match = re.match(rf"^{re.escape(label)}\s*[:：]?\s*(.+)$", value, flags=re.IGNORECASE)
+            if match:
+                return match.group(1).strip()
+        return ""
+
+    @staticmethod
+    def _strip_inline_label(text: str, labels: tuple[str, ...]) -> str:
+        value = str(text or "").strip()
+        for label in labels:
+            match = re.match(rf"^{re.escape(label)}\s*[:：]\s*(.+)$", value, flags=re.IGNORECASE)
+            if match:
+                return match.group(1).strip()
+        return value
+
+    @staticmethod
+    def _field_value_from_text(text: str, labels: tuple[str, ...]) -> str:
+        value = str(text or "").strip()
+        for label in labels:
+            match = re.search(
+                rf"{re.escape(label)}\s*[:：]\s*([^|，,；;\n]+)",
+                value,
+                flags=re.IGNORECASE,
+            )
+            if match:
+                return match.group(1).strip()
+        return ""
+
+    @staticmethod
+    def _title_before_first_field(text: str) -> str:
+        value = str(text or "").strip()
+        match = re.split(r"\s*(?:负责人|owner|截止|到期|due|优先级|priority|状态|status)\s*[:：]", value, maxsplit=1)
+        return match[0].strip(" -:：|") if match else ""
 
     def _context_payload_for_message(self, message: FeishuMessageContext) -> dict:
         payload = self.memory_service.load_memory_payload(message.session_id)
@@ -937,6 +1277,14 @@ class FeishuWorkflowService:
             llm_result=llm_result,
             instruction=message.text,
             protocol=protocol,
+        )
+        logger.info(
+            "Execution plan resolved: message_id=%s route=%s operation=%s object=%s steps=%s",
+            message.message_id,
+            plan.primary_intent,
+            llm_result.get("operation"),
+            llm_result.get("object"),
+            [step.step_type for step in plan.steps],
         )
         plan_artifact = self._build_plan_artifact(plan=plan, reason=reason, llm_result=llm_result)
         if task_run_id:
@@ -1217,7 +1565,11 @@ class FeishuWorkflowService:
                 target_document=target_document,
             )
         if step.step_type == "answer_status":
-            return self._prepare_status_execution(message, llm_result=llm_result)
+            return self._prepare_status_execution(
+                message,
+                llm_result=llm_result,
+                active_episode_id=active_episode_id,
+            )
         if step.step_type == "analyze_discussion":
             return self._prepare_analysis_execution(
                 message,
@@ -1311,6 +1663,15 @@ class FeishuWorkflowService:
             str(package.get("title") or "协同文档"),
             stats_as_of=str(package.get("stats_as_of") or "").strip() or None,
         )
+        edit_plan = package.get("artifact_edit_plan") if isinstance(package.get("artifact_edit_plan"), dict) else {}
+        logger.info(
+            "Starting document sync: message_id=%s session_id=%s sections=%s has_edit_plan=%s target_document=%s",
+            message.message_id,
+            message.session_id,
+            len(package.get("sections", [])) if isinstance(package.get("sections"), list) else 0,
+            bool(edit_plan),
+            bool(target_document),
+        )
         sync_result = self._sync_package_to_session_doc(
             package,
             session_id=message.session_id,
@@ -1335,18 +1696,67 @@ class FeishuWorkflowService:
             "close_title": str(package.get("title") or "doc"),
         }
 
-    def _prepare_status_execution(self, message: FeishuMessageContext, *, llm_result: dict) -> dict:
-        status_answer = str(llm_result.get("status_answer") or "").strip()
-        if not status_answer:
-            tasks = self._context_tasks_for_message(message)
-            payload = self._context_payload_for_message(message)
-            status_answer = self._format_status_reply(message.text, tasks, payload)
+    def _prepare_status_execution(
+        self,
+        message: FeishuMessageContext,
+        *,
+        llm_result: dict,
+        active_episode_id: int | None = None,
+    ) -> dict:
+        tasks = self._context_tasks_for_message(message)
+        payload = self._context_payload_for_message(message)
+        status_answer = self._format_status_reply(message.text, tasks, payload)
+        if active_episode_id is not None and tasks:
+            self._persist_status_task_snapshot(
+                message.session_id,
+                tasks,
+                episode_id=active_episode_id,
+            )
         return {
             "reply_preview": status_answer,
             "analysis": None,
             "artifacts": [],
             "close_title": None,
         }
+
+    def _persist_status_task_snapshot(
+        self,
+        session_id: str,
+        tasks: list,
+        *,
+        episode_id: int | None,
+    ) -> None:
+        normalized_tasks: list[TaskItem] = []
+        for task in tasks:
+            if isinstance(task, TaskItem):
+                normalized_tasks.append(task)
+                continue
+            try:
+                normalized_tasks.append(TaskItem.model_validate(task))
+            except Exception:
+                continue
+        if not normalized_tasks:
+            return
+        risks = infer_risks(normalized_tasks)
+        analysis = AnalyzeResponse(
+            session_id=session_id,
+            summary="根据当前文档和最新讨论刷新任务快照。",
+            tasks=normalized_tasks,
+            risks=risks,
+            next_actions=build_next_actions(normalized_tasks, risks),
+            agent_traces=[AgentTrace(agent="status", summary="persisted task snapshot from status query")],
+        )
+        try:
+            self.memory_service.save_round(
+                session_id=session_id,
+                analysis=analysis,
+                episode_id=episode_id,
+                embed=False,
+                async_embed=False,
+                preserve_unmatched_previous=False,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to persist status task snapshot: session_id=%s error=%s", session_id, exc)
 
     def _prepare_analysis_execution(
         self,
@@ -1838,6 +2248,7 @@ class FeishuWorkflowService:
 
         provider = "local"
         revised_package: dict
+        edit_plan = presentation_tool.plan_revision(current_package, cleaned_instruction)
         self.task_run_service.update_task_run(task_run.task_run_id, stage="slides_revision_processing")
         if self.llm_service.is_configured():
             try:
@@ -1846,6 +2257,17 @@ class FeishuWorkflowService:
                     workspace_context,
                     cleaned_instruction,
                 )
+                edit_plan = presentation_tool.plan_revision(
+                    current_package,
+                    cleaned_instruction,
+                    revised_package,
+                )
+                if edit_plan.mutation_required and not presentation_tool.package_changed(current_package, revised_package):
+                    revised_package = presentation_tool.revise_deterministic(
+                        current_package,
+                        cleaned_instruction,
+                        edit_plan=edit_plan,
+                    )
                 provider = "llm"
                 self.task_run_service.upsert_step(
                     task_run.task_run_id,
@@ -1860,6 +2282,7 @@ class FeishuWorkflowService:
                 revised_package = presentation_tool.revise_deterministic(
                     current_package,
                     cleaned_instruction,
+                    edit_plan=edit_plan,
                 )
                 provider = "fallback"
                 self.task_run_service.upsert_step(
@@ -1871,7 +2294,16 @@ class FeishuWorkflowService:
                     error=str(exc),
                 )
         else:
-            revised_package = presentation_tool.revise_deterministic(current_package, cleaned_instruction)
+            revised_package = presentation_tool.revise_deterministic(
+                current_package,
+                cleaned_instruction,
+                edit_plan=edit_plan,
+            )
+
+        if edit_plan.mutation_required and not presentation_tool.package_changed(current_package, revised_package):
+            error = "Slides revision produced no visible artifact changes; please clarify the target page or edit."
+            self.task_run_service.update_task_run(task_run.task_run_id, status="failed", error=error)
+            raise ValueError(error)
 
         base_version = coerce_positive_int(
             current_package.get("version") or presentation_tool.artifact_field(source_artifact, "version")
@@ -2109,12 +2541,20 @@ class FeishuWorkflowService:
             return self._handle_fallback_slides(message, active_episode_id, task_run_id=task_run_id)
         if decision.mode == "doc":
             return self._handle_fallback_doc(message, active_episode_id, task_run_id=task_run_id)
+        if decision.mode == "canvas":
+            return self._handle_fallback_canvas(message, active_episode_id, task_run_id=task_run_id)
 
         if decision.mode == "status":
             tasks = self._context_tasks_for_message(message)
             payload = self._context_payload_for_message(message)
+            if active_episode_id is not None and tasks:
+                self._persist_status_task_snapshot(
+                    message.session_id,
+                    tasks,
+                    episode_id=active_episode_id,
+                )
             reply_preview = self._format_status_reply(message.text, tasks, payload)
-            return self._deliver_reply(message, "status", reply_preview, analysis=None)
+            return self._deliver_reply(message, "status", reply_preview, analysis=None, episode_id=active_episode_id)
 
         discussion_block = self.memory_service.build_discussion_block(
             message.session_id,
@@ -2182,6 +2622,40 @@ class FeishuWorkflowService:
         )
         if active_episode_id is not None and self._should_close_episode(result, reply_preview):
             self.memory_service.close_active_episode(message.session_id, title="slides")
+        return result
+
+    def _handle_fallback_canvas(
+        self,
+        message: FeishuMessageContext,
+        active_episode_id: int | None,
+        *,
+        task_run_id: str | None = None,
+    ) -> dict:
+        try:
+            workspace_context = self._build_workspace_context_for_message(
+                message,
+                active_episode_id=active_episode_id,
+                include_semantic_search=False,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Canvas fallback context loading failed, using instruction only: %s", exc)
+            workspace_context = ""
+        step_result = self._prepare_canvas_execution(
+            message,
+            llm_result={},
+            workspace_context=workspace_context,
+            task_run_id=task_run_id,
+        )
+        result = self._deliver_reply(
+            message,
+            "canvas",
+            step_result.get("reply_preview"),
+            analysis=None,
+            episode_id=active_episode_id,
+            artifacts=step_result.get("artifacts", []),
+        )
+        if active_episode_id is not None and self._should_close_episode(result, str(step_result.get("reply_preview") or "")):
+            self.memory_service.close_active_episode(message.session_id, title=str(step_result.get("close_title") or "canvas"))
         return result
 
     def _handle_fallback_doc(
@@ -2253,8 +2727,7 @@ class FeishuWorkflowService:
         if provided_package:
             return provided_package
 
-        wants_outline = any(keyword in instruction for keyword in ("汇报", "路演", "大纲", "PPT", "ppt", "演示"))
-        if wants_outline:
+        if self._should_include_slides_step("doc", instruction, llm_result):
             slides = llm_result.get("slides")
             if not isinstance(slides, dict) or not slides.get("slides"):
                 try:
@@ -2297,7 +2770,7 @@ class FeishuWorkflowService:
         if provided_package:
             return provided_package, None
 
-        if self._is_outline_request(instruction):
+        if self._should_include_slides_step("doc", instruction, llm_result):
             package = self._build_document_package_from_workspace(
                 session_id=session_id,
                 instruction=instruction,
@@ -2417,12 +2890,14 @@ class FeishuWorkflowService:
         updated_sections: list[dict],
         *,
         deleted_headings: list[str] | None = None,
+        delete_ranges: list[dict[str, object]] | None = None,
         rename_map: dict[str, str] | None = None,
     ) -> list[dict[str, list[str]]]:
         return DocTool.merge_doc_section_snapshots(
             previous_snapshot,
             updated_sections,
             deleted_headings=deleted_headings,
+            delete_ranges=delete_ranges,
             rename_map=rename_map,
         )
 
@@ -2439,6 +2914,7 @@ class FeishuWorkflowService:
         deleted_headings: list[str] | None = None,
         renamed_headings: list[str] | None = None,
         patched_headings: list[str] | None = None,
+        unmatched_operation_targets: list[str] | None = None,
         folder_scope: str | None = None,
         folder_url: str | None = None,
         folder_note: str | None = None,
@@ -2454,6 +2930,7 @@ class FeishuWorkflowService:
             deleted_headings=deleted_headings,
             renamed_headings=renamed_headings,
             patched_headings=patched_headings,
+            unmatched_operation_targets=unmatched_operation_targets,
             folder_scope=folder_scope,
             folder_url=folder_url,
             folder_note=folder_note,

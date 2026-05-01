@@ -70,18 +70,31 @@ class LLMService:
 
     def resolve_doc_request(self, workspace_context: str, instruction: str) -> dict[str, Any]:
         self._ensure_configured()
+        edit_intent: dict[str, Any] | None = None
+        if self._instruction_needs_doc_edit_intent(instruction, workspace_context):
+            try:
+                edit_intent = self.resolve_doc_edit_intent(workspace_context, instruction)
+            except Exception as exc:  # pragma: no cover - defensive external LLM fallback
+                logger.warning("LLM doc edit intent parsing failed, falling back to doc draft prompt: %s", exc)
         payload = self._json_payload(
             system_prompt=self._doc_request_prompt(),
             user_content=self._context_request_content(workspace_context, instruction),
             temperature=0.2,
         )
         result = self._chat_json(payload, request_name="resolve_doc_request", timeout_seconds=settings.llm_timeout_seconds)
+        if isinstance(edit_intent, dict):
+            edit_plan = edit_intent.get("artifact_edit_plan")
+            if self._is_meaningful_artifact_edit_plan(edit_plan):
+                result["artifact_edit_plan"] = edit_plan
+            if edit_intent.get("reason") and not result.get("reason"):
+                result["reason"] = edit_intent["reason"]
         doc = result.get("doc") if isinstance(result.get("doc"), dict) else {}
         logger.info(
-            "LLM doc request resolved: sections=%s",
+            "LLM doc request resolved: sections=%s edit_intent=%s",
             len(doc.get("sections", [])) if isinstance(doc.get("sections"), list) else 0,
+            bool(edit_intent),
         )
-        result["operation"] = "create"
+        result["operation"] = result.get("operation") or result.get("action") or "create"
         result["object"] = "doc"
         result["route"] = "doc"
         result.setdefault("reason", "用户要求生成或更新协作文档")
@@ -98,6 +111,28 @@ class LLMService:
                     }
                 ],
             },
+        )
+        return result
+
+    def resolve_doc_edit_intent(self, workspace_context: str, instruction: str) -> dict[str, Any]:
+        self._ensure_configured()
+        payload = self._json_payload(
+            system_prompt=self._doc_edit_intent_prompt(),
+            user_content=self._context_request_content(workspace_context, instruction),
+            temperature=0.0,
+        )
+        result = self._chat_json(
+            payload,
+            request_name="resolve_doc_edit_intent",
+            timeout_seconds=settings.llm_memory_gate_timeout_seconds,
+        )
+        edit_plan = result.get("artifact_edit_plan") if isinstance(result.get("artifact_edit_plan"), dict) else {}
+        ops = edit_plan.get("ops") if isinstance(edit_plan.get("ops"), list) else []
+        logger.info(
+            "LLM doc edit intent resolved: mutation=%s ops=%s fallback=%s",
+            edit_plan.get("mutation_required"),
+            len(ops),
+            edit_plan.get("fallback"),
         )
         return result
 
@@ -211,11 +246,17 @@ class LLMService:
             ),
             temperature=0.25,
         )
-        return self._chat_json(
+        result = self._chat_json(
             payload,
             request_name="revise_presentation_package",
             timeout_seconds=settings.llm_timeout_seconds,
         )
+        if isinstance(result.get("package"), dict):
+            package = dict(result["package"])
+            if isinstance(result.get("artifact_edit_plan"), dict):
+                package["artifact_edit_plan"] = result["artifact_edit_plan"]
+            return package
+        return result
 
     def _ensure_configured(self) -> None:
         if not self.is_configured():
@@ -269,8 +310,70 @@ class LLMService:
     def _doc_request_prompt(self) -> str:
         return self.prompts.doc_request()
 
+    def _doc_edit_intent_prompt(self) -> str:
+        return self.prompts.doc_edit_intent()
+
     def _analysis_request_prompt(self, route: str) -> str:
         return self.prompts.analysis_request(route)
 
     def _memory_gate_prompt(self) -> str:
         return self.prompts.memory_gate()
+
+    @staticmethod
+    def _instruction_needs_doc_edit_intent(instruction: str, workspace_context: str = "") -> bool:
+        instruction_text = instruction.lower()
+        context_text = workspace_context[:1200].lower()
+        mutation_markers = (
+            "删除",
+            "删掉",
+            "移除",
+            "去掉",
+            "清空",
+            "更新",
+            "修改",
+            "改写",
+            "重写",
+            "重新整理",
+            "补充",
+            "新增",
+            "添加",
+            "追加",
+            "重命名",
+            "改名",
+            "改成",
+            "移动",
+            "调整",
+            "排序",
+            "规范",
+            "格式",
+            "压缩",
+            "精简",
+            "delete",
+            "remove",
+            "clear",
+            "update",
+            "modify",
+            "rewrite",
+            "append",
+            "add",
+            "rename",
+            "move",
+            "format",
+            "compress",
+        )
+        target_markers = ("文档", "doc", "document", "小节", "栏目", "标题", "段落", "section", "heading")
+        has_mutation = any(marker in instruction_text for marker in mutation_markers)
+        has_target = any(marker in instruction_text for marker in target_markers) or "[当前协作文档]" in workspace_context
+        if has_mutation and has_target:
+            return True
+        range_markers = ("后面", "之后", "以下", "以前", "之前", "以上", "这一组", "本组", "之间", "below", "after", "before", "between")
+        return has_mutation and any(marker in instruction_text for marker in range_markers) and bool(context_text)
+
+    @staticmethod
+    def _is_meaningful_artifact_edit_plan(edit_plan: Any) -> bool:
+        if not isinstance(edit_plan, dict):
+            return False
+        ops = edit_plan.get("ops")
+        if isinstance(ops, list) and ops:
+            return True
+        return bool(edit_plan.get("mutation_required"))

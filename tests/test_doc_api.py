@@ -113,6 +113,26 @@ class AsciiBlockOpsClient(BlockOpsClient):
             _text_block("p_next_ascii", "Old next step"),
         ]
 
+
+class UpdateLogBlockOpsClient(BlockOpsClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.children = [
+            _heading_block("h_intro", "Project Background"),
+            _text_block("p_intro", "Keep intro"),
+            _heading_block("h_update_1", "Update (2026-04-29 15:43)"),
+            _text_block("p_trigger_1", "Trigger: old summary"),
+            _heading_block("h_refresh_1", "refresh: Project Background"),
+            _text_block("p_refresh_1", "Old generated background"),
+            _heading_block("h_refresh_2", "refresh: Risks"),
+            _text_block("p_refresh_2", "Old generated risk"),
+            _heading_block("h_update_2", "Update (2026-04-29 16:09)"),
+            _text_block("p_trigger_2", "Trigger: newer update"),
+            _heading_block("h_current", "Current Tasks"),
+            _text_block("p_current", "Keep current tasks"),
+        ]
+
+
 def _heading_block(block_id: str, content: str) -> dict:
     return {
         "block_id": block_id,
@@ -308,6 +328,196 @@ class DocApiTests(unittest.TestCase):
         delete_call = next(call for call in client.calls if call["method"] == "DELETE")
         self.assertEqual(delete_call["json"], {"start_index": 4, "end_index": 6})
         self.assertEqual(payload["deleted_headings"], ["Next Steps"])
+
+    def test_replace_document_sections_deletes_whole_update_log_group(self) -> None:
+        client = UpdateLogBlockOpsClient()
+        api = FeishuDocAPI(auth_service=DummyAuthService(), client=client, state_service=DummyStateService())
+
+        payload = api.replace_document_sections(
+            "doc-token",
+            "Test Document",
+            [],
+            delete_headings=["Update (2026-04-29 15:43)"],
+        )
+
+        delete_call = next(call for call in client.calls if call["method"] == "DELETE")
+        self.assertEqual(delete_call["json"], {"start_index": 2, "end_index": 8})
+        remaining_headings = [
+            api._block_text_content(block)
+            for block in client.children
+            if int(block.get("block_type") or 0) in range(3, 12)
+        ]
+        self.assertEqual(remaining_headings, ["Project Background", "Update (2026-04-29 16:09)", "Current Tasks"])
+        self.assertEqual(payload["deleted_headings"], ["Update (2026-04-29 15:43)"])
+
+    def test_replace_document_sections_deletes_after_anchor_range(self) -> None:
+        client = BlockOpsClient()
+        api = FeishuDocAPI(auth_service=DummyAuthService(), client=client, state_service=DummyStateService())
+
+        payload = api.replace_document_sections(
+            "doc-token",
+            "测试文档",
+            [],
+            delete_ranges=[
+                {
+                    "scope": "after",
+                    "anchor": "风险与卡点",
+                    "include_anchor": False,
+                    "label": "风险与卡点 之后",
+                }
+            ],
+        )
+
+        delete_call = next(call for call in client.calls if call["method"] == "DELETE")
+        self.assertEqual(delete_call["json"], {"start_index": 4, "end_index": 6})
+        remaining_headings = [
+            api._block_text_content(block)
+            for block in client.children
+            if int(block.get("block_type") or 0) in range(3, 12)
+        ]
+        self.assertEqual(remaining_headings, ["讨论摘要", "风险与卡点"])
+        self.assertEqual(payload["deleted_headings"], ["风险与卡点 之后"])
+        self.assertEqual(
+            payload["section_snapshot"],
+            [
+                {"heading": "讨论摘要", "paragraphs": ["旧摘要"]},
+                {"heading": "风险与卡点", "paragraphs": ["旧风险"]},
+            ],
+        )
+
+    def test_replace_document_sections_reports_unmatched_delete_range(self) -> None:
+        client = BlockOpsClient()
+        api = FeishuDocAPI(auth_service=DummyAuthService(), client=client, state_service=DummyStateService())
+
+        payload = api.replace_document_sections(
+            "doc-token",
+            "测试文档",
+            [],
+            delete_ranges=[
+                {
+                    "scope": "after",
+                    "anchor": "后续计划",
+                    "include_anchor": False,
+                    "label": "后续计划 之后",
+                }
+            ],
+        )
+
+        self.assertFalse(any(call.get("method") == "DELETE" for call in client.calls))
+        remaining_headings = [
+            api._block_text_content(block)
+            for block in client.children
+            if int(block.get("block_type") or 0) in range(3, 12)
+        ]
+        self.assertEqual(remaining_headings, ["讨论摘要", "风险与卡点", "下一步建议"])
+        self.assertEqual(payload["deleted_headings"], [])
+        self.assertEqual(payload["unmatched_delete_ranges"], ["后续计划 之后"])
+
+    def test_replace_document_sections_reports_unmatched_update_target(self) -> None:
+        client = BlockOpsClient()
+        api = FeishuDocAPI(auth_service=DummyAuthService(), client=client, state_service=DummyStateService())
+
+        payload = api.replace_document_sections(
+            "doc-token",
+            "测试文档",
+            [{"heading": "后续计划", "paragraphs": ["新计划"]}],
+            target_headings=["后续计划"],
+        )
+
+        self.assertFalse(any(call.get("method") == "POST" for call in client.calls))
+        self.assertEqual(payload["appended_headings"], [])
+        self.assertEqual(payload["unmatched_update_headings"], ["后续计划"])
+
+    def test_replace_document_sections_allows_explicit_append_target(self) -> None:
+        client = BlockOpsClient()
+        api = FeishuDocAPI(auth_service=DummyAuthService(), client=client, state_service=DummyStateService())
+
+        payload = api.replace_document_sections(
+            "doc-token",
+            "测试文档",
+            [{"heading": "验收标准", "paragraphs": ["新增验收"]}],
+            target_headings=["验收标准"],
+            append_headings=["验收标准"],
+        )
+
+        post_call = next(call for call in client.calls if call.get("method") == "POST")
+        self.assertEqual(len(post_call["json"]["children"]), 2)
+        self.assertEqual(payload["appended_headings"], ["验收标准"])
+        self.assertEqual(payload["unmatched_update_headings"], [])
+
+    def test_replace_document_sections_reports_unmatched_rename_source(self) -> None:
+        client = BlockOpsClient()
+        api = FeishuDocAPI(auth_service=DummyAuthService(), client=client, state_service=DummyStateService())
+
+        payload = api.replace_document_sections(
+            "doc-token",
+            "测试文档",
+            [{"heading": "关键风险", "paragraphs": ["新风险"]}],
+            target_headings=["关键风险"],
+            rename_map={"不存在的风险": "关键风险"},
+        )
+
+        self.assertFalse(any(call.get("method") == "PATCH" for call in client.calls))
+        self.assertFalse(any(call.get("method") == "POST" for call in client.calls))
+        self.assertEqual(payload["renamed_headings"], [])
+        self.assertEqual(payload["unmatched_rename_headings"], ["不存在的风险"])
+
+    def test_replace_document_sections_clears_anchor_body(self) -> None:
+        client = BlockOpsClient()
+        api = FeishuDocAPI(auth_service=DummyAuthService(), client=client, state_service=DummyStateService())
+
+        payload = api.replace_document_sections(
+            "doc-token",
+            "测试文档",
+            [],
+            delete_ranges=[
+                {
+                    "scope": "body",
+                    "anchor": "风险与卡点",
+                    "include_anchor": False,
+                    "label": "风险与卡点 正文",
+                }
+            ],
+        )
+
+        delete_call = next(call for call in client.calls if call["method"] == "DELETE")
+        self.assertEqual(delete_call["json"], {"start_index": 3, "end_index": 4})
+        remaining_headings = [
+            api._block_text_content(block)
+            for block in client.children
+            if int(block.get("block_type") or 0) in range(3, 12)
+        ]
+        self.assertEqual(remaining_headings, ["讨论摘要", "风险与卡点", "下一步建议"])
+        self.assertEqual(payload["deleted_headings"], ["风险与卡点 正文"])
+
+    def test_replace_document_sections_deletes_between_anchors(self) -> None:
+        client = BlockOpsClient()
+        api = FeishuDocAPI(auth_service=DummyAuthService(), client=client, state_service=DummyStateService())
+
+        payload = api.replace_document_sections(
+            "doc-token",
+            "测试文档",
+            [],
+            delete_ranges=[
+                {
+                    "scope": "between",
+                    "anchor": "讨论摘要",
+                    "stop_at": "下一步建议",
+                    "include_anchor": False,
+                    "label": "讨论摘要 到 下一步建议 之间",
+                }
+            ],
+        )
+
+        delete_call = next(call for call in client.calls if call["method"] == "DELETE")
+        self.assertEqual(delete_call["json"], {"start_index": 2, "end_index": 4})
+        remaining_headings = [
+            api._block_text_content(block)
+            for block in client.children
+            if int(block.get("block_type") or 0) in range(3, 12)
+        ]
+        self.assertEqual(remaining_headings, ["讨论摘要", "下一步建议"])
+        self.assertEqual(payload["deleted_headings"], ["讨论摘要 到 下一步建议 之间"])
 
     def test_replace_document_sections_can_rename_heading_and_patch_body(self) -> None:
         client = AsciiBlockOpsClient()

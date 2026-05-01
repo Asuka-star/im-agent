@@ -4090,22 +4090,30 @@ class _SlideCard extends StatelessWidget {
               context,
             ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
           ),
-          const SizedBox(height: 10),
-          ...bullets
-              .take(4)
-              .map(
-                (bullet) => Padding(
-                  padding: const EdgeInsets.only(bottom: 6),
-                  child: Text(
-                    '• $bullet',
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(
-                      context,
-                    ).textTheme.bodySmall?.copyWith(height: 1.45),
-                  ),
-                ),
+          if (bullets.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            Expanded(
+              child: ListView.builder(
+                padding: EdgeInsets.zero,
+                primary: false,
+                itemCount: bullets.take(4).length,
+                itemBuilder: (context, bulletIndex) {
+                  final bullet = bullets[bulletIndex];
+                  return Padding(
+                    padding: const EdgeInsets.only(bottom: 6),
+                    child: Text(
+                      '• $bullet',
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(
+                        context,
+                      ).textTheme.bodySmall?.copyWith(height: 1.45),
+                    ),
+                  );
+                },
               ),
+            ),
+          ],
         ],
       ),
     );

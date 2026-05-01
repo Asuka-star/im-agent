@@ -528,6 +528,30 @@ class LLMTaskOperationTests(unittest.TestCase):
         self.assertEqual([step.step_type for step in plan.steps], ["sync_doc", "generate_slides"])
         self.assertEqual(plan.steps[1].depends_on, ["step_1"])
 
+    def test_doc_response_package_uses_requested_outputs_for_slides_without_keywords(self) -> None:
+        with patch.object(self.service, "_resolve_doc_stats_as_of", return_value=None):
+            package, analysis = self.service._build_doc_response_package(
+                session_id="doc_requested_outputs_session",
+                instruction="write this into a collaboration document",
+                llm_result={
+                    "requested_outputs": ["doc", "slides"],
+                    "slides": {
+                        "theme": "Launch Review",
+                        "audience": "Team",
+                        "slides": [
+                            {"title": "Context", "bullets": ["Goal"]},
+                        ],
+                    },
+                },
+                workspace_context="Discussion context",
+                episode_id=None,
+                reason="test",
+                source_message_id=None,
+            )
+
+        self.assertIsNone(analysis)
+        self.assertTrue(any(section["heading"].startswith("P1.") for section in package["sections"]))
+
     def test_doc_instruction_overrides_summary_protocol(self) -> None:
         llm_result = {
             "operation": "analyze",
@@ -592,6 +616,23 @@ class LLMTaskOperationTests(unittest.TestCase):
         protocol = self.service._normalize_request_protocol(llm_result)
 
         self.assertEqual(protocol.operation, "create")
+        self.assertEqual(protocol.object, "doc")
+        self.assertEqual(protocol.route, "doc")
+
+    def test_route_decision_preserves_artifact_mutation_operation(self) -> None:
+        llm_result = {
+            "operation": "delete",
+            "object": "doc",
+            "reason": "remove a document section",
+        }
+
+        self.service._apply_route_decision_to_llm_result(
+            llm_result,
+            RouteDecision(route="doc", source="rule", confidence=0.98, reason="doc rule matched"),
+        )
+        protocol = self.service._normalize_request_protocol(llm_result)
+
+        self.assertEqual(protocol.operation, "update")
         self.assertEqual(protocol.object, "doc")
         self.assertEqual(protocol.route, "doc")
 

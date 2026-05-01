@@ -134,6 +134,28 @@ class CanvasArtifactTests(unittest.TestCase):
         self.assertEqual(artifact["title"], "Architecture")
         self.assertEqual(artifact["preview"]["schema"], "im-agent.canvas.v1")
 
+    def test_workflow_fallback_canvas_request_creates_canvas_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workflow = FeishuWorkflowService()
+            workflow.canvas_artifact_service = CanvasArtifactService(root_dir=Path(tmpdir))
+            message = SimpleNamespace(
+                session_id="s1",
+                message_id="m1",
+                text="帮我画一个流程图",
+                chat_id=None,
+                chat_type="group",
+            )
+
+            result = workflow._handle_fallback_request(
+                message,
+                active_episode_id=None,
+                task_run_id=None,
+            )
+
+        artifact = next(item for item in result["artifacts"] if item["artifact_type"] == "canvas")
+        self.assertEqual(result["mode"], "canvas")
+        self.assertEqual(artifact["preview"]["schema"], "im-agent.canvas.v1")
+
 
 if __name__ == "__main__":
     unittest.main()

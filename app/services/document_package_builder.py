@@ -28,11 +28,20 @@ class DocumentPackageBuilder:
             instruction,
             stats_as_of=stats_as_of,
         )
-        return {
+        package = {
             "title": self.compose_title(base_title, stats_as_of=stats_as_of),
             "stats_as_of": stats_as_of,
             "sections": DocTool.normalize_doc_sections(sections),
         }
+        edit_plan = (
+            llm_result.get("artifact_edit_plan")
+            or llm_result.get("edit_plan")
+            or provided.get("artifact_edit_plan")
+            or provided.get("edit_plan")
+        )
+        if isinstance(edit_plan, dict):
+            package["artifact_edit_plan"] = edit_plan
+        return package
 
     @staticmethod
     def is_outline_request(instruction: str) -> bool:

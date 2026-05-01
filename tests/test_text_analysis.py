@@ -60,6 +60,13 @@ class TextAnalysisTests(unittest.TestCase):
         tasks = normalize_tasks(extract_tasks("帮我把刚才讨论同步到表格"))
         self.assertEqual(tasks, [])
 
+    def test_extract_tasks_from_come_do_assignment(self) -> None:
+        tasks = normalize_tasks(extract_tasks("王五来做产品经理，来协调前端和后端的开发"))
+
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(tasks[0].owner, "王五")
+        self.assertEqual(tasks[0].title, "产品经理协调前后端开发")
+
 
 if __name__ == "__main__":
     unittest.main()

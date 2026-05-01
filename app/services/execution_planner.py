@@ -54,6 +54,20 @@ class ExecutionPlanner:
     ) -> RequestProtocol:
         if protocol.object in {"doc", "slides"}:
             return protocol
+        if protocol.operation in {"read", "help", "unknown"}:
+            self.store_request_protocol(llm_result, protocol)
+            return protocol
+        requested_outputs = self.requested_output_set(llm_result)
+        if "doc" in requested_outputs:
+            operation = "update" if protocol.operation == "update" else "create"
+            adjusted = RequestProtocol(operation=operation, object="doc", route="doc")
+            self.store_request_protocol(llm_result, adjusted)
+            return adjusted
+        if "slides" in requested_outputs:
+            operation = "update" if protocol.operation == "update" else "create"
+            adjusted = RequestProtocol(operation=operation, object="slides", route="slides")
+            self.store_request_protocol(llm_result, adjusted)
+            return adjusted
         if not (
             self.instruction_requests_doc(instruction)
             or self.llm_result_has_doc_package(llm_result)
@@ -63,6 +77,7 @@ class ExecutionPlanner:
 
         operation = "update" if protocol.operation == "update" else "create"
         adjusted = RequestProtocol(operation=operation, object="doc", route="doc")
+        self.ensure_requested_output(llm_result, "doc")
         self.store_request_protocol(llm_result, adjusted)
         return adjusted
 
@@ -127,6 +142,10 @@ class ExecutionPlanner:
             "write": "create",
             "sync": "create",
             "update": "update",
+            "delete": "update",
+            "remove": "update",
+            "drop": "update",
+            "edit": "update",
             "revise": "update",
             "modify": "update",
             "deliver": "deliver",
@@ -222,22 +241,30 @@ class ExecutionPlanner:
             return "unknown"
         return "help"
 
-    @staticmethod
-    def allowed_steps_for_protocol(protocol: RequestProtocol) -> set[str]:
+    def allowed_steps_for_protocol(self, protocol: RequestProtocol, llm_result: dict | None = None) -> set[str]:
         if protocol.operation == "read":
             return {"answer_status"}
         if protocol.operation == "analyze":
             return {"analyze_discussion"}
         if protocol.operation in {"create", "update"}:
             if protocol.object == "doc":
-                return {"sync_doc", "generate_slides"}
-            if protocol.object == "slides":
-                return {"generate_slides"}
-            if protocol.object == "canvas":
-                return {"generate_canvas"}
-            if protocol.object == "tasks":
+                allowed = {"sync_doc"}
+            elif protocol.object == "slides":
+                allowed = {"generate_slides"}
+            elif protocol.object == "canvas":
+                allowed = {"generate_canvas"}
+            elif protocol.object == "tasks":
                 return {"analyze_discussion"}
-            return {"reply_help"}
+            else:
+                return {"reply_help"}
+            for output in self.requested_output_set(llm_result or {}):
+                if output == "doc":
+                    allowed.add("sync_doc")
+                elif output == "slides":
+                    allowed.add("generate_slides")
+                elif output == "canvas":
+                    allowed.add("generate_canvas")
+            return allowed
         return {"reply_help"}
 
     @staticmethod
@@ -319,7 +346,7 @@ class ExecutionPlanner:
         instruction: str,
         llm_result: dict,
     ) -> ExecutionPlan:
-        allowed_steps = self.allowed_steps_for_protocol(protocol)
+        allowed_steps = self.allowed_steps_for_protocol(protocol, llm_result)
         filtered_steps = [step for step in plan.steps if step.step_type in allowed_steps]
         required_step = self.required_step_for_protocol(protocol)
         if filtered_steps and any(step.step_type == required_step for step in filtered_steps):
@@ -336,29 +363,6 @@ class ExecutionPlanner:
             instruction=instruction,
             llm_result=llm_result,
         )
-
-    def append_optional_plan_steps_for_protocol(
-        self,
-        steps: list[PlannerStep],
-        *,
-        protocol: RequestProtocol,
-        instruction: str,
-        llm_result: dict,
-    ) -> list[PlannerStep]:
-        if protocol.route != "doc" or not self.should_include_slides_step("doc", instruction, llm_result):
-            return steps
-        if any(step.step_type == "generate_slides" for step in steps):
-            return steps
-        dependency = steps[-1].step_id if steps else None
-        return [
-            *steps,
-            PlannerStep(
-                step_id=f"step_{len(steps) + 1}",
-                step_type="generate_slides",
-                title="基于当前文档生成演示稿",
-                depends_on=[dependency] if dependency else [],
-            ),
-        ]
 
     def normalize_execution_plan(
         self,
@@ -406,6 +410,7 @@ class ExecutionPlanner:
     ) -> ExecutionPlan:
         primary_intent = intent or "help"
         wants_slides = self.should_include_slides_step(primary_intent, instruction, llm_result)
+        wants_canvas = self.should_include_canvas_step(primary_intent, instruction, llm_result)
         if primary_intent in {"summary", "tasks", "risks"}:
             steps = [PlannerStep(step_id="step_1", step_type="analyze_discussion", title="分析讨论并整理结果")]
         elif primary_intent == "doc":
@@ -419,10 +424,38 @@ class ExecutionPlanner:
                         depends_on=["step_1"],
                     )
                 )
+            if wants_canvas:
+                dependency = steps[-1].step_id if steps else None
+                steps.append(
+                    PlannerStep(
+                        step_id=f"step_{len(steps) + 1}",
+                        step_type="generate_canvas",
+                        title="生成自由画布",
+                        depends_on=[dependency] if dependency else [],
+                    )
+                )
         elif primary_intent == "slides":
             steps = [PlannerStep(step_id="step_1", step_type="generate_slides", title="生成演示稿大纲")]
+            if wants_canvas:
+                steps.append(
+                    PlannerStep(
+                        step_id="step_2",
+                        step_type="generate_canvas",
+                        title="生成自由画布",
+                        depends_on=["step_1"],
+                    )
+                )
         elif primary_intent == "canvas":
             steps = [PlannerStep(step_id="step_1", step_type="generate_canvas", title="Generate canvas artifact")]
+            if wants_slides:
+                steps.append(
+                    PlannerStep(
+                        step_id="step_2",
+                        step_type="generate_slides",
+                        title="生成演示稿",
+                        depends_on=["step_1"],
+                    )
+                )
         elif primary_intent == "status":
             steps = [PlannerStep(step_id="step_1", step_type="answer_status", title="回答当前协作状态")]
         else:
@@ -473,6 +506,7 @@ class ExecutionPlanner:
             "risks": "识别风险与卡点",
             "doc": "生成并同步协作文档",
             "slides": "生成演示稿",
+            "canvas": "生成自由画布",
             "status": "回答当前状态问题",
         }.get(intent, "完成当前协作请求")
 
@@ -486,6 +520,7 @@ class ExecutionPlanner:
             }.get(intent, "分析讨论内容"),
             "sync_doc": "生成并同步文档",
             "generate_slides": "生成演示稿",
+            "generate_canvas": "生成自由画布",
             "answer_status": "回答状态问题",
             "reply_help": "给出下一步指引",
         }.get(step_type, "执行计划步骤")
@@ -493,20 +528,118 @@ class ExecutionPlanner:
     def should_include_slides_step(self, intent: str, instruction: str, llm_result: dict) -> bool:
         if intent == "slides":
             return True
-        if intent != "doc":
+        if intent not in {"doc", "canvas"}:
             return False
-        requested_outputs = llm_result.get("requested_outputs")
-        if isinstance(requested_outputs, list) and "slides" in {
-            str(item).strip().lower() for item in requested_outputs
-        }:
+        if "slides" in self.requested_output_set(llm_result):
             return True
         if isinstance(llm_result.get("slides"), dict) and llm_result.get("slides", {}).get("slides"):
             return True
         return self.is_outline_request(instruction)
 
+    def should_include_canvas_step(self, intent: str, instruction: str, llm_result: dict) -> bool:
+        if intent == "canvas":
+            return True
+        if intent not in {"doc", "slides"}:
+            return False
+        if "canvas" in self.requested_output_set(llm_result):
+            return True
+        canvas = llm_result.get("canvas")
+        if isinstance(canvas, dict) and (
+            isinstance(canvas.get("shapes"), list)
+            or isinstance(canvas.get("nodes"), list)
+        ):
+            return True
+        return self.is_canvas_request(instruction)
+
     @staticmethod
     def is_outline_request(instruction: str) -> bool:
         return any(keyword in instruction for keyword in ("汇报", "路演", "大纲", "PPT", "ppt", "演示"))
+
+    @staticmethod
+    def is_canvas_request(instruction: str) -> bool:
+        text = str(instruction or "").lower()
+        return any(
+            keyword in text
+            for keyword in (
+                "canvas",
+                "whiteboard",
+                "board",
+                "flowchart",
+                "diagram",
+                "architecture diagram",
+                "mind map",
+                "白板",
+                "画布",
+                "流程图",
+                "架构图",
+                "思维导图",
+            )
+        )
+
+    def append_optional_plan_steps_for_protocol(
+        self,
+        steps: list[PlannerStep],
+        *,
+        protocol: RequestProtocol,
+        instruction: str,
+        llm_result: dict,
+    ) -> list[PlannerStep]:
+        result = list(steps)
+        if (
+            protocol.route in {"doc", "canvas"}
+            and self.should_include_slides_step(protocol.route, instruction, llm_result)
+            and not any(step.step_type == "generate_slides" for step in result)
+        ):
+            dependency = result[-1].step_id if result else None
+            result.append(
+                PlannerStep(
+                    step_id=f"step_{len(result) + 1}",
+                    step_type="generate_slides",
+                    title="基于当前上下文生成演示稿",
+                    depends_on=[dependency] if dependency else [],
+                )
+            )
+        if (
+            protocol.route in {"doc", "slides"}
+            and self.should_include_canvas_step(protocol.route, instruction, llm_result)
+            and not any(step.step_type == "generate_canvas" for step in result)
+        ):
+            dependency = result[-1].step_id if result else None
+            result.append(
+                PlannerStep(
+                    step_id=f"step_{len(result) + 1}",
+                    step_type="generate_canvas",
+                    title="生成自由画布",
+                    depends_on=[dependency] if dependency else [],
+                )
+            )
+        return result
+
+    def requested_output_set(self, llm_result: dict) -> set[str]:
+        requested_outputs = llm_result.get("requested_outputs") if isinstance(llm_result, dict) else None
+        raw_items = requested_outputs if isinstance(requested_outputs, list) else []
+        outputs: set[str] = set()
+        for item in raw_items:
+            normalized = self.normalize_object(item)
+            if normalized in {"doc", "slides", "canvas"}:
+                outputs.add(normalized)
+        return outputs
+
+    def ensure_requested_output(self, llm_result: dict, output: str) -> None:
+        normalized = self.normalize_object(output)
+        if normalized not in {"doc", "slides", "canvas"}:
+            return
+        raw_items = llm_result.get("requested_outputs")
+        if not isinstance(raw_items, list):
+            llm_result["requested_outputs"] = [normalized]
+            return
+        existing = {
+            self.normalize_object(item)
+            for item in raw_items
+            if self.normalize_object(item) in {"doc", "slides", "canvas"}
+        }
+        if normalized not in existing:
+            raw_items.append(normalized)
 
     @staticmethod
     def extract_clarification_request(llm_result: dict) -> dict | None:
