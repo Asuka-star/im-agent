@@ -149,6 +149,8 @@ String localizeArtifactType(String artifactType) {
       return '演示稿包';
     case 'canvas':
       return 'Canvas';
+    case 'delivery_bundle':
+      return '交付包';
     case 'note':
       return '备注';
     case 'reply':

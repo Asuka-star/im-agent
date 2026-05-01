@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.services.app_state import AppStateService
+from app.utils.values import coerce_positive_int
 
 
 class SessionDocumentService:
@@ -74,7 +75,7 @@ class SessionDocumentService:
         title: str,
         episode_id: int | None = None,
         task_run_id: str | None = None,
-        version: int = 1,
+        version: object = 1,
         sync_mode: str = "created",
         section_snapshot: list[dict[str, Any]] | None = None,
         section_block_index: list[dict[str, Any]] | None = None,
@@ -86,7 +87,7 @@ class SessionDocumentService:
             "title": title.strip(),
             "episode_id": episode_id,
             "task_run_id": task_run_id,
-            "version": max(int(version), 1),
+            "version": coerce_positive_int(version),
             "sync_mode": sync_mode.strip() or "created",
             "section_snapshot": self.build_section_snapshot(section_snapshot or []),
             "section_block_index": self.build_section_block_index(section_block_index or []),

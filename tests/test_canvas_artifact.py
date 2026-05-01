@@ -21,11 +21,14 @@ class CanvasArtifactTests(unittest.TestCase):
             )
 
             self.assertEqual(artifact["artifact_type"], "canvas")
-            self.assertEqual(artifact["url"], "/api/artifacts/canvas/run_canvas.json")
+            self.assertEqual(artifact["url"], "/api/artifacts/canvas/run_canvas.html")
             self.assertEqual(artifact["export_url"], "/api/artifacts/canvas/run_canvas.svg")
             self.assertTrue((Path(tmpdir) / "run_canvas.json").is_file())
             self.assertTrue((Path(tmpdir) / "run_canvas.svg").is_file())
+            self.assertTrue((Path(tmpdir) / "run_canvas.html").is_file())
+            self.assertEqual(artifact["preview"]["exports"]["json"], "/api/artifacts/canvas/run_canvas.json")
             self.assertEqual(artifact["preview"]["exports"]["svg"], "/api/artifacts/canvas/run_canvas.svg")
+            self.assertEqual(artifact["preview"]["exports"]["html"], "/api/artifacts/canvas/run_canvas.html")
             self.assertTrue(artifact["preview"]["shapes"])
             first_node = next(shape for shape in artifact["preview"]["shapes"] if shape["type"] == "node")
             self.assertEqual(first_node["color"], "#EAF5FF")
@@ -36,6 +39,10 @@ class CanvasArtifactTests(unittest.TestCase):
             svg = (Path(tmpdir) / "run_canvas.svg").read_text(encoding="utf-8")
             self.assertIn("<svg", svg)
             self.assertIn("login", svg)
+            html = (Path(tmpdir) / "run_canvas.html").read_text(encoding="utf-8")
+            self.assertIn("自由画布预览", html)
+            self.assertNotIn("鑷", html)
+            self.assertIn("<svg", html)
 
     def test_canvas_service_normalizes_shape_style_and_group(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

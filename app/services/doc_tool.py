@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 
 from app.feishu.doc_api import FeishuDocAPI
 from app.services.session_document_service import SessionDocumentService
+from app.utils.values import coerce_positive_int
 
 
 logger = logging.getLogger(__name__)
@@ -25,7 +26,7 @@ class DocumentSyncResult:
 
     @property
     def version(self) -> int:
-        return max(int(self.document_info.get("version") or 1), 1)
+        return coerce_positive_int(self.document_info.get("version"))
 
 
 class DocTool:
@@ -82,7 +83,7 @@ class DocTool:
                         title=str(current_doc.get("title") or title),
                         episode_id=episode_id,
                         task_run_id=task_run_id,
-                        version=int(current_doc.get("version") or 1),
+                        version=coerce_positive_int(current_doc.get("version")),
                         sync_mode="noop",
                         section_snapshot=self.session_document_service.build_section_snapshot(
                             current_snapshot if isinstance(current_snapshot, list) else sections,
@@ -111,7 +112,7 @@ class DocTool:
                     delete_headings=change_plan["deleted_headings"],
                     rename_map=change_plan["rename_map"],
                 )
-                version = int(current_doc.get("version") or 1) + 1
+                version = coerce_positive_int(current_doc.get("version")) + 1
                 merged_snapshot = self.merge_doc_section_snapshots(
                     current_snapshot if isinstance(current_snapshot, list) else [],
                     change_plan["desired_sections"],
@@ -417,6 +418,53 @@ class DocTool:
         if not source_heading or source_heading == target_heading:
             return {}
         return {source_heading: target_heading}
+
+    @staticmethod
+    def format_current_document_context(current_doc: dict | None) -> str:
+        if not isinstance(current_doc, dict) or not current_doc.get("document_id"):
+            return ""
+        lines = ["[当前协作文档]"]
+        title = str(current_doc.get("title") or "").strip()
+        if title:
+            lines.append(f"标题：{title}")
+        version = current_doc.get("version")
+        if version:
+            lines.append(f"版本：v{version}")
+        url = str(current_doc.get("url") or "").strip()
+        if url:
+            lines.append(f"链接：{url}")
+        snapshot = current_doc.get("section_snapshot")
+        if isinstance(snapshot, list) and snapshot:
+            lines.append("章节快照：")
+            for section in snapshot:
+                if not isinstance(section, dict):
+                    continue
+                heading = str(section.get("heading") or "未命名章节").strip()
+                paragraphs = section.get("paragraphs") if isinstance(section.get("paragraphs"), list) else []
+                lines.append(f"- {heading}")
+                for paragraph in paragraphs[:4]:
+                    text = str(paragraph).strip()
+                    if text:
+                        lines.append(f"  - {text}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def build_document_revision_instruction(instruction: str, *, current_doc: dict | None = None) -> str:
+        title = str((current_doc or {}).get("title") or "").strip()
+        version = (current_doc or {}).get("version")
+        current_note = ""
+        if title:
+            current_note = f"当前文档：{title}"
+            if version:
+                current_note += f"（v{version}）"
+            current_note += "。"
+        return (
+            "请基于当前协作文档执行一次文档修订。"
+            "优先复用已有文档结构，只输出需要更新后的文档内容；"
+            "如果用户指定了章节，请只改相关章节。"
+            f"{current_note}\n\n"
+            f"用户修订要求：{instruction}"
+        )
 
     @staticmethod
     def build_doc_update_header_lines(*, instruction: str, targeted_headings: list[str]) -> list[str]:

@@ -226,7 +226,10 @@ class ConfirmationRequestRecord {
 
   List<String> get options {
     final decoded = _decodeJsonList(optionsJson);
-    return decoded.map((item) => item.toString()).where((item) => item.isNotEmpty).toList();
+    return decoded
+        .map((item) => item.toString())
+        .where((item) => item.isNotEmpty)
+        .toList();
   }
 }
 
@@ -283,11 +286,15 @@ class TaskRunDetail extends TaskRunSummary {
       updatedAt: _parseDateTime(json['updated_at']),
       completedAt: _parseDateTime(json['completed_at']),
       steps: _asList(json['steps']).map(TaskRunStepRecord.fromJson).toList(),
-      artifacts: _asList(json['artifacts']).map(ArtifactRecord.fromJson).toList(),
-      confirmations: _asList(json['confirmations']).map(ConfirmationRequestRecord.fromJson).toList(),
-      sessionDocuments: _asList(json['session_documents'])
-          .map(SessionDocumentRecord.fromJson)
-          .toList(),
+      artifacts: _asList(
+        json['artifacts'],
+      ).map(ArtifactRecord.fromJson).toList(),
+      confirmations: _asList(
+        json['confirmations'],
+      ).map(ConfirmationRequestRecord.fromJson).toList(),
+      sessionDocuments: _asList(
+        json['session_documents'],
+      ).map(SessionDocumentRecord.fromJson).toList(),
     );
   }
 }
@@ -310,14 +317,22 @@ Map<String, dynamic>? _decodeJsonMap(String? source) {
   if (source == null || source.isEmpty) {
     return null;
   }
-  final decoded = jsonDecode(source);
-  return decoded is Map<String, dynamic> ? decoded : null;
+  try {
+    final decoded = jsonDecode(source);
+    return decoded is Map<String, dynamic> ? decoded : null;
+  } on FormatException {
+    return null;
+  }
 }
 
 List<dynamic> _decodeJsonList(String? source) {
   if (source == null || source.isEmpty) {
     return const [];
   }
-  final decoded = jsonDecode(source);
-  return decoded is List ? decoded : const [];
+  try {
+    final decoded = jsonDecode(source);
+    return decoded is List ? decoded : const [];
+  } on FormatException {
+    return const [];
+  }
 }

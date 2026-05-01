@@ -29,6 +29,8 @@ class WorkbenchController extends ChangeNotifier {
   bool isLoadingDetail = false;
   bool isSubmittingConfirmation = false;
   bool isSubmittingDocumentRevision = false;
+  bool isSubmittingSlidesRevision = false;
+  bool isSubmittingDeliveryBundle = false;
 
   SocketConnection? _sessionConnection;
   SocketConnection? _taskConnection;
@@ -171,6 +173,62 @@ class WorkbenchController extends ChangeNotifier {
       rethrow;
     } finally {
       isSubmittingDocumentRevision = false;
+      notifyListeners();
+    }
+  }
+
+  Future<TaskRunDetail> reviseSlides({
+    required String sourceTaskRunId,
+    required String instruction,
+    String? artifactId,
+  }) async {
+    isSubmittingSlidesRevision = true;
+    errorMessage = null;
+    notifyListeners();
+
+    try {
+      final detail = await _api.reviseSlides(
+        taskRunId: sourceTaskRunId,
+        instruction: instruction,
+        artifactId: artifactId,
+      );
+      selectedTaskRun = detail;
+      _mergeSummary(_summaryFromDetail(detail));
+      lastUpdatedAt = DateTime.now();
+      if (_taskRealtimeEnabled) {
+        await _bindTaskSocket(detail.taskRunId);
+      }
+      await refreshTaskRuns(keepSelection: true);
+      return detail;
+    } catch (error) {
+      errorMessage = localizeWorkbenchError(error);
+      rethrow;
+    } finally {
+      isSubmittingSlidesRevision = false;
+      notifyListeners();
+    }
+  }
+
+  Future<TaskRunDetail> bundleDelivery({required String taskRunId}) async {
+    isSubmittingDeliveryBundle = true;
+    errorMessage = null;
+    notifyListeners();
+
+    try {
+      final detail = await _api.bundleDelivery(taskRunId: taskRunId);
+      selectedTaskRun = detail;
+      _mergeSummary(_summaryFromDetail(detail));
+      lastUpdatedAt = DateTime.now();
+      if (_taskRealtimeEnabled) {
+        await _bindTaskSocket(detail.taskRunId);
+      }
+      await refreshTaskRuns(keepSelection: true);
+      return detail;
+    } catch (error) {
+      errorMessage = localizeWorkbenchError(error);
+      rethrow;
+    } finally {
+      isSubmittingDeliveryBundle = false;
       notifyListeners();
     }
   }
@@ -457,7 +515,8 @@ class WorkbenchController extends ChangeNotifier {
 
   void _handleSessionEvent(Map<String, dynamic> event) {
     final payload = event['task_run'];
-    if (event['type'] == 'session.snapshot' || event['type'] == 'task_runs.snapshot') {
+    if (event['type'] == 'session.snapshot' ||
+        event['type'] == 'task_runs.snapshot') {
       final list = event['task_runs'];
       if (list is List) {
         taskRuns = list

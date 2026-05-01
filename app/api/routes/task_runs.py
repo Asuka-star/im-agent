@@ -6,7 +6,9 @@ from fastapi.concurrency import run_in_threadpool
 from app.schemas.task_run import (
     ConfirmationAnswerRequest,
     ConfirmationAnswerResponse,
+    DeliveryBundleRequest,
     DocumentRevisionRequest,
+    SlidesRevisionRequest,
     TaskRunDetail,
     TaskRunSummary,
 )
@@ -80,6 +82,44 @@ async def revise_task_run_document(task_run_id: str, payload: DocumentRevisionRe
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to revise document from task run: %s", exc)
         raise HTTPException(status_code=500, detail="Failed to revise document") from exc
+    if record is None:
+        raise HTTPException(status_code=404, detail="Task run not found")
+    return record
+
+
+@router.post("/{task_run_id}/revise-slides", response_model=TaskRunDetail)
+async def revise_task_run_slides(task_run_id: str, payload: SlidesRevisionRequest) -> TaskRunDetail:
+    try:
+        record = await run_in_threadpool(
+            workflow_service.revise_slides_from_task_run,
+            task_run_id,
+            instruction=payload.instruction,
+            requested_by=payload.requested_by,
+            artifact_id=payload.artifact_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to revise slides from task run: %s", exc)
+        raise HTTPException(status_code=500, detail="Failed to revise slides") from exc
+    if record is None:
+        raise HTTPException(status_code=404, detail="Task run not found")
+    return record
+
+
+@router.post("/{task_run_id}/bundle-delivery", response_model=TaskRunDetail)
+async def bundle_task_run_delivery(task_run_id: str, payload: DeliveryBundleRequest) -> TaskRunDetail:
+    try:
+        record = await run_in_threadpool(
+            workflow_service.bundle_delivery_from_task_run,
+            task_run_id,
+            requested_by=payload.requested_by,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to bundle delivery from task run: %s", exc)
+        raise HTTPException(status_code=500, detail="Failed to bundle delivery") from exc
     if record is None:
         raise HTTPException(status_code=404, detail="Task run not found")
     return record

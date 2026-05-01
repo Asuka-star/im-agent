@@ -19,6 +19,7 @@ from app.schemas.task_run import (
 from app.services.realtime_hub import realtime_hub
 from app.services.session_display_service import SessionDisplayService
 from app.services.session_document_service import SessionDocumentService
+from app.utils.values import coerce_positive_int
 
 
 logger = logging.getLogger(__name__)
@@ -416,17 +417,27 @@ class TaskRunService:
         )
 
     def _session_document_from_payload(self, payload: dict) -> SessionDocumentRecord:
+        updated_at = None
+        raw_updated_at = str(payload.get("updated_at") or "").strip()
+        if raw_updated_at:
+            try:
+                updated_at = datetime.fromisoformat(raw_updated_at)
+            except ValueError:
+                logger.warning(
+                    "Ignoring invalid session document updated_at: session_id=%s document_id=%s updated_at=%s",
+                    payload.get("session_id"),
+                    payload.get("document_id"),
+                    raw_updated_at,
+                )
         return SessionDocumentRecord(
             session_id=str(payload.get("session_id") or ""),
             document_id=str(payload.get("document_id") or ""),
             url=str(payload.get("url") or "").strip() or None,
             title=str(payload.get("title") or ""),
-            version=max(int(payload.get("version") or 1), 1),
+            version=coerce_positive_int(payload.get("version")),
             sync_mode=str(payload.get("sync_mode") or "created"),
             task_run_id=str(payload.get("task_run_id") or "").strip() or None,
-            updated_at=datetime.fromisoformat(str(payload.get("updated_at")))
-            if str(payload.get("updated_at") or "").strip()
-            else None,
+            updated_at=updated_at,
             is_current=bool(payload.get("is_current")),
         )
 

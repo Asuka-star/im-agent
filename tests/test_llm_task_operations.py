@@ -1,10 +1,14 @@
+import json
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.core.config import settings
 from app.schemas.task import TaskItem
 from app.services.feishu_workflow import FeishuWorkflowService
+from app.services.presentation_artifact_service import PresentationArtifactService
 from app.services.request_router import RouteDecision
 
 
@@ -662,6 +666,49 @@ class LLMTaskOperationTests(unittest.TestCase):
         self.assertEqual(result["route"], "slides")
         self.assertEqual(result["plan"]["steps"][0]["type"], "generate_slides")
         resolve_workspace.assert_not_called()
+
+    def test_prepare_slides_execution_persists_local_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self.service.presentation_artifact_service = PresentationArtifactService(root_dir=Path(tmpdir))
+            message = SimpleNamespace(session_id="s1", message_id="m1", text="生成演示稿", chat_id=None)
+
+            result = self.service._prepare_slides_execution(
+                message,
+                llm_result={
+                    "slides": {
+                        "theme": "报名汇报",
+                        "slides": [{"title": "背景", "bullets": ["目标"]}],
+                    }
+                },
+                workspace_context="[workspace]",
+                task_run_id="run_slides",
+            )
+
+            artifact = result["artifacts"][0]
+            self.assertEqual(artifact["provider"], "llm")
+            self.assertEqual(artifact["url"], "/api/artifacts/slides/run_slides.html")
+            self.assertTrue((Path(tmpdir) / "run_slides.html").is_file())
+            self.assertIn("speaker_notes", artifact["preview"]["slides"][0])
+
+    def test_prepare_slides_execution_marks_template_fallback_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(
+            self.service.llm_service,
+            "generate_presentation_package",
+            side_effect=RuntimeError("llm unavailable"),
+        ):
+            self.service.presentation_artifact_service = PresentationArtifactService(root_dir=Path(tmpdir))
+            message = SimpleNamespace(session_id="s1", message_id="m1", text="生成演示稿", chat_id=None)
+
+            result = self.service._prepare_slides_execution(
+                message,
+                llm_result={},
+                workspace_context="[workspace]",
+                task_run_id="run_slides",
+            )
+
+        artifact = result["artifacts"][0]
+        self.assertEqual(artifact["provider"], "fallback")
+        self.assertEqual(artifact["url"], "/api/artifacts/slides/run_slides.html")
 
     def test_memory_gate_runs_only_for_historical_requests(self) -> None:
         self.assertFalse(
@@ -1362,6 +1409,286 @@ class LLMTaskOperationTests(unittest.TestCase):
         self.assertIs(result, final_detail)
         get_document.assert_called_once_with("s1", "doc_target")
         self.assertIs(prepare_doc.call_args.kwargs["target_document"], selected_doc)
+
+    def test_revise_slides_from_task_run_creates_workbench_run(self) -> None:
+        current_package = {
+            "theme": "报名汇报",
+            "version": 1,
+            "slides": [
+                {
+                    "title": "背景",
+                    "bullets": ["目标"],
+                    "speaker_notes": "旧讲稿",
+                    "duration_sec": 45,
+                }
+            ],
+        }
+        slides_artifact = SimpleNamespace(
+            artifact_id="artifact_slides",
+            artifact_type="slides_package",
+            preview_json=json.dumps(current_package, ensure_ascii=False),
+        )
+        source_detail = SimpleNamespace(session_id="s1", task_run_id="run_source", artifacts=[slides_artifact])
+        revision_detail = SimpleNamespace(task_run_id="run_slides_revision")
+        final_detail = SimpleNamespace(task_run_id="run_slides_revision", session_id="s1")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self.service.presentation_artifact_service = PresentationArtifactService(root_dir=Path(tmpdir))
+            with patch.object(
+                self.service.task_run_service,
+                "get_task_run",
+                side_effect=[source_detail, final_detail],
+            ), patch.object(
+                self.service.task_run_service,
+                "create_task_run",
+                return_value=revision_detail,
+            ) as create_task_run, patch.object(
+                self.service.task_run_service,
+                "upsert_step",
+            ) as upsert_step, patch.object(
+                self.service.task_run_service,
+                "update_task_run",
+            ), patch.object(
+                self.service.memory_service,
+                "save_user_message",
+            ) as save_user_message, patch.object(
+                self.service.memory_service,
+                "build_workspace_context",
+                return_value="[workspace]",
+            ), patch.object(
+                self.service.llm_service,
+                "is_configured",
+                return_value=False,
+            ), patch.object(
+                self.service,
+                "_persist_task_run_result",
+            ) as persist_result:
+                result = self.service.revise_slides_from_task_run(
+                    "run_source",
+                    instruction="把第 1 页改成评委视角",
+                    requested_by="tester",
+                    artifact_id="artifact_slides",
+                )
+
+            self.assertTrue((Path(tmpdir) / "run_slides_revision.html").is_file())
+
+        self.assertIs(result, final_detail)
+        create_task_run.assert_called_once()
+        self.assertEqual(create_task_run.call_args.kwargs["source_type"], "workbench")
+        self.assertEqual(create_task_run.call_args.kwargs["source_ref"], "run_source")
+        self.assertEqual(create_task_run.call_args.kwargs["intent"], "slides")
+        save_user_message.assert_called_once()
+        self.assertEqual(save_user_message.call_args.kwargs["content"], "把第 1 页改成评委视角")
+        persist_result.assert_called_once()
+        self.assertEqual(persist_result.call_args.args[0], "run_slides_revision")
+        result_payload = persist_result.call_args.kwargs["result"]
+        artifact = result_payload["artifacts"][0]
+        self.assertEqual(artifact["artifact_type"], "slides_package")
+        self.assertEqual(artifact["provider"], "local")
+        self.assertEqual(artifact["url"], "/api/artifacts/slides/run_slides_revision.html")
+        self.assertEqual(artifact["preview"]["version"], 2)
+        self.assertIn("把第 1 页改成评委视角", artifact["preview"]["slides"][0]["speaker_notes"])
+        upsert_step.assert_any_call(
+            "run_slides_revision",
+            step_key="request_received",
+            title="接收演示稿修订指令",
+            step_type="input",
+            status="done",
+            input_payload={
+                "source_task_run_id": "run_source",
+                "source_artifact_id": "artifact_slides",
+                "instruction": "把第 1 页改成评委视角",
+                "requested_by": "tester",
+            },
+        )
+
+    def test_revise_slides_from_task_run_tolerates_non_numeric_source_version(self) -> None:
+        current_package = {
+            "theme": "报名汇报",
+            "slides": [{"title": "背景", "bullets": ["目标"]}],
+        }
+        slides_artifact = SimpleNamespace(
+            artifact_id="artifact_slides",
+            artifact_type="slides_package",
+            preview_json=json.dumps(current_package, ensure_ascii=False),
+            version="draft",
+        )
+        source_detail = SimpleNamespace(session_id="s1", task_run_id="run_source", artifacts=[slides_artifact])
+        revision_detail = SimpleNamespace(task_run_id="run_slides_revision")
+        final_detail = SimpleNamespace(task_run_id="run_slides_revision", session_id="s1")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self.service.presentation_artifact_service = PresentationArtifactService(root_dir=Path(tmpdir))
+            with patch.object(
+                self.service.task_run_service,
+                "get_task_run",
+                side_effect=[source_detail, final_detail],
+            ), patch.object(
+                self.service.task_run_service,
+                "create_task_run",
+                return_value=revision_detail,
+            ), patch.object(
+                self.service.task_run_service,
+                "upsert_step",
+            ), patch.object(
+                self.service.task_run_service,
+                "update_task_run",
+            ), patch.object(
+                self.service.memory_service,
+                "save_user_message",
+            ), patch.object(
+                self.service.memory_service,
+                "build_workspace_context",
+                return_value="[workspace]",
+            ), patch.object(
+                self.service.llm_service,
+                "is_configured",
+                return_value=False,
+            ), patch.object(
+                self.service,
+                "_persist_task_run_result",
+            ) as persist_result:
+                self.service.revise_slides_from_task_run(
+                    "run_source",
+                    instruction="增加评委视角",
+                    requested_by="tester",
+                    artifact_id="artifact_slides",
+                )
+
+        artifact = persist_result.call_args.kwargs["result"]["artifacts"][0]
+        self.assertEqual(artifact["preview"]["version"], 2)
+
+    def test_revise_slides_from_task_run_requires_slides_artifact(self) -> None:
+        source_detail = SimpleNamespace(session_id="s1", task_run_id="run_source", artifacts=[])
+        with patch.object(
+            self.service.task_run_service,
+            "get_task_run",
+            return_value=source_detail,
+        ):
+            with self.assertRaises(ValueError):
+                self.service.revise_slides_from_task_run(
+                    "run_source",
+                    instruction="把第 1 页讲得更像评委视角",
+                    requested_by="tester",
+                )
+
+    def test_bundle_delivery_from_task_run_creates_manifest_artifact(self) -> None:
+        detail = SimpleNamespace(
+            task_run_id="run_delivery",
+            session_id="s1",
+            source_type="im",
+            source_ref="m1",
+            trigger_message_id="m1",
+            title="报名系统汇报",
+            status="completed",
+            steps=[SimpleNamespace(step_key="plan", status="done")],
+            artifacts=[
+                SimpleNamespace(
+                    artifact_id="artifact_doc",
+                    artifact_type="document",
+                    title="需求文档",
+                    provider="feishu",
+                    status="ready",
+                    url="https://feishu.example/doc",
+                    version=1,
+                ),
+                SimpleNamespace(
+                    artifact_id="artifact_slides",
+                    artifact_type="slides_package",
+                    title="评审演示稿",
+                    provider="local",
+                    status="ready",
+                    url="/api/artifacts/slides/run_delivery.html",
+                    version=1,
+                ),
+            ],
+            confirmations=[],
+            session_documents=[],
+        )
+        final_detail = SimpleNamespace(task_run_id="run_delivery", session_id="s1")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self.service.delivery_artifact_service.root_dir = Path(tmpdir)
+            with patch.object(
+                self.service.task_run_service,
+                "get_task_run",
+                side_effect=[detail, final_detail],
+            ), patch.object(
+                self.service.task_run_service,
+                "upsert_step",
+            ) as upsert_step, patch.object(
+                self.service.task_run_service,
+                "create_artifact",
+            ) as create_artifact, patch.object(
+                self.service.task_run_service,
+                "update_task_run",
+            ) as update_task_run:
+                result = self.service.bundle_delivery_from_task_run("run_delivery", requested_by="tester")
+
+            self.assertTrue((Path(tmpdir) / "run_delivery.html").is_file())
+
+        self.assertIs(result, final_detail)
+        create_artifact.assert_called_once()
+        self.assertEqual(create_artifact.call_args.kwargs["artifact_type"], "delivery_bundle")
+        self.assertEqual(create_artifact.call_args.kwargs["url"], "/api/artifacts/delivery/run_delivery.html")
+        preview = create_artifact.call_args.kwargs["preview"]
+        self.assertEqual(preview["schema"], "agent-pilot.delivery.v1")
+        self.assertEqual(len(preview["artifacts"]), 2)
+        self.assertEqual({item["key"]: item["status"] for item in preview["checks"]}["document"], "ready")
+        self.assertEqual({item["key"]: item["status"] for item in preview["checks"]}["presentation_or_canvas"], "ready")
+        upsert_step.assert_called_once()
+        self.assertEqual(upsert_step.call_args.kwargs["step_key"], "delivery_bundle")
+        update_task_run.assert_called_once()
+        self.assertEqual(update_task_run.call_args.kwargs["stage"], "delivered")
+
+    def test_bundle_delivery_from_task_run_does_not_complete_running_task(self) -> None:
+        detail = SimpleNamespace(
+            task_run_id="run_delivery",
+            session_id="s1",
+            source_type="im",
+            source_ref="m1",
+            trigger_message_id="m1",
+            title="报名系统汇报",
+            status="running",
+            steps=[SimpleNamespace(step_key="plan", status="done")],
+            artifacts=[
+                SimpleNamespace(
+                    artifact_id="artifact_doc",
+                    artifact_type="document",
+                    title="需求文档",
+                    provider="feishu",
+                    status="ready",
+                    url="https://feishu.example/doc",
+                    version=1,
+                )
+            ],
+            confirmations=[],
+            session_documents=[],
+        )
+        final_detail = SimpleNamespace(task_run_id="run_delivery", session_id="s1")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self.service.delivery_artifact_service.root_dir = Path(tmpdir)
+            with patch.object(
+                self.service.task_run_service,
+                "get_task_run",
+                side_effect=[detail, final_detail],
+            ), patch.object(
+                self.service.task_run_service,
+                "upsert_step",
+            ), patch.object(
+                self.service.task_run_service,
+                "create_artifact",
+            ), patch.object(
+                self.service.task_run_service,
+                "update_task_run",
+            ) as update_task_run:
+                result = self.service.bundle_delivery_from_task_run("run_delivery", requested_by="tester")
+
+        self.assertIs(result, final_detail)
+        self.assertNotIn("stage", update_task_run.call_args.kwargs)
+        self.assertNotIn("status", update_task_run.call_args.kwargs)
+        self.assertIn("latest_summary", update_task_run.call_args.kwargs)
 
 
 if __name__ == "__main__":

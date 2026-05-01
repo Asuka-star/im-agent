@@ -1,0 +1,133 @@
+import html
+import json
+import re
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+
+class DeliveryArtifactService:
+    def __init__(self, *, root_dir: Path | None = None) -> None:
+        self.root_dir = root_dir or Path("data") / "artifacts" / "delivery"
+
+    def persist_bundle(
+        self,
+        manifest: dict[str, Any],
+        *,
+        task_run_id: str,
+        session_id: str,
+    ) -> dict[str, Any]:
+        self.root_dir.mkdir(parents=True, exist_ok=True)
+        normalized = self._normalize_manifest(manifest, task_run_id=task_run_id, session_id=session_id)
+        stem = self._slugify_filename(task_run_id or session_id)[:96] or "delivery"
+        json_path = self.root_dir / f"{stem}.json"
+        html_path = self.root_dir / f"{stem}.html"
+        normalized["exports"] = {
+            "json": f"/api/artifacts/delivery/{stem}.json",
+            "html": f"/api/artifacts/delivery/{stem}.html",
+        }
+        json_path.write_text(json.dumps(normalized, ensure_ascii=False, indent=2), encoding="utf-8")
+        html_path.write_text(self._render_html(normalized), encoding="utf-8")
+        return {
+            "artifact_type": "delivery_bundle",
+            "provider": "local",
+            "status": "ready",
+            "title": str(normalized.get("title") or "任务交付包"),
+            "url": normalized["exports"]["html"],
+            "preview": normalized,
+            "version": self._coerce_version(normalized.get("version")),
+        }
+
+    def _normalize_manifest(self, manifest: dict[str, Any], *, task_run_id: str, session_id: str) -> dict[str, Any]:
+        now = datetime.now(timezone.utc).isoformat()
+        items = manifest.get("artifacts") if isinstance(manifest.get("artifacts"), list) else []
+        checks = manifest.get("checks") if isinstance(manifest.get("checks"), list) else []
+        return {
+            "schema": "agent-pilot.delivery.v1",
+            "version": self._coerce_version(manifest.get("version")),
+            "title": str(manifest.get("title") or "任务交付包").strip() or "任务交付包",
+            "task_run_id": str(manifest.get("task_run_id") or task_run_id),
+            "session_id": str(manifest.get("session_id") or session_id),
+            "generated_at": str(manifest.get("generated_at") or now),
+            "summary": str(manifest.get("summary") or "").strip(),
+            "source": manifest.get("source") if isinstance(manifest.get("source"), dict) else {},
+            "checks": [item for item in checks if isinstance(item, dict)],
+            "artifacts": [item for item in items if isinstance(item, dict)],
+            "next_steps": [
+                str(item).strip()
+                for item in (manifest.get("next_steps") if isinstance(manifest.get("next_steps"), list) else [])
+                if str(item).strip()
+            ],
+        }
+
+    def _coerce_version(self, value: object) -> int:
+        try:
+            return max(int(value or 1), 1)
+        except (TypeError, ValueError):
+            return 1
+
+    def _render_html(self, manifest: dict[str, Any]) -> str:
+        title = html.escape(str(manifest.get("title") or "任务交付包"))
+        summary = html.escape(str(manifest.get("summary") or ""))
+        generated_at = html.escape(str(manifest.get("generated_at") or ""))
+        checks_html = "\n".join(self._render_check(item) for item in manifest.get("checks", []))
+        artifacts_html = "\n".join(self._render_artifact(item) for item in manifest.get("artifacts", []))
+        next_steps_html = "\n".join(f"<li>{html.escape(str(item))}</li>" for item in manifest.get("next_steps", []))
+        return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{title}</title>
+  <style>
+    body {{ margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #1e2f38; background: #f6f8f9; }}
+    main {{ max-width: 960px; margin: 0 auto; padding: 32px 20px 48px; }}
+    header {{ background: #172026; color: white; border-radius: 16px; padding: 24px; }}
+    h1 {{ margin: 0 0 8px; font-size: 28px; }}
+    h2 {{ margin-top: 28px; font-size: 20px; }}
+    .meta {{ color: #b8c7ce; }}
+    .grid {{ display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }}
+    .card {{ background: white; border: 1px solid #dce5e9; border-radius: 12px; padding: 16px; }}
+    .ok {{ color: #116a7b; font-weight: 700; }}
+    .warn {{ color: #b7791f; font-weight: 700; }}
+    .miss {{ color: #c85d3a; font-weight: 700; }}
+    a {{ color: #116a7b; }}
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>{title}</h1>
+      <div class="meta">Generated at {generated_at}</div>
+      <p>{summary}</p>
+    </header>
+    <h2>验收清单</h2>
+    <section class="grid">{checks_html}</section>
+    <h2>交付物</h2>
+    <section class="grid">{artifacts_html}</section>
+    <h2>建议下一步</h2>
+    <ul>{next_steps_html}</ul>
+  </main>
+</body>
+</html>
+"""
+
+    def _render_check(self, item: dict[str, Any]) -> str:
+        label = html.escape(str(item.get("label") or item.get("key") or "检查项"))
+        status = str(item.get("status") or "missing")
+        detail = html.escape(str(item.get("detail") or ""))
+        css = "ok" if status == "ready" else "warn" if status == "partial" else "miss"
+        text = "已满足" if status == "ready" else "部分满足" if status == "partial" else "待补齐"
+        return f'<article class="card"><div class="{css}">{text}</div><strong>{label}</strong><p>{detail}</p></article>'
+
+    def _render_artifact(self, item: dict[str, Any]) -> str:
+        title = html.escape(str(item.get("title") or item.get("artifact_type") or "产物"))
+        artifact_type = html.escape(str(item.get("artifact_type") or "artifact"))
+        url = str(item.get("url") or "").strip()
+        version = html.escape(str(item.get("version") or 1))
+        link = f'<a href="{html.escape(url)}">{html.escape(url)}</a>' if url else "<span>无链接</span>"
+        return f'<article class="card"><strong>{title}</strong><p>{artifact_type} · v{version}</p>{link}</article>'
+
+    def _slugify_filename(self, value: str) -> str:
+        slug = re.sub(r"[^A-Za-z0-9._-]+", "-", value.strip()).strip(".-_")
+        return slug or "delivery"

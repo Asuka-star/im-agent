@@ -189,6 +189,37 @@ class TaskRunServiceTests(unittest.TestCase):
         self.assertEqual(detail.task_run_id, created.task_run_id)
         self.assertEqual(detail.session_documents, [])
 
+    def test_get_task_run_tolerates_invalid_session_document_timestamp(self) -> None:
+        service = TaskRunService(
+            session_display_service=self.session_display_service,
+            session_document_service=_StubSessionDocumentService(
+                documents=[
+                    {
+                        "session_id": "oc_demo",
+                        "document_id": "doc_1",
+                        "title": "需求文档",
+                        "version": "draft",
+                        "sync_mode": "created",
+                        "updated_at": "not-a-date",
+                        "is_current": True,
+                    }
+                ]
+            ),
+        )
+        created = service.create_task_run(
+            session_id="oc_demo",
+            title="创建协作任务",
+            source_type="group",
+        )
+
+        detail = service.get_task_run(created.task_run_id)
+
+        self.assertIsNotNone(detail)
+        assert detail is not None
+        self.assertEqual(len(detail.session_documents), 1)
+        self.assertIsNone(detail.session_documents[0].updated_at)
+        self.assertEqual(detail.session_documents[0].version, 1)
+
     def test_list_task_runs_can_filter_by_session_label_query(self) -> None:
         self.service.create_task_run(
             session_id="oc_alpha",

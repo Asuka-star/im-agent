@@ -91,6 +91,46 @@ class WorkbenchApi {
     return TaskRunDetail.fromJson(decoded);
   }
 
+  Future<TaskRunDetail> reviseSlides({
+    required String taskRunId,
+    required String instruction,
+    String? artifactId,
+    String requestedBy = 'pilot_workbench',
+  }) async {
+    final response = await _client.post(
+      _buildUri('/task-runs/$taskRunId/revise-slides'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({
+        'instruction': instruction,
+        'requested_by': requestedBy,
+        'artifact_id': artifactId,
+      }),
+    );
+    _ensureSuccess(response);
+    final decoded = jsonDecode(utf8.decode(response.bodyBytes));
+    if (decoded is! Map<String, dynamic>) {
+      throw const FormatException('演示稿修订返回的不是有效任务对象。');
+    }
+    return TaskRunDetail.fromJson(decoded);
+  }
+
+  Future<TaskRunDetail> bundleDelivery({
+    required String taskRunId,
+    String requestedBy = 'pilot_workbench',
+  }) async {
+    final response = await _client.post(
+      _buildUri('/task-runs/$taskRunId/bundle-delivery'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({'requested_by': requestedBy}),
+    );
+    _ensureSuccess(response);
+    final decoded = jsonDecode(utf8.decode(response.bodyBytes));
+    if (decoded is! Map<String, dynamic>) {
+      throw const FormatException('交付包返回的不是有效任务对象。');
+    }
+    return TaskRunDetail.fromJson(decoded);
+  }
+
   Uri _buildUri(String path, {Map<String, String?>? queryParameters}) {
     final baseUri = Uri.parse(_baseUrl);
     final normalizedPath = path.startsWith('/') ? path.substring(1) : path;

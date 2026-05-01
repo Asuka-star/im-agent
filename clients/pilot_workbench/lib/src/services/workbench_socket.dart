@@ -39,9 +39,13 @@ class WorkbenchSocket {
     final subscription = channel.stream.listen(
       (data) {
         if (data is String) {
-          final decoded = jsonDecode(data);
-          if (decoded is Map<String, dynamic>) {
-            onEvent(decoded);
+          try {
+            final decoded = jsonDecode(data);
+            if (decoded is Map<String, dynamic>) {
+              onEvent(decoded);
+            }
+          } on FormatException {
+            return;
           }
         }
       },

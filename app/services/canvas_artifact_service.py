@@ -34,21 +34,26 @@ class CanvasArtifactService:
         )
         filename = self._canvas_filename(scene, task_run_id=task_run_id, session_id=session_id)
         svg_filename = self._svg_filename(filename)
+        html_filename = self._html_filename(filename)
         scene["exports"] = {
             "json": f"/api/artifacts/canvas/{filename}",
             "svg": f"/api/artifacts/canvas/{svg_filename}",
+            "html": f"/api/artifacts/canvas/{html_filename}",
         }
         self.root_dir.mkdir(parents=True, exist_ok=True)
         path = self.root_dir / filename
         svg_path = self.root_dir / svg_filename
+        html_path = self.root_dir / html_filename
+        svg = self._build_svg(scene)
         path.write_text(json.dumps(scene, ensure_ascii=False, indent=2), encoding="utf-8")
-        svg_path.write_text(self._build_svg(scene), encoding="utf-8")
+        svg_path.write_text(svg, encoding="utf-8")
+        html_path.write_text(self._build_html(scene, svg), encoding="utf-8")
         return {
             "artifact_type": "canvas",
             "provider": "local",
             "status": "ready",
             "title": scene["title"],
-            "url": f"/api/artifacts/canvas/{filename}",
+            "url": f"/api/artifacts/canvas/{html_filename}",
             "export_url": f"/api/artifacts/canvas/{svg_filename}",
             "preview": scene,
             "version": scene["version"],
@@ -191,6 +196,10 @@ class CanvasArtifactService:
         stem = json_filename.rsplit(".", 1)[0]
         return f"{stem or 'canvas'}.svg"
 
+    def _html_filename(self, json_filename: str) -> str:
+        stem = json_filename.rsplit(".", 1)[0]
+        return f"{stem or 'canvas'}.html"
+
     def _slugify_filename(self, value: str) -> str:
         slug = re.sub(r"[^A-Za-z0-9._-]+", "-", value.strip()).strip(".-_")
         return slug or "artifact"
@@ -225,6 +234,43 @@ class CanvasArtifactService:
             parts.append(self._svg_node(node, offset_x=offset_x, offset_y=offset_y))
         parts.append("</svg>")
         return "\n".join(parts)
+
+    def _build_html(self, scene: dict, svg: str) -> str:
+        title = escape(str(scene.get("title") or "Canvas"))
+        shape_count = len(scene.get("shapes") if isinstance(scene.get("shapes"), list) else [])
+        json_url = escape(str(scene.get("exports", {}).get("json") or ""))
+        svg_url = escape(str(scene.get("exports", {}).get("svg") or ""))
+        return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{title}</title>
+  <style>
+    body {{ margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f6f8f9; color: #172026; }}
+    header {{ padding: 22px 28px; background: #172026; color: white; }}
+    header p {{ margin: 6px 0 0; color: #b8c7ce; }}
+    main {{ padding: 24px; max-width: 1180px; margin: 0 auto; }}
+    .canvas {{ overflow: auto; background: white; border: 1px solid #dce5e9; border-radius: 14px; padding: 18px; box-shadow: 0 14px 34px rgba(23,32,38,.12); }}
+    .links {{ display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }}
+    a {{ color: #116a7b; font-weight: 700; }}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>{title}</h1>
+    <p>{shape_count} 个节点/连线 · 自由画布预览</p>
+  </header>
+  <main>
+    <section class="canvas">{svg}</section>
+    <nav class="links">
+      <a href="{json_url}">JSON 场景</a>
+      <a href="{svg_url}">SVG 导出</a>
+    </nav>
+  </main>
+</body>
+</html>
+"""
 
     def _svg_bounds(self, nodes: list[dict]) -> dict[str, int]:
         if not nodes:

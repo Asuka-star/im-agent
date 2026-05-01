@@ -99,3 +99,13 @@ class DocumentRevisionRequest(BaseModel):
     instruction: str = Field(min_length=1, description="Natural-language instruction for revising the current document")
     requested_by: str = Field(default="pilot_workbench", description="Who requested the document revision")
     document_id: str | None = Field(default=None, description="Optional explicit target document id within the session")
+
+
+class SlidesRevisionRequest(BaseModel):
+    instruction: str = Field(min_length=1, description="Natural-language instruction for revising the current slides package")
+    requested_by: str = Field(default="pilot_workbench", description="Who requested the slides revision")
+    artifact_id: str | None = Field(default=None, description="Optional explicit slides artifact id to revise")
+
+
+class DeliveryBundleRequest(BaseModel):
+    requested_by: str = Field(default="pilot_workbench", description="Who requested the delivery bundle")

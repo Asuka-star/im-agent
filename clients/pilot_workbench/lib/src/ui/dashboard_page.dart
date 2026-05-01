@@ -935,7 +935,11 @@ class _DetailPanel extends StatelessWidget {
                                 .map(
                                   (artifact) => Padding(
                                     padding: const EdgeInsets.only(bottom: 12),
-                                    child: _ArtifactTile(artifact: artifact),
+                                    child: _ArtifactTile(
+                                      artifact: artifact,
+                                      controller: controller,
+                                      sourceTaskRunId: detail.taskRunId,
+                                    ),
                                   ),
                                 )
                                 .toList(),
@@ -1048,6 +1052,24 @@ class _SummaryCard extends StatelessWidget {
             ),
           const SizedBox(height: 14),
           _ActionHintCard(detail: detail),
+          if (detail.artifacts.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            _ActionStrip(
+              actions: [
+                _InlineAction(
+                  icon: controller.isSubmittingDeliveryBundle
+                      ? Icons.hourglass_top_rounded
+                      : Icons.inventory_2_rounded,
+                  label: controller.isSubmittingDeliveryBundle
+                      ? '打包中...'
+                      : '生成交付包',
+                  onPressed: controller.isSubmittingDeliveryBundle
+                      ? null
+                      : () => _bundleDelivery(context),
+                ),
+              ],
+            ),
+          ],
           if (documentArtifact != null) ...[
             const SizedBox(height: 14),
             _CurrentDocumentCard(
@@ -1082,6 +1104,23 @@ class _SummaryCard extends StatelessWidget {
       ),
     );
   }
+
+  Future<void> _bundleDelivery(BuildContext context) async {
+    try {
+      await controller.bundleDelivery(taskRunId: detail.taskRunId);
+      if (context.mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('交付包已生成')));
+      }
+    } catch (_) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('交付包生成失败，请查看错误提示')));
+      }
+    }
+  }
 }
 
 class _CurrentDocumentCard extends StatelessWidget {
@@ -1104,13 +1143,25 @@ class _CurrentDocumentCard extends StatelessWidget {
     final sync = preview?['sync'] is Map<String, dynamic>
         ? preview!['sync'] as Map<String, dynamic>
         : const <String, dynamic>{};
-    final url = _stringValue(selectedDocument?.url ?? sync['url'] ?? artifact.url);
-    final syncTitle = _stringValue(selectedDocument?.title ?? sync['title'] ?? artifact.title);
+    final url = _stringValue(
+      selectedDocument?.url ?? sync['url'] ?? artifact.url,
+    );
+    final syncTitle = _stringValue(
+      selectedDocument?.title ?? sync['title'] ?? artifact.title,
+    );
     final title = syncTitle.isNotEmpty ? syncTitle : artifact.title;
-    final version = selectedDocument?.version ?? ((sync['version'] is num) ? (sync['version'] as num).toInt() : artifact.version);
+    final version =
+        selectedDocument?.version ??
+        ((sync['version'] is num)
+            ? (sync['version'] as num).toInt()
+            : artifact.version);
     final mode = _stringValue(selectedDocument?.syncMode ?? sync['mode']);
-    final updatedAt = selectedDocument?.updatedAt ?? DateTime.tryParse(_stringValue(sync['updated_at']));
-    final targetLabel = selectedDocument?.isCurrent == false ? '已选历史文档' : '当前协作文档';
+    final updatedAt =
+        selectedDocument?.updatedAt ??
+        DateTime.tryParse(_stringValue(sync['updated_at']));
+    final targetLabel = selectedDocument?.isCurrent == false
+        ? '已选历史文档'
+        : '当前协作文档';
 
     return Container(
       width: double.infinity,
@@ -1281,7 +1332,10 @@ class _CurrentDocumentCard extends StatelessWidget {
       builder: (context) {
         return Dialog(
           backgroundColor: const Color(0xFF10181D),
-          insetPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 32),
+          insetPadding: const EdgeInsets.symmetric(
+            horizontal: 24,
+            vertical: 32,
+          ),
           child: ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: 760, maxHeight: 720),
             child: Padding(
@@ -1294,15 +1348,19 @@ class _CurrentDocumentCard extends StatelessWidget {
                       Expanded(
                         child: Text(
                           '文档历史时间线',
-                          style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                            color: Colors.white,
-                            fontWeight: FontWeight.w700,
-                          ),
+                          style: Theme.of(context).textTheme.titleLarge
+                              ?.copyWith(
+                                color: Colors.white,
+                                fontWeight: FontWeight.w700,
+                              ),
                         ),
                       ),
                       IconButton(
                         onPressed: () => Navigator.of(context).pop(),
-                        icon: const Icon(Icons.close_rounded, color: Colors.white70),
+                        icon: const Icon(
+                          Icons.close_rounded,
+                          color: Colors.white70,
+                        ),
                       ),
                     ],
                   ),
@@ -1374,7 +1432,9 @@ class _CurrentDocumentCard extends StatelessWidget {
                     if (sessionDocuments.isNotEmpty) ...[
                       const SizedBox(height: 14),
                       DropdownButtonFormField<String>(
-                        initialValue: selectedDocumentId.isNotEmpty ? selectedDocumentId : null,
+                        initialValue: selectedDocumentId.isNotEmpty
+                            ? selectedDocumentId
+                            : null,
                         decoration: const InputDecoration(
                           labelText: '目标文档',
                           border: OutlineInputBorder(),
@@ -1503,7 +1563,9 @@ class _DocumentHistoryTile extends StatelessWidget {
             children: [
               Expanded(
                 child: Text(
-                  document.title.isNotEmpty ? document.title : document.documentId,
+                  document.title.isNotEmpty
+                      ? document.title
+                      : document.documentId,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: Theme.of(context).textTheme.bodyMedium?.copyWith(
@@ -1584,7 +1646,9 @@ class _DocumentTimelineTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final url = _stringValue(document.url);
-    final title = document.title.isNotEmpty ? document.title : document.documentId;
+    final title = document.title.isNotEmpty
+        ? document.title
+        : document.documentId;
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(14),
@@ -1645,7 +1709,10 @@ class _DocumentTimelineTile extends StatelessWidget {
                   children: [
                     _Badge(
                       label: _localizeDocSyncMode(document.syncMode),
-                      color: _docSyncModeColor(document.syncMode, synced: url.isNotEmpty),
+                      color: _docSyncModeColor(
+                        document.syncMode,
+                        synced: url.isNotEmpty,
+                      ),
                     ),
                     if (document.updatedAt != null)
                       _Badge(
@@ -1685,7 +1752,9 @@ class _DocumentTimelineTile extends StatelessWidget {
                     FilledButton.tonalIcon(
                       onPressed: isBusy ? null : onRevise,
                       icon: Icon(
-                        isBusy ? Icons.hourglass_top_rounded : Icons.edit_note_rounded,
+                        isBusy
+                            ? Icons.hourglass_top_rounded
+                            : Icons.edit_note_rounded,
                         size: 18,
                       ),
                       label: Text(isBusy ? '修订中...' : '从这份继续修订'),
@@ -1704,7 +1773,9 @@ class _DocumentTimelineTile extends StatelessWidget {
                         label: const Text('复制链接'),
                         style: OutlinedButton.styleFrom(
                           foregroundColor: const Color(0xFFBFE6F1),
-                          side: BorderSide(color: Colors.white.withValues(alpha: 0.14)),
+                          side: BorderSide(
+                            color: Colors.white.withValues(alpha: 0.14),
+                          ),
                         ),
                       ),
                   ],
@@ -1926,9 +1997,15 @@ class _StepTile extends StatelessWidget {
 }
 
 class _ArtifactTile extends StatelessWidget {
-  const _ArtifactTile({required this.artifact});
+  const _ArtifactTile({
+    required this.artifact,
+    required this.controller,
+    required this.sourceTaskRunId,
+  });
 
   final ArtifactRecord artifact;
+  final WorkbenchController controller;
+  final String sourceTaskRunId;
 
   @override
   Widget build(BuildContext context) {
@@ -1986,6 +2063,37 @@ class _ArtifactTile extends StatelessWidget {
                     }
                   },
                 ),
+                if (artifact.artifactType == 'slides_package')
+                  _InlineAction(
+                    icon: controller.isSubmittingSlidesRevision
+                        ? Icons.hourglass_top_rounded
+                        : Icons.edit_note_rounded,
+                    label: controller.isSubmittingSlidesRevision
+                        ? '修订中...'
+                        : '提交修订',
+                    onPressed: controller.isSubmittingSlidesRevision
+                        ? null
+                        : () => _openSlidesRevisionDialog(context),
+                  ),
+              ],
+            ),
+          ],
+          if ((artifact.url ?? '').isEmpty &&
+              artifact.artifactType == 'slides_package') ...[
+            const SizedBox(height: 12),
+            _ActionStrip(
+              actions: [
+                _InlineAction(
+                  icon: controller.isSubmittingSlidesRevision
+                      ? Icons.hourglass_top_rounded
+                      : Icons.edit_note_rounded,
+                  label: controller.isSubmittingSlidesRevision
+                      ? '修订中...'
+                      : '提交修订',
+                  onPressed: controller.isSubmittingSlidesRevision
+                      ? null
+                      : () => _openSlidesRevisionDialog(context),
+                ),
               ],
             ),
           ],
@@ -2024,6 +2132,67 @@ class _ArtifactTile extends StatelessWidget {
     );
   }
 
+  Future<void> _openSlidesRevisionDialog(BuildContext context) async {
+    final textController = TextEditingController();
+    try {
+      final instruction = await showDialog<String>(
+        context: context,
+        builder: (context) {
+          return AlertDialog(
+            title: const Text('修订演示稿'),
+            content: SizedBox(
+              width: 460,
+              child: TextField(
+                controller: textController,
+                minLines: 3,
+                maxLines: 6,
+                autofocus: true,
+                decoration: const InputDecoration(
+                  hintText: '例如：把第 3 页改成评委视角，并压缩到 5 页',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(),
+                child: const Text('取消'),
+              ),
+              FilledButton.icon(
+                onPressed: () {
+                  final text = textController.text.trim();
+                  if (text.isEmpty) {
+                    return;
+                  }
+                  Navigator.of(context).pop(text);
+                },
+                icon: const Icon(Icons.send_rounded),
+                label: const Text('提交'),
+              ),
+            ],
+          );
+        },
+      );
+      if (instruction == null ||
+          instruction.trim().isEmpty ||
+          !context.mounted) {
+        return;
+      }
+      await controller.reviseSlides(
+        sourceTaskRunId: sourceTaskRunId,
+        instruction: instruction.trim(),
+        artifactId: artifact.artifactId,
+      );
+      if (context.mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('演示稿修订任务已生成')));
+      }
+    } finally {
+      textController.dispose();
+    }
+  }
+
   Widget _buildArtifactPreview(
     BuildContext context,
     ArtifactRecord artifact,
@@ -2050,9 +2219,11 @@ class _ArtifactTile extends StatelessWidget {
       case 'document':
         return _DocumentPreview(preview: preview, url: artifact.url);
       case 'slides_package':
-        return _SlidesPreview(preview: preview);
+        return _SlidesPreview(preview: preview, url: artifact.url);
       case 'canvas':
         return _CanvasPreview(preview: preview, url: artifact.url);
+      case 'delivery_bundle':
+        return _DeliveryPreview(preview: preview, url: artifact.url);
       default:
         return _GenericPreview(preview: preview);
     }
@@ -2114,6 +2285,123 @@ class _ArtifactTile extends StatelessWidget {
           ),
         );
       },
+    );
+  }
+}
+
+class _DeliveryPreview extends StatelessWidget {
+  const _DeliveryPreview({required this.preview, required this.url});
+
+  final Map<String, dynamic> preview;
+  final String? url;
+
+  @override
+  Widget build(BuildContext context) {
+    final summary = _stringValue(preview['summary']);
+    final checks =
+        (preview['checks'] as List?)
+            ?.whereType<Map<String, dynamic>>()
+            .toList() ??
+        const <Map<String, dynamic>>[];
+    final artifacts =
+        (preview['artifacts'] as List?)
+            ?.whereType<Map<String, dynamic>>()
+            .toList() ??
+        const <Map<String, dynamic>>[];
+    final nextSteps =
+        (preview['next_steps'] as List?)
+            ?.map((item) => item.toString().trim())
+            .where((item) => item.isNotEmpty)
+            .toList() ??
+        const <String>[];
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF8FBFC),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: const Color(0xFFD8E2E8)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.inventory_2_rounded, color: Color(0xFF116A7B)),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  '交付验收清单',
+                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+              _Badge(
+                label: '${artifacts.length} 个产物',
+                color: const Color(0xFF116A7B),
+              ),
+            ],
+          ),
+          if (summary.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            Text(
+              summary,
+              style: Theme.of(
+                context,
+              ).textTheme.bodyMedium?.copyWith(height: 1.45),
+            ),
+          ],
+          if ((url ?? '').isNotEmpty) ...[
+            const SizedBox(height: 10),
+            SelectableText(
+              url!,
+              style: Theme.of(
+                context,
+              ).textTheme.bodyMedium?.copyWith(color: const Color(0xFF116A7B)),
+            ),
+          ],
+          if (checks.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: checks
+                  .map(
+                    (item) => _Badge(
+                      label:
+                          '${_stringValue(item['label'])}: ${_deliveryStatusLabel(_stringValue(item['status']))}',
+                      color: _deliveryStatusColor(_stringValue(item['status'])),
+                    ),
+                  )
+                  .toList(),
+            ),
+          ],
+          if (nextSteps.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            ...nextSteps
+                .take(3)
+                .map(
+                  (item) => Padding(
+                    padding: const EdgeInsets.only(bottom: 6),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text('• '),
+                        Expanded(
+                          child: Text(
+                            item,
+                            style: Theme.of(context).textTheme.bodyMedium,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+          ],
+        ],
+      ),
     );
   }
 }
@@ -2287,9 +2575,10 @@ class _DocSectionTile extends StatelessWidget {
 }
 
 class _SlidesPreview extends StatelessWidget {
-  const _SlidesPreview({required this.preview});
+  const _SlidesPreview({required this.preview, required this.url});
 
   final Map<String, dynamic> preview;
+  final String? url;
 
   @override
   Widget build(BuildContext context) {
@@ -2312,6 +2601,10 @@ class _SlidesPreview extends StatelessWidget {
             .where((item) => item.isNotEmpty)
             .toList() ??
         const <String>[];
+    final exports = preview['exports'] is Map<String, dynamic>
+        ? preview['exports'] as Map<String, dynamic>
+        : const <String, dynamic>{};
+    final pptxUrl = _stringValue(exports['pptx']);
 
     return Container(
       width: double.infinity,
@@ -2407,6 +2700,32 @@ class _SlidesPreview extends StatelessWidget {
                     assets: assets,
                   ),
                 ),
+                if (pptxUrl.isNotEmpty)
+                  _InlineAction(
+                    icon: Icons.file_download_rounded,
+                    label: '复制 PPTX 链接',
+                    onPressed: () async {
+                      await Clipboard.setData(ClipboardData(text: pptxUrl));
+                      if (context.mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('PPTX 链接已复制')),
+                        );
+                      }
+                    },
+                  ),
+                if ((url ?? '').isNotEmpty)
+                  _InlineAction(
+                    icon: Icons.open_in_new_rounded,
+                    label: '复制预览链接',
+                    onPressed: () async {
+                      await Clipboard.setData(ClipboardData(text: url!));
+                      if (context.mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('演示稿预览链接已复制')),
+                        );
+                      }
+                    },
+                  ),
               ],
             ),
           ],
@@ -2518,7 +2837,8 @@ class _CanvasPreview extends StatelessWidget {
                 _CanvasMetric(label: 'Version', value: version),
               if (schema.isNotEmpty)
                 _CanvasMetric(label: 'Schema', value: schema),
-              if (svgUrl.isNotEmpty) _CanvasMetric(label: 'Export', value: 'SVG'),
+              if (svgUrl.isNotEmpty)
+                _CanvasMetric(label: 'Export', value: 'SVG'),
             ],
           ),
           if (nodes.isNotEmpty) ...[
@@ -3297,6 +3617,14 @@ class _SlidesRehearsalDialogState extends State<_SlidesRehearsalDialog> {
             .where((item) => item.isNotEmpty)
             .toList() ??
         const <String>[];
+    final currentNotes = _stringValue(
+      currentSlide['speaker_notes'] ??
+          currentSlide['speaker_note'] ??
+          currentSlide['notes'],
+    );
+    final currentDuration = _stringValue(
+      currentSlide['duration_sec'] ?? currentSlide['duration_seconds'],
+    );
 
     return Container(
       constraints: const BoxConstraints(maxWidth: 1180, maxHeight: 860),
@@ -3343,6 +3671,8 @@ class _SlidesRehearsalDialogState extends State<_SlidesRehearsalDialog> {
               audience: widget.audience,
               currentSlide: currentSlide,
               currentBullets: currentBullets,
+              currentNotes: currentNotes,
+              currentDuration: currentDuration,
               emphasis: widget.emphasis,
               assets: widget.assets,
             );
@@ -3601,6 +3931,8 @@ class _RehearsalNotesPanel extends StatelessWidget {
     required this.audience,
     required this.currentSlide,
     required this.currentBullets,
+    required this.currentNotes,
+    required this.currentDuration,
     required this.emphasis,
     required this.assets,
   });
@@ -3611,6 +3943,8 @@ class _RehearsalNotesPanel extends StatelessWidget {
   final String? audience;
   final Map<String, dynamic> currentSlide;
   final List<String> currentBullets;
+  final String currentNotes;
+  final String currentDuration;
   final List<String> emphasis;
   final List<String> assets;
 
@@ -3630,7 +3964,9 @@ class _RehearsalNotesPanel extends StatelessWidget {
             Text('排练笔记', style: Theme.of(context).textTheme.headlineSmall),
             const SizedBox(height: 10),
             _Badge(
-              label: '当前页面 ${currentIndex + 1}/$totalSlides',
+              label: currentDuration.isNotEmpty
+                  ? '当前页面 ${currentIndex + 1}/$totalSlides · $currentDuration 秒'
+                  : '当前页面 ${currentIndex + 1}/$totalSlides',
               color: const Color(0xFF116A7B),
             ),
             const SizedBox(height: 14),
@@ -3641,6 +3977,10 @@ class _RehearsalNotesPanel extends StatelessWidget {
                 ...currentBullets.take(3),
               ],
             ),
+            if (currentNotes.isNotEmpty) ...[
+              const SizedBox(height: 12),
+              _NoteBlock(title: '讲者备注', lines: [currentNotes]),
+            ],
             if ((theme ?? '').isNotEmpty || (audience ?? '').isNotEmpty) ...[
               const SizedBox(height: 12),
               _NoteBlock(
@@ -4395,6 +4735,32 @@ Color _docSyncModeColor(String mode, {required bool synced}) {
       return const Color(0xFFC85D3A);
     default:
       return synced ? const Color(0xFF8CCDEB) : const Color(0xFFC85D3A);
+  }
+}
+
+String _deliveryStatusLabel(String status) {
+  switch (status) {
+    case 'ready':
+      return '已满足';
+    case 'partial':
+      return '部分满足';
+    case 'missing':
+      return '待补齐';
+    default:
+      return status.isEmpty ? '未知' : status;
+  }
+}
+
+Color _deliveryStatusColor(String status) {
+  switch (status) {
+    case 'ready':
+      return const Color(0xFF116A7B);
+    case 'partial':
+      return const Color(0xFFB7791F);
+    case 'missing':
+      return const Color(0xFFC85D3A);
+    default:
+      return const Color(0xFF72808A);
   }
 }
 

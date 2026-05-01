@@ -2,8 +2,6 @@ import json
 import logging
 import re
 import time
-from dataclasses import dataclass
-from datetime import datetime
 from types import SimpleNamespace
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -20,13 +18,24 @@ from app.schemas.task import TaskItem
 from app.services.due_date import normalize_task_dates
 from app.services.interaction import InteractionService
 from app.services.canvas_artifact_service import CanvasArtifactService
+from app.services.canvas_tool import CanvasTool
+from app.services.delivery_artifact_service import DeliveryArtifactService
+from app.services.delivery_tool import DeliveryTool
+from app.services.document_package_builder import DocumentPackageBuilder
 from app.services.doc_tool import DocTool, DocumentSyncResult
+from app.services.execution_planner import ExecutionPlanner, RequestProtocol
 from app.services.llm import LLMService
 from app.services.memory_service import MemoryService
 from app.services.office_artifact_service import OfficeArtifactService
+from app.services.presentation_artifact_service import PresentationArtifactService
+from app.services.presentation_tool import PresentationTool
+from app.services.response_formatter import ResponseFormatter
 from app.services.request_router import RequestRouter, RouteDecision
 from app.services.session_document_service import SessionDocumentService
+from app.services.task_operation_tool import TaskOperationTool
 from app.services.task_run_service import TaskRunService
+from app.services.workbench_revision_tool import WorkbenchRevisionTool
+from app.utils.values import coerce_positive_int
 from app.services.text_analysis import (
     apply_discussion_updates,
     build_next_actions,
@@ -39,13 +48,6 @@ from app.services.text_analysis import (
 logger = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True, slots=True)
-class RequestProtocol:
-    operation: str
-    object: str
-    route: str
-
-
 class FeishuWorkflowService:
     """Handles buffered collaboration and LLM-first mentioned requests."""
 
@@ -53,15 +55,30 @@ class FeishuWorkflowService:
         self.orchestrator = AgentOrchestrator()
         self.message_api = FeishuMessageAPI()
         self.canvas_artifact_service = CanvasArtifactService()
+        self.canvas_tool = CanvasTool(artifact_service=self.canvas_artifact_service)
+        self.delivery_artifact_service = DeliveryArtifactService()
+        self.document_package_builder = DocumentPackageBuilder()
         self.doc_api = FeishuDocAPI()
         self.user_api = FeishuUserAPI()
         self.memory_service = MemoryService()
         self.office_artifact_service = OfficeArtifactService()
+        self.presentation_artifact_service = PresentationArtifactService()
+        self.presentation_tool = PresentationTool(artifact_service=self.presentation_artifact_service)
         self.session_document_service = SessionDocumentService()
         self.task_run_service = TaskRunService()
+        self.delivery_tool = DeliveryTool(
+            delivery_artifact_service=self.delivery_artifact_service,
+            task_run_service=self.task_run_service,
+        )
+        self.workbench_revision_tool = WorkbenchRevisionTool(
+            task_run_service=self.task_run_service,
+            memory_service=self.memory_service,
+        )
         self.interaction_service = InteractionService()
         self.llm_service = LLMService()
+        self.execution_planner = ExecutionPlanner()
         self.request_router = RequestRouter()
+        self.response_formatter = ResponseFormatter()
 
     def _doc_tool(self) -> DocTool:
         return DocTool(
@@ -199,17 +216,7 @@ class FeishuWorkflowService:
                 episode_id=result.get("episode_id"),
                 embed=False,
             )
-        for artifact in result.get("artifacts", []):
-            self.task_run_service.create_artifact(
-                task_run.task_run_id,
-                artifact_type=str(artifact.get("artifact_type") or "note"),
-                title=str(artifact.get("title") or "协作产物"),
-                provider=str(artifact.get("provider") or "local"),
-                status=str(artifact.get("status") or "ready"),
-                url=str(artifact.get("url") or "").strip() or None,
-                preview=artifact.get("preview") if isinstance(artifact.get("preview"), dict) else None,
-                version=max(int(artifact.get("version") or 1), 1),
-            )
+        self._persist_artifacts(task_run.task_run_id, result.get("artifacts", []))
         summary_text = (
             result["analysis"].summary
             if result.get("analysis") is not None
@@ -812,32 +819,7 @@ class FeishuWorkflowService:
         return "\n\n".join(block.strip() for block in blocks if block and block.strip())
 
     def _format_current_document_context(self, current_doc: dict | None) -> str:
-        if not isinstance(current_doc, dict) or not current_doc.get("document_id"):
-            return ""
-        lines = ["[当前协作文档]"]
-        title = str(current_doc.get("title") or "").strip()
-        if title:
-            lines.append(f"标题：{title}")
-        version = current_doc.get("version")
-        if version:
-            lines.append(f"版本：v{version}")
-        url = str(current_doc.get("url") or "").strip()
-        if url:
-            lines.append(f"链接：{url}")
-        snapshot = current_doc.get("section_snapshot")
-        if isinstance(snapshot, list) and snapshot:
-            lines.append("章节快照：")
-            for section in snapshot:
-                if not isinstance(section, dict):
-                    continue
-                heading = str(section.get("heading") or "未命名章节").strip()
-                paragraphs = section.get("paragraphs") if isinstance(section.get("paragraphs"), list) else []
-                lines.append(f"- {heading}")
-                for paragraph in paragraphs[:4]:
-                    text = str(paragraph).strip()
-                    if text:
-                        lines.append(f"  - {text}")
-        return "\n".join(lines)
+        return DocTool.format_current_document_context(current_doc)
 
     def _context_tasks_for_message(self, message: FeishuMessageContext) -> list:
         tasks = self.memory_service.get_current_tasks(message.session_id)
@@ -858,33 +840,10 @@ class FeishuWorkflowService:
         )
 
     def _normalize_request_protocol(self, llm_result: dict) -> RequestProtocol:
-        raw_route = self._normalize_token(llm_result.get("route") or llm_result.get("intent"))
-        raw_operation = self._normalize_operation(llm_result.get("operation") or llm_result.get("action"))
-        raw_object = self._normalize_object(llm_result.get("object") or llm_result.get("target"))
-
-        if not raw_operation or not raw_object:
-            inferred = self._infer_protocol_from_legacy_result(llm_result, raw_route)
-            raw_operation = raw_operation or inferred.operation
-            raw_object = raw_object or inferred.object
-
-        route = self._canonical_route(raw_operation, raw_object, raw_route)
-        protocol = RequestProtocol(
-            operation=raw_operation or "help",
-            object=raw_object or "workspace",
-            route=route,
-        )
-        self._store_request_protocol(llm_result, protocol)
-        return protocol
+        return self.execution_planner.normalize_request_protocol(llm_result)
 
     def _store_request_protocol(self, llm_result: dict, protocol: RequestProtocol) -> None:
-        llm_result["operation"] = protocol.operation
-        llm_result["object"] = protocol.object
-        llm_result["route"] = protocol.route
-        llm_result["request_protocol"] = {
-            "operation": protocol.operation,
-            "object": protocol.object,
-            "route": protocol.route,
-        }
+        self.execution_planner.store_request_protocol(llm_result, protocol)
 
     def _adjust_protocol_for_instruction(
         self,
@@ -893,200 +852,41 @@ class FeishuWorkflowService:
         instruction: str,
         llm_result: dict,
     ) -> RequestProtocol:
-        if protocol.object in {"doc", "slides"}:
-            return protocol
-        if not (
-            self._instruction_requests_doc(instruction)
-            or self._llm_result_has_doc_package(llm_result)
-            or self._llm_plan_contains_step(llm_result, "sync_doc")
-        ):
-            return protocol
-
-        operation = "update" if protocol.operation == "update" else "create"
-        adjusted = RequestProtocol(operation=operation, object="doc", route="doc")
-        self._store_request_protocol(llm_result, adjusted)
-        return adjusted
+        return self.execution_planner.adjust_protocol_for_instruction(
+            protocol,
+            instruction=instruction,
+            llm_result=llm_result,
+        )
 
     def _instruction_requests_doc(self, instruction: str) -> bool:
-        text = str(instruction or "").strip().lower()
-        if not text:
-            return False
-        explicit_doc_keywords = (
-            "文档",
-            "doc",
-            "document",
-            "飞书文档",
-            "协作文档",
-            "需求文档",
-            "写成材料",
-            "整理成材料",
-            "沉淀成材料",
-        )
-        return any(keyword in text for keyword in explicit_doc_keywords)
+        return self.execution_planner.instruction_requests_doc(instruction)
 
     def _llm_result_has_doc_package(self, llm_result: dict) -> bool:
-        doc = llm_result.get("doc") if isinstance(llm_result, dict) else None
-        return isinstance(doc, dict) and isinstance(doc.get("sections"), list) and bool(doc.get("sections"))
+        return self.execution_planner.llm_result_has_doc_package(llm_result)
 
     def _llm_plan_contains_step(self, llm_result: dict, step_type: str) -> bool:
-        raw_plan = llm_result.get("plan") if isinstance(llm_result, dict) else None
-        raw_steps = raw_plan.get("steps") if isinstance(raw_plan, dict) else None
-        if not isinstance(raw_steps, list):
-            return False
-        for item in raw_steps:
-            if not isinstance(item, dict):
-                continue
-            normalized = self._normalize_plan_step_type(str(item.get("type") or item.get("step_type") or ""))
-            if normalized == step_type:
-                return True
-        return False
+        return self.execution_planner.llm_plan_contains_step(llm_result, step_type)
 
     def _normalize_token(self, value: object) -> str:
-        return str(value or "").strip().lower().replace("-", "_")
+        return self.execution_planner.normalize_token(value)
 
     def _normalize_operation(self, value: object) -> str:
-        token = self._normalize_token(value)
-        aliases = {
-            "read": "read",
-            "query": "read",
-            "get": "read",
-            "list": "read",
-            "show": "read",
-            "answer": "read",
-            "status": "read",
-            "analyze": "analyze",
-            "analysis": "analyze",
-            "organize": "analyze",
-            "extract": "analyze",
-            "summarize": "analyze",
-            "update": "update",
-            "modify": "update",
-            "revise": "update",
-            "create": "create",
-            "generate": "create",
-            "write": "create",
-            "sync": "create",
-            "deliver": "deliver",
-            "share": "deliver",
-            "export": "deliver",
-            "archive": "deliver",
-            "help": "help",
-            "clarify": "help",
-            "unknown": "unknown",
-        }
-        return aliases.get(token, "")
+        return self.execution_planner.normalize_operation(value)
 
     def _normalize_object(self, value: object) -> str:
-        token = self._normalize_token(value)
-        aliases = {
-            "task": "tasks",
-            "tasks": "tasks",
-            "todo": "tasks",
-            "todos": "tasks",
-            "action_items": "tasks",
-            "summary": "summary",
-            "summaries": "summary",
-            "risk": "risks",
-            "risks": "risks",
-            "blockers": "risks",
-            "doc": "doc",
-            "document": "doc",
-            "feishu_doc": "doc",
-            "slides": "slides",
-            "slide": "slides",
-            "ppt": "slides",
-            "presentation": "slides",
-            "canvas": "canvas",
-            "whiteboard": "canvas",
-            "board": "canvas",
-            "diagram": "canvas",
-            "flowchart": "canvas",
-            "workspace": "workspace",
-            "project": "workspace",
-            "help": "workspace",
-            "unknown": "workspace",
-        }
-        return aliases.get(token, "")
+        return self.execution_planner.normalize_object(value)
 
     def _infer_protocol_from_legacy_result(self, llm_result: dict, route: str) -> RequestProtocol:
-        if route == "status" or str(llm_result.get("status_answer") or "").strip():
-            return RequestProtocol(operation="read", object="tasks", route="status")
-        if route == "tasks":
-            return RequestProtocol(operation="analyze", object="tasks", route="tasks")
-        if route == "summary":
-            return RequestProtocol(operation="analyze", object="summary", route="summary")
-        if route == "risks":
-            return RequestProtocol(operation="analyze", object="risks", route="risks")
-        if route == "doc":
-            return RequestProtocol(operation="create", object="doc", route="doc")
-        if route == "slides":
-            return RequestProtocol(operation="create", object="slides", route="slides")
-        if route == "canvas":
-            return RequestProtocol(operation="create", object="canvas", route="canvas")
-        if route == "unknown":
-            return RequestProtocol(operation="unknown", object="workspace", route="unknown")
-        return RequestProtocol(operation="help", object="workspace", route="help")
+        return self.execution_planner.infer_protocol_from_legacy_result(llm_result, route)
 
     def _canonical_route(self, operation: str, object_name: str, fallback: str) -> str:
-        if operation == "read":
-            return "status"
-        if operation == "analyze":
-            if object_name in {"summary", "risks"}:
-                return object_name
-            if object_name == "tasks":
-                return "tasks"
-            return fallback if fallback in {"summary", "tasks", "risks"} else "summary"
-        if operation == "update":
-            if object_name in {"summary", "risks"}:
-                return object_name
-            if object_name == "tasks":
-                return "tasks"
-            if object_name in {"doc", "slides", "canvas"}:
-                return object_name
-            return fallback if fallback in {"summary", "tasks", "risks", "doc", "slides", "canvas"} else "help"
-        if operation == "create":
-            if object_name in {"doc", "slides", "canvas"}:
-                return object_name
-            if object_name == "tasks":
-                return "tasks"
-            return fallback if fallback in {"doc", "slides"} else "doc"
-        if operation == "deliver":
-            return "help"
-        if operation == "unknown":
-            return "unknown"
-        return "help"
+        return self.execution_planner.canonical_route(operation, object_name, fallback)
 
     def _allowed_steps_for_protocol(self, protocol: RequestProtocol) -> set[str]:
-        if protocol.operation == "read":
-            return {"answer_status"}
-        if protocol.operation == "analyze":
-            return {"analyze_discussion"}
-        if protocol.operation in {"create", "update"}:
-            if protocol.object == "doc":
-                return {"sync_doc", "generate_slides"}
-            if protocol.object == "slides":
-                return {"generate_slides"}
-            if protocol.object == "canvas":
-                return {"generate_canvas"}
-            if protocol.object == "tasks":
-                return {"analyze_discussion"}
-            return {"reply_help"}
-        return {"reply_help"}
+        return self.execution_planner.allowed_steps_for_protocol(protocol)
 
     def _required_step_for_protocol(self, protocol: RequestProtocol) -> str:
-        if protocol.operation == "read":
-            return "answer_status"
-        if protocol.operation == "analyze":
-            return "analyze_discussion"
-        if protocol.operation in {"create", "update"} and protocol.object == "doc":
-            return "sync_doc"
-        if protocol.operation in {"create", "update"} and protocol.object == "slides":
-            return "generate_slides"
-        if protocol.operation in {"create", "update"} and protocol.object == "canvas":
-            return "generate_canvas"
-        if protocol.operation == "update" and protocol.object == "tasks":
-            return "analyze_discussion"
-        return "reply_help"
+        return self.execution_planner.required_step_for_protocol(protocol)
 
     def _enforce_protocol_on_plan(
         self,
@@ -1097,19 +897,9 @@ class FeishuWorkflowService:
         instruction: str,
         llm_result: dict,
     ) -> ExecutionPlan:
-        allowed_steps = self._allowed_steps_for_protocol(protocol)
-        filtered_steps = [step for step in plan.steps if step.step_type in allowed_steps]
-        required_step = self._required_step_for_protocol(protocol)
-        if filtered_steps and any(step.step_type == required_step for step in filtered_steps):
-            filtered_steps = self._append_optional_plan_steps_for_protocol(
-                filtered_steps,
-                protocol=protocol,
-                instruction=instruction,
-                llm_result=llm_result,
-            )
-            return ExecutionPlan(goal=plan.goal, primary_intent=protocol.route, steps=filtered_steps)
-        return self._build_fallback_plan(
-            intent=protocol.route,
+        return self.execution_planner.enforce_protocol_on_plan(
+            plan,
+            protocol=protocol,
             reason=reason,
             instruction=instruction,
             llm_result=llm_result,
@@ -1201,43 +991,15 @@ class FeishuWorkflowService:
         instruction: str,
         llm_result: dict,
     ) -> list[PlannerStep]:
-        if protocol.route != "doc" or not self._should_include_slides_step("doc", instruction, llm_result):
-            return steps
-        if any(step.step_type == "generate_slides" for step in steps):
-            return steps
-        dependency = steps[-1].step_id if steps else None
-        return [
-            *steps,
-            PlannerStep(
-                step_id=f"step_{len(steps) + 1}",
-                step_type="generate_slides",
-                title="基于当前文档生成演示稿",
-                depends_on=[dependency] if dependency else [],
-            ),
-        ]
+        return self.execution_planner.append_optional_plan_steps_for_protocol(
+            steps,
+            protocol=protocol,
+            instruction=instruction,
+            llm_result=llm_result,
+        )
 
     def _extract_clarification_request(self, llm_result: dict) -> dict | None:
-        raw = llm_result.get("clarification")
-        if not isinstance(raw, dict) or not bool(raw.get("needed")):
-            return None
-
-        question = str(raw.get("question") or "").strip()
-        if not question:
-            return None
-
-        options = (
-            [str(item).strip() for item in raw.get("options", []) if str(item).strip()][:4]
-            if isinstance(raw.get("options"), list)
-            else []
-        )
-        reason = str(raw.get("reason") or "").strip()
-        blocking = raw.get("blocking")
-        return {
-            "question": question,
-            "reason": reason,
-            "options": options,
-            "blocking": True if blocking is None else bool(blocking),
-        }
+        return self.execution_planner.extract_clarification_request(llm_result)
 
     def _resolve_execution_plan(
         self,
@@ -1248,49 +1010,12 @@ class FeishuWorkflowService:
         instruction: str,
         protocol: RequestProtocol | None = None,
     ) -> ExecutionPlan:
-        if protocol is None:
-            if (
-                llm_result.get("operation")
-                or llm_result.get("object")
-                or llm_result.get("action")
-                or llm_result.get("target")
-                or llm_result.get("route")
-            ):
-                protocol = self._normalize_request_protocol(llm_result)
-            else:
-                protocol = self._infer_protocol_from_legacy_result(llm_result, self._normalize_token(intent))
-        protocol = self._adjust_protocol_for_instruction(
-            protocol,
-            instruction=instruction,
-            llm_result=llm_result,
-        )
-        raw_plan = llm_result.get("plan")
-        if isinstance(raw_plan, dict):
-            normalized = self._normalize_execution_plan(
-                raw_plan,
-                intent=intent,
-                instruction=instruction,
-            )
-            if normalized.steps:
-                return self._enforce_protocol_on_plan(
-                    normalized,
-                    protocol=protocol,
-                    reason=reason,
-                    instruction=instruction,
-                    llm_result=llm_result,
-                )
-        plan = self._build_fallback_plan(
-            intent=protocol.route,
+        return self.execution_planner.resolve_execution_plan(
+            intent=intent,
             reason=reason,
-            instruction=instruction,
             llm_result=llm_result,
-        )
-        return self._enforce_protocol_on_plan(
-            plan,
+            instruction=instruction,
             protocol=protocol,
-            reason=reason,
-            instruction=instruction,
-            llm_result=llm_result,
         )
 
     def _normalize_execution_plan(
@@ -1300,34 +1025,11 @@ class FeishuWorkflowService:
         intent: str,
         instruction: str,
     ) -> ExecutionPlan:
-        goal = str(raw_plan.get("goal") or "").strip() or self._default_plan_goal(intent, instruction)
-        steps: list[PlannerStep] = []
-        raw_steps = raw_plan.get("steps")
-        if isinstance(raw_steps, list):
-            for index, item in enumerate(raw_steps, start=1):
-                if not isinstance(item, dict):
-                    continue
-                step_type = self._normalize_plan_step_type(str(item.get("type") or item.get("step_type") or "").strip())
-                if not step_type:
-                    continue
-                step_id = str(item.get("id") or item.get("step_id") or f"step_{index}").strip() or f"step_{index}"
-                title = str(item.get("title") or "").strip() or self._default_plan_step_title(step_type, intent)
-                depends_on = (
-                    [str(dep).strip() for dep in item.get("depends_on", []) if str(dep).strip()]
-                    if isinstance(item.get("depends_on"), list)
-                    else []
-                )
-                notes = str(item.get("notes") or "").strip() or None
-                steps.append(
-                    PlannerStep(
-                        step_id=step_id,
-                        step_type=step_type,
-                        title=title,
-                        depends_on=depends_on,
-                        notes=notes,
-                    )
-                )
-        return ExecutionPlan(goal=goal, primary_intent=intent or "help", steps=steps)
+        return self.execution_planner.normalize_execution_plan(
+            raw_plan,
+            intent=intent,
+            instruction=instruction,
+        )
 
     def _build_fallback_plan(
         self,
@@ -1337,147 +1039,27 @@ class FeishuWorkflowService:
         instruction: str,
         llm_result: dict,
     ) -> ExecutionPlan:
-        primary_intent = intent or "help"
-        wants_slides = self._should_include_slides_step(primary_intent, instruction, llm_result)
-        if primary_intent in {"summary", "tasks", "risks"}:
-            steps = [PlannerStep(step_id="step_1", step_type="analyze_discussion", title="分析讨论并整理结果")]
-        elif primary_intent == "doc":
-            steps = [PlannerStep(step_id="step_1", step_type="sync_doc", title="生成并同步文档")]
-            if wants_slides:
-                steps.append(
-                    PlannerStep(
-                        step_id="step_2",
-                        step_type="generate_slides",
-                        title="基于当前上下文生成演示稿",
-                        depends_on=["step_1"],
-                    )
-                )
-        elif primary_intent == "slides":
-            steps = [PlannerStep(step_id="step_1", step_type="generate_slides", title="生成演示稿大纲")]
-        elif primary_intent == "canvas":
-            steps = [PlannerStep(step_id="step_1", step_type="generate_canvas", title="Generate canvas artifact")]
-        elif primary_intent == "status":
-            steps = [PlannerStep(step_id="step_1", step_type="answer_status", title="回答当前协作状态")]
-        else:
-            steps = [PlannerStep(step_id="step_1", step_type="reply_help", title="给出下一步指引")]
-
-        return ExecutionPlan(
-            goal=self._default_plan_goal(primary_intent, instruction, reason=reason),
-            primary_intent=primary_intent,
-            steps=steps,
+        return self.execution_planner.build_fallback_plan(
+            intent=intent,
+            reason=reason,
+            instruction=instruction,
+            llm_result=llm_result,
         )
 
     def _normalize_plan_step_type(self, raw_type: str) -> str:
-        normalized = raw_type.lower().strip()
-        mapping = {
-            "analyze_discussion": "analyze_discussion",
-            "analyze": "analyze_discussion",
-            "summary": "analyze_discussion",
-            "summarize_context": "analyze_discussion",
-            "sync_doc": "sync_doc",
-            "generate_doc": "sync_doc",
-            "write_doc": "sync_doc",
-            "doc": "sync_doc",
-            "generate_slides": "generate_slides",
-            "slides": "generate_slides",
-            "presentation": "generate_slides",
-            "generate_canvas": "generate_canvas",
-            "canvas": "generate_canvas",
-            "whiteboard": "generate_canvas",
-            "diagram": "generate_canvas",
-            "answer_status": "answer_status",
-            "status": "answer_status",
-            "reply_help": "reply_help",
-            "help": "reply_help",
-        }
-        return mapping.get(normalized, "")
+        return self.execution_planner.normalize_plan_step_type(raw_type)
 
     def _default_plan_goal(self, intent: str, instruction: str, *, reason: str | None = None) -> str:
-        candidate = " ".join((instruction or "").split()).strip()
-        if candidate:
-            return candidate[:80]
-        if reason:
-            return reason[:80]
-        return {
-            "summary": "总结当前讨论",
-            "tasks": "整理任务清单",
-            "risks": "识别风险与卡点",
-            "doc": "生成并同步协作文档",
-            "slides": "生成演示稿",
-            "status": "回答当前状态问题",
-        }.get(intent, "完成当前协作请求")
+        return self.execution_planner.default_plan_goal(intent, instruction, reason=reason)
 
     def _default_plan_step_title(self, step_type: str, intent: str) -> str:
-        return {
-            "analyze_discussion": {
-                "summary": "总结当前讨论",
-                "tasks": "整理任务与待办",
-                "risks": "分析风险与卡点",
-            }.get(intent, "分析讨论内容"),
-            "sync_doc": "生成并同步文档",
-            "generate_slides": "生成演示稿",
-            "answer_status": "回答状态问题",
-            "reply_help": "给出下一步指引",
-        }.get(step_type, "执行计划步骤")
+        return self.execution_planner.default_plan_step_title(step_type, intent)
 
     def _should_include_slides_step(self, intent: str, instruction: str, llm_result: dict) -> bool:
-        if intent == "slides":
-            return True
-        if intent != "doc":
-            return False
-        requested_outputs = llm_result.get("requested_outputs")
-        if isinstance(requested_outputs, list) and "slides" in {
-            str(item).strip().lower() for item in requested_outputs
-        }:
-            return True
-        if isinstance(llm_result.get("slides"), dict) and llm_result.get("slides", {}).get("slides"):
-            return True
-        return self._is_outline_request(instruction)
+        return self.execution_planner.should_include_slides_step(intent, instruction, llm_result)
 
     def _build_plan_artifact(self, *, plan: ExecutionPlan, reason: str, llm_result: dict) -> dict | None:
-        next_actions = (
-            [str(item).strip() for item in llm_result.get("next_actions", []) if str(item).strip()]
-            if isinstance(llm_result.get("next_actions"), list)
-            else []
-        )
-        clarification = self._extract_clarification_request(llm_result)
-        preview = {
-            "goal": plan.goal,
-            "intent": plan.primary_intent or "unknown",
-            "operation": llm_result.get("operation") or "",
-            "object": llm_result.get("object") or "",
-            "route": llm_result.get("route") or plan.primary_intent or "unknown",
-            "reason": reason,
-            "steps": [
-                {
-                    "step_id": step.step_id,
-                    "step_type": step.step_type,
-                    "title": step.title,
-                    "depends_on": step.depends_on,
-                }
-                for step in plan.steps
-            ],
-            "next_actions": next_actions[:4],
-            "task_operation_count": len(llm_result.get("task_operations", []))
-            if isinstance(llm_result.get("task_operations"), list)
-            else 0,
-            "risk_count": len(llm_result.get("risks", []))
-            if isinstance(llm_result.get("risks"), list)
-            else 0,
-        }
-        if clarification:
-            preview["clarification"] = clarification
-
-        if not any(preview.values()):
-            return None
-
-        return {
-            "artifact_type": "agent_plan",
-            "provider": "llm",
-            "title": "Agent 执行规划",
-            "status": "needs_confirmation" if clarification and clarification["blocking"] else "ready",
-            "preview": preview,
-        }
+        return self.execution_planner.build_plan_artifact(plan=plan, reason=reason, llm_result=llm_result)
 
     def _append_artifacts(self, base: list[dict] | None, *extra: dict | None) -> list[dict]:
         combined = list(base or [])
@@ -1615,6 +1197,7 @@ class FeishuWorkflowService:
                 message,
                 llm_result=llm_result,
                 workspace_context=workspace_context,
+                task_run_id=task_run_id,
             )
         if step.step_type == "generate_canvas":
             return self._prepare_canvas_execution(
@@ -1651,26 +1234,29 @@ class FeishuWorkflowService:
         *,
         llm_result: dict,
         workspace_context: str,
+        task_run_id: str | None = None,
     ) -> dict:
         package = llm_result.get("slides")
+        provider = "llm"
         if not isinstance(package, dict) or not package.get("slides"):
             try:
                 package = self.llm_service.generate_presentation_package(workspace_context, message.text)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Slide package fallback generation failed: %s", exc)
                 package = self._build_fallback_presentation_package(message.session_id)
-        reply_preview = self._format_presentation_reply(package)
+                provider = "fallback"
+        presentation_tool = self._presentation_tool()
+        reply_preview = presentation_tool.format_reply(package)
+        artifact = presentation_tool.persist_artifact(
+            package,
+            provider=provider,
+            session_id=message.session_id,
+            task_run_id=task_run_id,
+        )
         return {
             "reply_preview": reply_preview,
             "analysis": None,
-            "artifacts": [
-                {
-                    "artifact_type": "slides_package",
-                    "provider": "llm",
-                    "title": str(package.get("theme") or "演示稿"),
-                    "preview": package,
-                }
-            ],
+            "artifacts": [artifact],
             "close_title": "slides",
         }
 
@@ -1684,7 +1270,8 @@ class FeishuWorkflowService:
     ) -> dict:
         canvas = llm_result.get("canvas") if isinstance(llm_result.get("canvas"), dict) else {}
         title = str(canvas.get("title") or self._task_run_title(message.text, "canvas")).strip() or "Canvas"
-        artifact = self.canvas_artifact_service.generate_flow(
+        canvas_tool = self._canvas_tool()
+        artifact = canvas_tool.generate_flow_artifact(
             title=title,
             instruction=message.text,
             llm_result=llm_result,
@@ -1692,8 +1279,7 @@ class FeishuWorkflowService:
             task_run_id=task_run_id,
             session_id=message.session_id,
         )
-        shape_count = len(artifact.get("preview", {}).get("shapes", [])) if isinstance(artifact.get("preview"), dict) else 0
-        reply_preview = f"Canvas artifact generated: {artifact['title']}\n- Shapes: {shape_count}\n- URL: {artifact['url']}"
+        reply_preview = canvas_tool.format_reply(artifact)
         return {
             "reply_preview": reply_preview,
             "analysis": None,
@@ -1807,12 +1393,7 @@ class FeishuWorkflowService:
         }
 
     def _combine_plan_replies(self, reply_parts: list[str]) -> str | None:
-        cleaned = [part.strip() for part in reply_parts if str(part).strip()]
-        if not cleaned:
-            return None
-        if len(cleaned) == 1:
-            return cleaned[0]
-        return "\n\n".join(cleaned)
+        return self.response_formatter.combine_plan_replies(reply_parts)
 
     def _pause_for_clarification(
         self,
@@ -1884,25 +1465,7 @@ class FeishuWorkflowService:
         return result
 
     def _format_clarification_reply(self, *, intent: str, clarification: dict) -> str:
-        label = {
-            "doc": "文档",
-            "slides": "演示稿",
-            "summary": "讨论总结",
-            "tasks": "任务整理",
-            "risks": "风险判断",
-            "status": "状态回答",
-        }.get(intent, "协作处理")
-        lines = [f"【Agent 需要再确认一下】({label})", clarification["question"]]
-        reason = str(clarification.get("reason") or "").strip()
-        if reason:
-            lines.append(f"原因：{reason}")
-        options = clarification.get("options") or []
-        if options:
-            lines.append("可选方案：")
-            for index, option in enumerate(options, start=1):
-                lines.append(f"{index}. {option}")
-        lines.append("你可以在工作台里直接确认，或继续回复我更具体的要求。")
-        return "\n".join(lines)
+        return self.response_formatter.format_clarification_reply(intent=intent, clarification=clarification)
 
     def resume_task_run_after_confirmation(
         self,
@@ -2016,54 +1579,42 @@ class FeishuWorkflowService:
             return None
 
         session_id = source_detail.session_id
-        task_run = self.task_run_service.create_task_run(
+        revision_start = self._workbench_revision_tool().start_run(
             session_id=session_id,
+            source_task_run_id=source_task_run_id,
             title=self._task_run_title(cleaned_instruction, "doc_revision"),
-            source_type="workbench",
-            source_ref=source_task_run_id,
-            created_by=requested_by,
             intent="doc",
+            requested_by=requested_by,
             metadata={
                 "source_task_run_id": source_task_run_id,
                 "revision_instruction": cleaned_instruction,
                 "requested_by": requested_by,
                 "document_id": (document_id or "").strip() or None,
             },
-        )
-        self.task_run_service.upsert_step(
-            task_run.task_run_id,
-            step_key="request_received",
-            title="接收文档修订指令",
-            step_type="input",
-            status="done",
+            step_title="接收文档修订指令",
             input_payload={
                 "source_task_run_id": source_task_run_id,
                 "instruction": cleaned_instruction,
                 "requested_by": requested_by,
                 "document_id": (document_id or "").strip() or None,
             },
-        )
-        self.task_run_service.update_task_run(
-            task_run.task_run_id,
             stage="building_context",
-            status="running",
         )
+        task_run = revision_start.task_run
 
-        synthetic_message_id = f"workbench:{task_run.task_run_id}"
-        self.memory_service.save_user_message(
+        synthetic_message_id = revision_start.synthetic_message_id
+        self._workbench_revision_tool().remember_user_instruction(
             session_id=session_id,
-            message_id=synthetic_message_id,
-            sender_id=requested_by,
-            content=cleaned_instruction,
-            embed=False,
+            synthetic_message_id=synthetic_message_id,
+            requested_by=requested_by,
+            instruction=cleaned_instruction,
+            label="document",
         )
-        workspace_context = self.memory_service.build_workspace_context(
-            session_id,
-            include_pending=True,
-            exclude_message_id=synthetic_message_id,
-            query_text=cleaned_instruction,
-            include_semantic_search=False,
-            episode_id=None,
+        workspace_context = self._workbench_revision_tool().build_workspace_context(
+            session_id=session_id,
+            synthetic_message_id=synthetic_message_id,
+            instruction=cleaned_instruction,
+            label="document",
         )
         try:
             requested_document_id = (document_id or "").strip()
@@ -2095,7 +1646,7 @@ class FeishuWorkflowService:
         if self.llm_service.is_configured():
             try:
                 self.task_run_service.update_task_run(task_run.task_run_id, stage="doc_revision_planning")
-                revision_instruction = self._build_document_revision_instruction(
+                revision_instruction = DocTool.build_document_revision_instruction(
                     cleaned_instruction,
                     current_doc=current_doc,
                 )
@@ -2183,26 +1734,177 @@ class FeishuWorkflowService:
 
         return self.task_run_service.get_task_run(task_run.task_run_id)
 
+    def bundle_delivery_from_task_run(self, task_run_id: str, *, requested_by: str = "pilot_workbench"):
+        return self._delivery_tool().bundle_from_task_run(task_run_id, requested_by=requested_by)
+
+    def _canvas_tool(self) -> CanvasTool:
+        self.canvas_tool.artifact_service = self.canvas_artifact_service
+        return self.canvas_tool
+
+    def _delivery_tool(self) -> DeliveryTool:
+        self.delivery_tool.delivery_artifact_service = self.delivery_artifact_service
+        self.delivery_tool.task_run_service = self.task_run_service
+        return self.delivery_tool
+
+    def _presentation_tool(self) -> PresentationTool:
+        self.presentation_tool.artifact_service = self.presentation_artifact_service
+        return self.presentation_tool
+
+    def _workbench_revision_tool(self) -> WorkbenchRevisionTool:
+        self.workbench_revision_tool.task_run_service = self.task_run_service
+        self.workbench_revision_tool.memory_service = self.memory_service
+        return self.workbench_revision_tool
+
+    def revise_slides_from_task_run(
+        self,
+        source_task_run_id: str,
+        *,
+        instruction: str,
+        requested_by: str = "pilot_workbench",
+        artifact_id: str | None = None,
+    ):
+        cleaned_instruction = " ".join((instruction or "").split()).strip()
+        if not cleaned_instruction:
+            raise ValueError("Slides revision instruction cannot be empty.")
+
+        source_detail = self.task_run_service.get_task_run(source_task_run_id)
+        if source_detail is None:
+            return None
+
+        presentation_tool = self._presentation_tool()
+        source_artifact = presentation_tool.resolve_slides_artifact(
+            getattr(source_detail, "artifacts", []),
+            artifact_id=artifact_id,
+        )
+        if source_artifact is None:
+            raise ValueError("No slides package artifact found for this task run.")
+        source_artifact_id = presentation_tool.artifact_field(source_artifact, "artifact_id")
+        current_package = presentation_tool.preview_payload(
+            presentation_tool.artifact_field(source_artifact, "preview_json")
+        )
+        if not current_package:
+            raise ValueError("Slides package artifact has no structured preview to revise.")
+
+        session_id = source_detail.session_id
+        revision_start = self._workbench_revision_tool().start_run(
+            session_id=session_id,
+            source_task_run_id=source_task_run_id,
+            title=self._task_run_title(cleaned_instruction, "slides_revision"),
+            intent="slides",
+            requested_by=requested_by,
+            metadata={
+                "source_task_run_id": source_task_run_id,
+                "source_artifact_id": source_artifact_id,
+                "revision_instruction": cleaned_instruction,
+                "requested_by": requested_by,
+            },
+            step_title="接收演示稿修订指令",
+            input_payload={
+                "source_task_run_id": source_task_run_id,
+                "source_artifact_id": source_artifact_id,
+                "instruction": cleaned_instruction,
+                "requested_by": requested_by,
+            },
+            stage="slides_revision_context",
+        )
+        task_run = revision_start.task_run
+
+        synthetic_message_id = revision_start.synthetic_message_id
+        self._workbench_revision_tool().remember_user_instruction(
+            session_id=session_id,
+            synthetic_message_id=synthetic_message_id,
+            requested_by=requested_by,
+            instruction=cleaned_instruction,
+            label="slides",
+        )
+        workspace_context = self._workbench_revision_tool().build_workspace_context(
+            session_id=session_id,
+            synthetic_message_id=synthetic_message_id,
+            instruction=cleaned_instruction,
+            label="slides",
+        )
+        workspace_context = self._join_context_blocks(
+            workspace_context,
+            "[当前演示稿包]\n" + json.dumps(current_package, ensure_ascii=False)[:12000],
+        )
+        self.task_run_service.upsert_step(
+            task_run.task_run_id,
+            step_key="workspace_context",
+            title="构建演示稿修订上下文",
+            step_type="context",
+            status="done",
+            output_payload={"context_length": len(workspace_context)},
+        )
+
+        provider = "local"
+        revised_package: dict
+        self.task_run_service.update_task_run(task_run.task_run_id, stage="slides_revision_processing")
+        if self.llm_service.is_configured():
+            try:
+                revised_package = self.llm_service.revise_presentation_package(
+                    current_package,
+                    workspace_context,
+                    cleaned_instruction,
+                )
+                provider = "llm"
+                self.task_run_service.upsert_step(
+                    task_run.task_run_id,
+                    step_key="intent_resolution",
+                    title="生成演示稿修订方案",
+                    step_type="intent",
+                    status="done",
+                    output_payload={"provider": provider},
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("LLM slides revision failed, using deterministic fallback: %s", exc)
+                revised_package = presentation_tool.revise_deterministic(
+                    current_package,
+                    cleaned_instruction,
+                )
+                provider = "fallback"
+                self.task_run_service.upsert_step(
+                    task_run.task_run_id,
+                    step_key="intent_resolution",
+                    title="生成演示稿修订方案",
+                    step_type="intent",
+                    status="failed",
+                    error=str(exc),
+                )
+        else:
+            revised_package = presentation_tool.revise_deterministic(current_package, cleaned_instruction)
+
+        base_version = coerce_positive_int(
+            current_package.get("version") or presentation_tool.artifact_field(source_artifact, "version")
+        )
+        revised_package["version"] = max(base_version + 1, 2)
+        artifact = presentation_tool.persist_artifact(
+            revised_package,
+            provider=provider,
+            session_id=session_id,
+            task_run_id=task_run.task_run_id,
+        )
+        reply_preview = "【演示稿修订】\n" + presentation_tool.format_reply(revised_package)
+        result = {
+            "session_id": session_id,
+            "episode_id": None,
+            "mode": "slides",
+            "analysis": None,
+            "reply_preview": reply_preview,
+            "reply_sent": False,
+            "reply_error": None,
+            "artifacts": [artifact],
+        }
+        self._persist_task_run_result(
+            task_run.task_run_id,
+            message_text=cleaned_instruction,
+            result=result,
+            session_id=session_id,
+        )
+        return self.task_run_service.get_task_run(task_run.task_run_id)
+
     def _build_confirmation_resume_instruction(self, instruction: str, answer_value: str) -> str:
         base = instruction.strip() or "继续刚才的任务"
         return f"{base}\n\n[用户刚刚确认]\n{answer_value}"
-
-    def _build_document_revision_instruction(self, instruction: str, *, current_doc: dict | None = None) -> str:
-        title = str((current_doc or {}).get("title") or "").strip()
-        version = (current_doc or {}).get("version")
-        current_note = ""
-        if title:
-            current_note = f"当前文档：{title}"
-            if version:
-                current_note += f"（v{version}）"
-            current_note += "。"
-        return (
-            "请基于当前协作文档执行一次文档修订。"
-            "优先复用已有文档结构，只输出需要更新后的文档内容；"
-            "如果用户指定了章节，请只改相关章节。"
-            f"{current_note}\n\n"
-            f"用户修订要求：{instruction}"
-        )
 
     def _persist_task_run_result(self, task_run_id: str, *, message_text: str, result: dict, session_id: str) -> None:
         if result["reply_preview"]:
@@ -2212,17 +1914,7 @@ class FeishuWorkflowService:
                 episode_id=result.get("episode_id"),
                 embed=False,
             )
-        for artifact in result.get("artifacts", []):
-            self.task_run_service.create_artifact(
-                task_run_id,
-                artifact_type=str(artifact.get("artifact_type") or "note"),
-                title=str(artifact.get("title") or "协作产物"),
-                provider=str(artifact.get("provider") or "local"),
-                status=str(artifact.get("status") or "ready"),
-                url=str(artifact.get("url") or "").strip() or None,
-                preview=artifact.get("preview") if isinstance(artifact.get("preview"), dict) else None,
-                version=max(int(artifact.get("version") or 1), 1),
-            )
+        self._persist_artifacts(task_run_id, result.get("artifacts", []))
         summary_text = (
             result["analysis"].summary
             if result.get("analysis") is not None
@@ -2262,6 +1954,21 @@ class FeishuWorkflowService:
             latest_reply_preview=result.get("reply_preview"),
             latest_error=result.get("reply_error"),
         )
+
+    def _persist_artifacts(self, task_run_id: str, artifacts: list | None) -> None:
+        for artifact in artifacts or []:
+            if not isinstance(artifact, dict):
+                continue
+            self.task_run_service.create_artifact(
+                task_run_id,
+                artifact_type=str(artifact.get("artifact_type") or "note"),
+                title=str(artifact.get("title") or "协作产物"),
+                provider=str(artifact.get("provider") or "local"),
+                status=str(artifact.get("status") or "ready"),
+                url=str(artifact.get("url") or "").strip() or None,
+                preview=artifact.get("preview") if isinstance(artifact.get("preview"), dict) else None,
+                version=coerce_positive_int(artifact.get("version")),
+            )
 
     def _build_analysis_from_llm(
         self,
@@ -2351,45 +2058,10 @@ class FeishuWorkflowService:
         ]
 
     def _apply_llm_task_operations(self, current_tasks: list[TaskItem], operations: list[dict]) -> list[TaskItem]:
-        refreshed = [task.model_copy(deep=True) for task in current_tasks]
-        for operation in operations:
-            if not isinstance(operation, dict):
-                continue
-            action = str(operation.get("action") or "").strip().lower()
-            match_hint = operation.get("match_hint") if isinstance(operation.get("match_hint"), dict) else {}
-            task_payload = operation.get("task") if isinstance(operation.get("task"), dict) else None
-
-            if action == "create" and task_payload:
-                refreshed.append(TaskItem.model_validate(task_payload))
-                continue
-
-            target_index = self._find_operation_target(refreshed, match_hint, task_payload)
-            if target_index is None:
-                if action == "create" and task_payload:
-                    refreshed.append(TaskItem.model_validate(task_payload))
-                continue
-
-            if action == "remove":
-                refreshed.pop(target_index)
-                continue
-
-            if action == "update" and task_payload:
-                refreshed[target_index] = TaskItem.model_validate(task_payload)
-
-        return refreshed
+        return TaskOperationTool.apply_llm_operations(current_tasks, operations)
 
     def _merge_task_items(self, current_tasks: list[TaskItem], refreshed_tasks: list[TaskItem]) -> list[TaskItem]:
-        if not current_tasks:
-            return [task.model_copy(deep=True) for task in refreshed_tasks]
-
-        merged = [task.model_copy(deep=True) for task in current_tasks]
-        for task in refreshed_tasks:
-            target_index = self._find_merge_target(merged, task)
-            if target_index is None:
-                merged.append(task.model_copy(deep=True))
-                continue
-            merged[target_index] = task.model_copy(deep=True)
-        return merged
+        return TaskOperationTool.merge_task_items(current_tasks, refreshed_tasks)
 
     def _update_current_tasks_from_discussion(
         self,
@@ -2397,38 +2069,14 @@ class FeishuWorkflowService:
         source_text: str,
         llm_tasks: list[TaskItem],
     ) -> list[TaskItem]:
-        updated = apply_discussion_updates(current_tasks, source_text)
-        explicit_tasks = normalize_tasks(extract_tasks(source_text))
-        if explicit_tasks:
-            return self._merge_task_items(updated, explicit_tasks)
-        if llm_tasks:
-            return self._merge_task_items(updated, llm_tasks)
-        return updated
+        return TaskOperationTool.update_current_tasks_from_discussion(
+            current_tasks,
+            source_text,
+            llm_tasks,
+        )
 
     def _find_merge_target(self, tasks: list[TaskItem], incoming_task: TaskItem) -> int | None:
-        incoming_title = " ".join((incoming_task.title or "").lower().split())
-        incoming_owner = " ".join((incoming_task.owner or "").lower().split())
-
-        exact_matches = [
-            idx
-            for idx, task in enumerate(tasks)
-            if " ".join((task.title or "").lower().split()) == incoming_title
-            and " ".join((task.owner or "").lower().split()) == incoming_owner
-        ]
-        if len(exact_matches) == 1:
-            return exact_matches[0]
-
-        owner_missing = incoming_owner in {"", "tbd"}
-        if owner_missing:
-            title_matches = [
-                idx
-                for idx, task in enumerate(tasks)
-                if " ".join((task.title or "").lower().split()) == incoming_title
-            ]
-            if len(title_matches) == 1:
-                return title_matches[0]
-
-        return None
+        return TaskOperationTool.find_merge_target(tasks, incoming_task)
 
     def _find_operation_target(
         self,
@@ -2436,38 +2084,7 @@ class FeishuWorkflowService:
         match_hint: dict,
         task_payload: dict | None,
     ) -> int | None:
-        hint_title = str(match_hint.get("title") or "").strip()
-        hint_owner = str(match_hint.get("owner") or "").strip()
-        payload_title = str(task_payload.get("title") or "").strip() if task_payload else ""
-        payload_owner = str(task_payload.get("owner") or "").strip() if task_payload else ""
-
-        def normalized(value: str) -> str:
-            return " ".join(value.lower().split())
-
-        candidates: list[tuple[str, str]] = []
-        if hint_title or hint_owner:
-            candidates.append((hint_title, hint_owner))
-        if payload_title or payload_owner:
-            candidates.append((payload_title, payload_owner))
-
-        for title, owner in candidates:
-            exact_matches = [
-                idx
-                for idx, task in enumerate(tasks)
-                if (not title or normalized(task.title) == normalized(title))
-                and (not owner or normalized(task.owner) == normalized(owner))
-            ]
-            if len(exact_matches) == 1:
-                return exact_matches[0]
-
-        for title, _ in candidates:
-            if not title:
-                continue
-            title_matches = [idx for idx, task in enumerate(tasks) if normalized(task.title) == normalized(title)]
-            if len(title_matches) == 1:
-                return title_matches[0]
-
-        return None
+        return TaskOperationTool.find_operation_target(tasks, match_hint, task_payload)
 
     def _handle_fallback_request(
         self,
@@ -2539,27 +2156,29 @@ class FeishuWorkflowService:
             reply = "我这边还没有拿到可用的讨论素材。先在群里把目标、分工和结论聊出来，再让我生成汇报大纲会更准确。"
             return self._deliver_reply(message, "slides", reply, analysis=None)
 
+        provider = "llm"
         try:
             package = self.llm_service.generate_presentation_package(workspace_context, message.text)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Slide outline generation failed, falling back to template: %s", exc)
             package = self._build_fallback_presentation_package(message.session_id)
+            provider = "fallback"
 
-        reply_preview = self._format_presentation_reply(package)
+        presentation_tool = self._presentation_tool()
+        reply_preview = presentation_tool.format_reply(package)
+        artifact = presentation_tool.persist_artifact(
+            package,
+            provider=provider,
+            session_id=message.session_id,
+            task_run_id=task_run_id,
+        )
         result = self._deliver_reply(
             message,
             "slides",
             reply_preview,
             analysis=None,
             episode_id=active_episode_id,
-            artifacts=[
-                {
-                    "artifact_type": "slides_package",
-                    "provider": "fallback",
-                    "title": str(package.get("theme") or "演示稿"),
-                    "preview": package,
-                }
-            ],
+            artifacts=[artifact],
         )
         if active_episode_id is not None and self._should_close_episode(result, reply_preview):
             self.memory_service.close_active_episode(message.session_id, title="slides")
@@ -2720,106 +2339,21 @@ class FeishuWorkflowService:
         episode_id: int | None,
         stats_as_of: str | None = None,
     ) -> dict | None:
-        provided = llm_result.get("doc") if isinstance(llm_result, dict) else None
-        if not isinstance(provided, dict):
-            return None
-        sections = provided.get("sections")
-        if not isinstance(sections, list) or not sections:
-            return None
         resolved_stats_as_of = stats_as_of or self._resolve_doc_stats_as_of(session_id, episode_id=episode_id)
-        base_title = str(provided.get("title") or "").strip() or self._default_doc_title(
-            instruction,
+        return self.document_package_builder.package_from_llm_result(
+            instruction=instruction,
+            llm_result=llm_result,
             stats_as_of=resolved_stats_as_of,
         )
-        return {
-            "title": self._compose_doc_title(base_title, stats_as_of=resolved_stats_as_of),
-            "stats_as_of": resolved_stats_as_of,
-            "sections": self._normalize_doc_sections(sections),
-        }
 
     def _is_outline_request(self, instruction: str) -> bool:
-        return any(keyword in instruction for keyword in ("汇报", "路演", "大纲", "PPT", "ppt", "演示"))
+        return self.document_package_builder.is_outline_request(instruction)
 
     def _document_from_analysis(self, analysis: AnalyzeResponse, instruction: str, *, stats_as_of: str | None = None) -> dict:
-        sections = [
-            {
-                "heading": "讨论摘要",
-                "paragraphs": [analysis.summary],
-            }
-        ]
-        if analysis.tasks:
-            sections.append(
-                {
-                    "heading": "任务清单",
-                    "paragraphs": [
-                        f"{idx}. {task.title}｜负责人：{task.owner}｜截止：{task.due_date}｜优先级：{task.priority}"
-                        for idx, task in enumerate(analysis.tasks, start=1)
-                    ],
-                }
-            )
-        if analysis.risks:
-            sections.append(
-                {
-                    "heading": "风险与卡点",
-                    "paragraphs": [f"{idx}. {risk}" for idx, risk in enumerate(analysis.risks, start=1)],
-                }
-            )
-        if analysis.next_actions:
-            sections.append(
-                {
-                    "heading": "下一步建议",
-                    "paragraphs": [f"{idx}. {item}" for idx, item in enumerate(analysis.next_actions, start=1)],
-                }
-            )
-        return {
-            "title": self._default_doc_title(instruction, stats_as_of=stats_as_of),
-            "stats_as_of": stats_as_of,
-            "sections": self._normalize_doc_sections(sections),
-        }
+        return self.document_package_builder.from_analysis(analysis, instruction, stats_as_of=stats_as_of)
 
     def _document_from_presentation(self, package: dict, instruction: str, *, stats_as_of: str | None = None) -> dict:
-        theme = str(package.get("theme") or "汇报大纲").strip()
-        audience = str(package.get("audience") or "团队协作汇报").strip()
-        slides = package.get("slides") if isinstance(package.get("slides"), list) else []
-        emphasis = package.get("emphasis") if isinstance(package.get("emphasis"), list) else []
-        assets = package.get("assets") if isinstance(package.get("assets"), list) else []
-
-        sections = [
-            {
-                "heading": "文档说明",
-                "paragraphs": [f"主题：{theme}", f"适用场景：{audience}"],
-            }
-        ]
-        for index, slide in enumerate(slides[:7], start=1):
-            if not isinstance(slide, dict):
-                continue
-            title = str(slide.get("title") or f"P{index}").strip()
-            bullets = slide.get("bullets") if isinstance(slide.get("bullets"), list) else []
-            sections.append(
-                {
-                    "heading": f"P{index}. {title}",
-                    "paragraphs": [str(item).strip() for item in bullets if str(item).strip()],
-                }
-            )
-        if emphasis:
-            sections.append(
-                {
-                    "heading": "演示重点",
-                    "paragraphs": [str(item).strip() for item in emphasis if str(item).strip()],
-                }
-            )
-        if assets:
-            sections.append(
-                {
-                    "heading": "建议补充素材",
-                    "paragraphs": [str(item).strip() for item in assets if str(item).strip()],
-                }
-            )
-        return {
-            "title": self._default_doc_title(instruction, fallback=theme, stats_as_of=stats_as_of),
-            "stats_as_of": stats_as_of,
-            "sections": self._normalize_doc_sections(sections),
-        }
+        return self.document_package_builder.from_presentation(package, instruction, stats_as_of=stats_as_of)
 
     def _normalize_doc_sections(self, sections: list[dict]) -> list[dict]:
         return DocTool.normalize_doc_sections(sections)
@@ -3009,7 +2543,7 @@ class FeishuWorkflowService:
             "document_id": str(document_info.get("document_id") or "").strip() or None,
             "title": str(document_info.get("title") or "").strip() or None,
             "url": url,
-            "version": max(int(document_info.get("version") or 1), 1),
+            "version": coerce_positive_int(document_info.get("version")),
             "updated_at": str(document_info.get("updated_at") or "").strip() or None,
             "summary": [line.strip() for line in sync_lines if str(line).strip()],
         }
@@ -3052,7 +2586,7 @@ class FeishuWorkflowService:
             "document_id": str(current_doc.get("document_id") or "").strip() or None,
             "title": str(current_doc.get("title") or "").strip() or None,
             "url": str(current_doc.get("url") or "").strip() or None,
-            "version": max(int(current_doc.get("version") or 1), 1),
+            "version": coerce_positive_int(current_doc.get("version")),
             "updated_at": str(current_doc.get("updated_at") or "").strip() or None,
         }
 
@@ -3082,23 +2616,7 @@ class FeishuWorkflowService:
         return lines
 
     def _format_doc_reply(self, package: dict, sync_lines: list[str]) -> str:
-        sections = package.get("sections") if isinstance(package.get("sections"), list) else []
-        lines = ["【文档同步】", f"标题：{str(package.get('title') or '协同文档').strip()}"]
-        if sections:
-            lines.append("正文结构：")
-            for index, section in enumerate(sections[:6], start=1):
-                if not isinstance(section, dict):
-                    continue
-                heading = str(section.get("heading") or f"部分 {index}").strip()
-                paragraphs = section.get("paragraphs") if isinstance(section.get("paragraphs"), list) else []
-                lines.append(f"{index}. {heading}")
-                for paragraph in paragraphs[:2]:
-                    content = str(paragraph).strip()
-                    if content:
-                        lines.append(f"- {content}")
-        lines.append("同步结果：")
-        lines.extend(sync_lines)
-        return "\n".join(lines)
+        return self.response_formatter.format_doc_reply(package, sync_lines)
 
     def _default_doc_title(self, instruction: str, fallback: str | None = None, stats_as_of: str | None = None) -> str:
         timestamp = stats_as_of or self._doc_title_timestamp()
@@ -3111,7 +2629,7 @@ class FeishuWorkflowService:
         return self._compose_doc_title(f"{settings.feishu_doc_title_prefix} - 讨论整理", stats_as_of=timestamp)
 
     def _doc_title_timestamp(self) -> str:
-        return datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M")
+        return self.document_package_builder.title_timestamp()
 
     def _resolve_doc_stats_as_of(self, session_id: str, *, episode_id: int | None) -> str | None:
         cutoff_at = self.memory_service.get_discussion_cutoff_at(session_id, episode_id=episode_id)
@@ -3122,14 +2640,7 @@ class FeishuWorkflowService:
         return cutoff_at.astimezone(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M")
 
     def _compose_doc_title(self, base_title: str, *, stats_as_of: str | None) -> str:
-        title = base_title.strip()
-        if not title:
-            title = settings.feishu_doc_title_prefix
-        if "统计至" in title:
-            return title
-        if stats_as_of:
-            return f"{title} - 统计至{stats_as_of}"
-        return title
+        return self.document_package_builder.compose_title(base_title, stats_as_of=stats_as_of)
 
     def _empty_result(self, session_id: str, mode: str) -> dict:
         return {
@@ -3212,132 +2723,22 @@ class FeishuWorkflowService:
         analysis: AnalyzeResponse,
         mode: str,
     ) -> str:
-        header = {
-            "summary": "【讨论总结】",
-            "tasks": "【待办清单】",
-            "risks": "【风险与卡点】",
-        }.get(mode, "【协作整理】")
-
-        lines = [header, f"摘要：{analysis.summary}"]
-
-        if mode in {"summary", "tasks"}:
-            lines.append("任务：")
-            if analysis.tasks:
-                for idx, task in enumerate(analysis.tasks, start=1):
-                    lines.append(
-                        f"{idx}. {task.title} | 负责人：{task.owner} | 截止：{task.due_date} | 优先级：{task.priority}"
-                    )
-            else:
-                lines.append("1. 当前讨论还没有形成明确待办。")
-
-        if mode in {"summary", "risks"}:
-            lines.append("风险：")
-            if analysis.risks:
-                for idx, risk in enumerate(analysis.risks, start=1):
-                    lines.append(f"{idx}. {risk}")
-            else:
-                lines.append("1. 当前没有识别到新的显性风险。")
-
-        lines.append("下一步建议：")
-        for idx, action in enumerate(analysis.next_actions, start=1):
-            lines.append(f"{idx}. {action}")
-
-        return "\n".join(lines)
+        return self.response_formatter.format_analysis_reply(analysis, mode)
 
     def _format_status_reply(self, query: str, tasks: list, payload: dict) -> str:
-        if "风险" in query or "卡点" in query or "阻塞" in query:
-            risks = payload.get("risks") if isinstance(payload.get("risks"), list) else []
-            if not risks:
-                risks = ["当前没有额外记录到新的风险项。"]
-            lines = ["【当前风险】"]
-            for idx, risk in enumerate(risks, start=1):
-                lines.append(f"{idx}. {risk}")
-            return "\n".join(lines)
-
-        if "总结" in query or "结论" in query or "摘要" in query or "概览" in query:
-            summary = str(payload.get("summary") or "").strip()
-            if not summary:
-                return "我这边还没有现成的讨论总结。你可以先让我总结一下当前讨论。"
-            return "\n".join(["【当前总结】", summary])
-
-        if not tasks:
-            return "我这边还没有现成的任务快照。你可以先让我总结一下或整理待办，我再基于结果回答状态问题。"
-
-        if "没负责人" in query or "未分配" in query:
-            pending = [task for task in tasks if task.owner == "TBD"]
-            if not pending:
-                return "【负责人检查】\n当前任务都已经有明确负责人，没有未分配项。"
-            lines = ["【负责人检查】", "以下任务还没有明确负责人："]
-            for idx, task in enumerate(pending, start=1):
-                lines.append(f"{idx}. {task.title} | 截止：{task.due_date}")
-            return "\n".join(lines)
-
-        if "谁负责" in query:
-            lines = ["【当前分工】"]
-            for idx, task in enumerate(tasks, start=1):
-                lines.append(f"{idx}. {task.title} -> {task.owner}")
-            return "\n".join(lines)
-
-        if "截止" in query or "到期" in query:
-            lines = ["【时间节点】"]
-            for idx, task in enumerate(tasks, start=1):
-                lines.append(f"{idx}. {task.title} | 截止：{task.due_date}")
-            return "\n".join(lines)
-
-        if "风险" in query or "卡点" in query or "阻塞" in query:
-            risks = payload.get("risks") if isinstance(payload.get("risks"), list) else []
-            if not risks:
-                risks = ["当前没有额外记录到新的风险项，但仍建议确认负责人和截止时间。"]
-            lines = ["【当前风险】"]
-            for idx, risk in enumerate(risks, start=1):
-                lines.append(f"{idx}. {risk}")
-            return "\n".join(lines)
-
-        completed = sum(1 for task in tasks if str(task.status).lower() == "done")
-        unassigned = sum(1 for task in tasks if task.owner == "TBD")
-        return "\n".join(
-            [
-                "【当前协作状态】",
-                f"- 任务总数：{len(tasks)}",
-                f"- 已完成：{completed}",
-                f"- 待确认负责人：{unassigned}",
-                "- 如需更具体输出，可以继续问：谁负责什么 / 哪些任务没负责人 / 当前有什么风险。",
-            ]
-        )
-
-    def _format_presentation_reply(self, package: dict) -> str:
-        theme = str(package.get("theme") or "基于群聊讨论的协作汇报").strip()
-        audience = str(package.get("audience") or "项目汇报 / 路演准备").strip()
-        slides = package.get("slides") if isinstance(package.get("slides"), list) else []
-        emphasis = package.get("emphasis") if isinstance(package.get("emphasis"), list) else []
-        assets = package.get("assets") if isinstance(package.get("assets"), list) else []
-
-        lines = ["【汇报大纲】", f"主题：{theme}", f"适用场景：{audience}"]
-
-        for index, slide in enumerate(slides[:7], start=1):
-            if not isinstance(slide, dict):
-                continue
-            title = str(slide.get("title") or f"第{index}页").strip()
-            bullets = slide.get("bullets") if isinstance(slide.get("bullets"), list) else []
-            lines.append(f"P{index}. {title}")
-            for bullet in bullets[:4]:
-                lines.append(f"- {str(bullet).strip()}")
-
-        if emphasis:
-            lines.append("演示时重点强调：")
-            for item in emphasis[:3]:
-                lines.append(f"- {str(item).strip()}")
-
-        if assets:
-            lines.append("建议补充素材：")
-            for item in assets[:4]:
-                lines.append(f"- {str(item).strip()}")
-
-        return "\n".join(lines)
+        return self.response_formatter.format_status_reply(query, tasks, payload)
 
     def _build_fallback_presentation_package(self, session_id: str) -> dict:
-        tasks = self.memory_service.get_current_tasks(session_id)
-        payload = self.memory_service.load_memory_payload(session_id)
+        try:
+            tasks = self.memory_service.get_current_tasks(session_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to load tasks for fallback presentation package: %s", exc)
+            tasks = []
+        try:
+            payload = self.memory_service.load_memory_payload(session_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to load memory payload for fallback presentation package: %s", exc)
+            payload = {}
 
         task_lines = [
             f"{task.title}（负责人：{task.owner}，截止：{task.due_date}）"
@@ -3378,16 +2779,4 @@ class FeishuWorkflowService:
         }
 
     def _format_help_reply(self, reason: str | None = None) -> str:
-        lines = ["【我可以这样帮你】"]
-        if reason:
-            lines.append(f"提示：{reason}")
-        lines.extend(
-            [
-                "- @我 总结一下这次讨论",
-                "- @我 帮我整理待办",
-                "- @我 看一下当前风险和卡点",
-                "- @我 现在还有哪些任务没负责人",
-                "- @我 帮我搞个汇报大纲",
-            ]
-        )
-        return "\n".join(lines)
+        return self.response_formatter.format_help_reply(reason)

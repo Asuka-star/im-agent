@@ -10,7 +10,7 @@ from app.schemas.task import TaskItem
 from app.services.memory_service import MemoryService
 from app.services.feishu_workflow import FeishuWorkflowService
 from app.services.interaction import InteractionService
-from app.services.doc_tool import DocTool
+from app.services.doc_tool import DocTool, DocumentSyncResult
 from app.services.office_artifact_service import OfficeArtifactService
 from app.services.session_document_service import SessionDocumentService
 
@@ -523,6 +523,29 @@ class DocSyncTests(unittest.TestCase):
         selected = session_service.get_document("history_session", "doc_a")
         self.assertIsNotNone(selected)
         self.assertEqual(selected["title"], "文档 A")
+
+    def test_session_document_service_tolerates_non_numeric_version(self) -> None:
+        session_service = SessionDocumentService(state_service=_MemoryStateService())
+        document = session_service.save_current_document(
+            "version_session",
+            document_id="doc_a",
+            url="https://feishu.cn/docx/doc_a",
+            title="文档 A",
+            version="draft",
+            sync_mode="created",
+        )
+
+        self.assertEqual(document["version"], 1)
+
+    def test_document_sync_result_tolerates_non_numeric_version(self) -> None:
+        result = DocumentSyncResult(
+            mode="updated",
+            status="ready",
+            summary_lines=[],
+            document_info={"version": "draft"},
+        )
+
+        self.assertEqual(result.version, 1)
 
     def test_session_document_service_orders_current_first_then_recent_history(self) -> None:
         state_service = _MemoryStateService()
