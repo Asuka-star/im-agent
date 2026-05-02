@@ -4,6 +4,7 @@ import json
 import logging
 import re
 
+from app.core.config import settings
 from app.services.artifact_edit_plan import ArtifactEditPlan, ArtifactEditPlanner
 from app.services.presentation_artifact_service import PresentationArtifactService
 
@@ -13,6 +14,8 @@ logger = logging.getLogger(__name__)
 
 class PresentationTool:
     """Handles presentation package formatting, artifact persistence, and local revisions."""
+
+    PUBLIC_PREVIEW_BASE_URL = settings.artifact_public_base_url
 
     def __init__(self, *, artifact_service: PresentationArtifactService) -> None:
         self.artifact_service = artifact_service
@@ -42,12 +45,15 @@ class PresentationTool:
                 "preview": package,
             }
 
-    def format_reply(self, package: dict) -> str:
+    def format_reply(self, package: dict, *, artifact: dict | None = None) -> str:
+        if artifact and isinstance(artifact.get("preview"), dict):
+            package = artifact["preview"]
         theme = str(package.get("theme") or "基于群聊讨论的协作汇报").strip()
         audience = str(package.get("audience") or "项目汇报 / 路演准备").strip()
         slides = package.get("slides") if isinstance(package.get("slides"), list) else []
         emphasis = package.get("emphasis") if isinstance(package.get("emphasis"), list) else []
         assets = package.get("assets") if isinstance(package.get("assets"), list) else []
+        exports = package.get("exports") if isinstance(package.get("exports"), dict) else {}
 
         lines = ["【汇报大纲】", f"主题：{theme}", f"适用场景：{audience}"]
         for index, slide in enumerate(slides[:7], start=1):
@@ -69,7 +75,27 @@ class PresentationTool:
             for item in assets[:4]:
                 lines.append(f"- {str(item).strip()}")
 
+        preview_url = self.public_preview_url(artifact.get("url") if artifact else exports.get("html"))
+        pptx_url = self.public_preview_url(exports.get("pptx"))
+        if preview_url or pptx_url:
+            lines.append("产物链接：")
+            if preview_url:
+                lines.append(f"- 预览链接：{preview_url}")
+            if pptx_url:
+                lines.append(f"- PPT 下载：{pptx_url}")
+
         return "\n".join(lines)
+
+    @classmethod
+    def public_preview_url(cls, value: object) -> str:
+        url = str(value or "").strip()
+        if not url:
+            return ""
+        if url.startswith(("http://", "https://")):
+            return url
+        if not url.startswith("/"):
+            url = f"/{url}"
+        return f"{cls.PUBLIC_PREVIEW_BASE_URL.rstrip('/')}{url}"
 
     def resolve_slides_artifact(self, artifacts: list | None, *, artifact_id: str | None = None):
         requested_id = (artifact_id or "").strip()

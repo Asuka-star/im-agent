@@ -12,7 +12,9 @@ from app.schemas.task_run import (
     TaskRunDetail,
     TaskRunSummary,
 )
+from app.schemas.next_action import NextActionBundle
 from app.services.feishu_workflow import FeishuWorkflowService
+from app.services.next_action_service import ContextualNextActionService
 from app.services.task_run_service import TaskRunService
 
 
@@ -20,6 +22,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 task_run_service = TaskRunService()
 workflow_service = FeishuWorkflowService()
+next_action_service = ContextualNextActionService()
 
 
 @router.get("/", response_model=list[TaskRunSummary])
@@ -43,6 +46,14 @@ async def get_task_run(task_run_id: str) -> TaskRunDetail:
     if record is None:
         raise HTTPException(status_code=404, detail="Task run not found")
     return record
+
+
+@router.get("/{task_run_id}/recommendations", response_model=NextActionBundle)
+async def get_task_run_recommendations(task_run_id: str) -> NextActionBundle:
+    record = task_run_service.get_task_run(task_run_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Task run not found")
+    return next_action_service.build_for_task_run(record)
 
 
 @router.post("/{task_run_id}/confirm", response_model=ConfirmationAnswerResponse)

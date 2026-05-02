@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.schemas.analyze import AnalyzeResponse
+from app.schemas.next_action import NextActionBundle
 
 
 class ResponseFormatter:
@@ -15,6 +16,25 @@ class ResponseFormatter:
         if len(cleaned) == 1:
             return cleaned[0]
         return "\n\n".join(cleaned)
+
+    def format_next_action_block(self, bundle: NextActionBundle) -> str:
+        if not bundle.recommendations:
+            return ""
+        lines = ["我建议下一步可以："]
+        for index, action in enumerate(bundle.recommendations[:3], start=1):
+            lines.append(f"{index}. {action.title}")
+            if action.reason:
+                lines.append(f"   原因：{action.reason}")
+            if action.command:
+                lines.append(f"   你可以回复：{action.command}")
+        return "\n".join(lines)
+
+    def append_next_actions(self, reply: str | None, bundle: NextActionBundle) -> str | None:
+        block = self.format_next_action_block(bundle)
+        if not block:
+            return reply
+        cleaned_reply = str(reply or "").strip()
+        return f"{cleaned_reply}\n\n{block}" if cleaned_reply else block
 
     def format_clarification_reply(self, *, intent: str, clarification: dict) -> str:
         label = {

@@ -16,6 +16,7 @@ from app.schemas.analyze import AgentTrace, AnalyzeRequest, AnalyzeResponse
 from app.schemas.feishu_event import FeishuMessageContext
 from app.schemas.planner import ExecutionPlan, PlannerStep
 from app.schemas.task import TaskItem
+from app.schemas.task_run import ArtifactRecord, TaskRunDetail
 from app.services.due_date import normalize_task_dates
 from app.services.interaction import InteractionService
 from app.services.canvas_artifact_service import CanvasArtifactService
@@ -27,6 +28,7 @@ from app.services.doc_tool import DocTool, DocumentSyncResult
 from app.services.execution_planner import ExecutionPlanner, RequestProtocol
 from app.services.llm import LLMService
 from app.services.memory_service import MemoryService
+from app.services.next_action_service import ContextualNextActionService
 from app.services.office_artifact_service import OfficeArtifactService
 from app.services.presentation_artifact_service import PresentationArtifactService
 from app.services.presentation_tool import PresentationTool
@@ -77,6 +79,7 @@ class FeishuWorkflowService:
         )
         self.interaction_service = InteractionService()
         self.llm_service = LLMService()
+        self.next_action_service = ContextualNextActionService(llm_service=self.llm_service, enable_llm=False)
         self.execution_planner = ExecutionPlanner()
         self.request_router = RequestRouter()
         self.response_formatter = ResponseFormatter()
@@ -257,6 +260,7 @@ class FeishuWorkflowService:
             latest_reply_preview=result.get("reply_preview"),
             latest_error=result.get("reply_error"),
         )
+        self._store_next_action_recommendations(task_run.task_run_id)
         result["task_run_id"] = task_run.task_run_id
         logger.info(
             "Workflow stage completed: message_id=%s stage=workflow_done total_elapsed_ms=%.1f",
@@ -1569,6 +1573,7 @@ class FeishuWorkflowService:
                 message,
                 llm_result=llm_result,
                 active_episode_id=active_episode_id,
+                task_run_id=task_run_id,
             )
         if step.step_type == "analyze_discussion":
             return self._prepare_analysis_execution(
@@ -1598,13 +1603,13 @@ class FeishuWorkflowService:
                 package = self._build_fallback_presentation_package(message.session_id)
                 provider = "fallback"
         presentation_tool = self._presentation_tool()
-        reply_preview = presentation_tool.format_reply(package)
         artifact = presentation_tool.persist_artifact(
             package,
             provider=provider,
             session_id=message.session_id,
             task_run_id=task_run_id,
         )
+        reply_preview = presentation_tool.format_reply(package, artifact=artifact)
         return {
             "reply_preview": reply_preview,
             "analysis": None,
@@ -1702,7 +1707,16 @@ class FeishuWorkflowService:
         *,
         llm_result: dict,
         active_episode_id: int | None = None,
+        task_run_id: str | None = None,
     ) -> dict:
+        next_action_reply = self._next_action_reply_for_status_query(message, task_run_id=task_run_id)
+        if next_action_reply:
+            return {
+                "reply_preview": next_action_reply,
+                "analysis": None,
+                "artifacts": [],
+                "close_title": None,
+            }
         tasks = self._context_tasks_for_message(message)
         payload = self._context_payload_for_message(message)
         status_answer = self._format_status_reply(message.text, tasks, payload)
@@ -1718,6 +1732,55 @@ class FeishuWorkflowService:
             "artifacts": [],
             "close_title": None,
         }
+
+    def _next_action_reply_for_status_query(self, message: FeishuMessageContext, *, task_run_id: str | None) -> str | None:
+        if not self._is_next_action_query(message.text):
+            return None
+        detail = self.task_run_service.get_task_run(task_run_id) if task_run_id else None
+        if detail is None:
+            detail = self._synthetic_task_run_detail_for_message(message)
+        bundle = self.next_action_service.build_for_task_run(detail)
+        return self.response_formatter.format_next_action_block(bundle) or None
+
+    @staticmethod
+    def _is_next_action_query(text: str) -> bool:
+        query = str(text or "").strip().lower()
+        if not query:
+            return False
+        return any(
+            marker in query
+            for marker in (
+                "下一步",
+                "下一步行动",
+                "下一步建议",
+                "接下来",
+                "推荐",
+                "next action",
+                "next step",
+            )
+        )
+
+    def _synthetic_task_run_detail_for_message(self, message: FeishuMessageContext) -> TaskRunDetail:
+        try:
+            payloads = self.session_document_service.list_documents(message.session_id)
+            documents = [self.task_run_service._session_document_from_payload(item) for item in payloads]
+        except Exception:
+            documents = []
+        return TaskRunDetail(
+            task_run_id=f"synthetic_{message.message_id or message.session_id}",
+            session_id=message.session_id,
+            source_type=getattr(message, "chat_type", None) or "unknown",
+            source_ref=getattr(message, "chat_id", None),
+            trigger_message_id=getattr(message, "message_id", None),
+            intent="status",
+            title="上下文下一步行动推荐",
+            stage="recommendation",
+            status="completed",
+            latest_summary="",
+            latest_reply_preview="",
+            latest_error=None,
+            session_documents=documents,
+        )
 
     def _persist_status_task_snapshot(
         self,
@@ -1865,6 +1928,7 @@ class FeishuWorkflowService:
             analysis=None,
             episode_id=active_episode_id,
             artifacts=artifacts,
+            append_next_actions=False,
         )
         result["pending_confirmation"] = True
         if confirmation_id:
@@ -2315,7 +2379,7 @@ class FeishuWorkflowService:
             session_id=session_id,
             task_run_id=task_run.task_run_id,
         )
-        reply_preview = "【演示稿修订】\n" + presentation_tool.format_reply(revised_package)
+        reply_preview = "【演示稿修订】\n" + presentation_tool.format_reply(revised_package, artifact=artifact)
         result = {
             "session_id": session_id,
             "episode_id": None,
@@ -2386,6 +2450,23 @@ class FeishuWorkflowService:
             latest_reply_preview=result.get("reply_preview"),
             latest_error=result.get("reply_error"),
         )
+        self._store_next_action_recommendations(task_run_id)
+
+    def _store_next_action_recommendations(self, task_run_id: str) -> None:
+        try:
+            detail = self.task_run_service.get_task_run(task_run_id)
+            if detail is None:
+                return
+            required_fields = ("artifacts", "confirmations", "session_documents", "steps")
+            if any(not hasattr(detail, field) for field in required_fields):
+                return
+            bundle = self.next_action_service.build_for_task_run(detail)
+            self.task_run_service.merge_task_run_metadata(
+                task_run_id,
+                {"recommendations": ContextualNextActionService.bundle_to_metadata(bundle)},
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Skipped next-action recommendation snapshot: task_run_id=%s error=%s", task_run_id, exc)
 
     def _persist_artifacts(self, task_run_id: str, artifacts: list | None) -> None:
         for artifact in artifacts or []:
@@ -2605,13 +2686,13 @@ class FeishuWorkflowService:
             provider = "fallback"
 
         presentation_tool = self._presentation_tool()
-        reply_preview = presentation_tool.format_reply(package)
         artifact = presentation_tool.persist_artifact(
             package,
             provider=provider,
             session_id=message.session_id,
             task_run_id=task_run_id,
         )
+        reply_preview = presentation_tool.format_reply(package, artifact=artifact)
         result = self._deliver_reply(
             message,
             "slides",
@@ -3139,9 +3220,17 @@ class FeishuWorkflowService:
         analysis: AnalyzeResponse | None,
         episode_id: int | None = None,
         artifacts: list[dict] | None = None,
+        append_next_actions: bool = True,
     ) -> dict:
         reply_sent = False
         reply_error: str | None = None
+        if append_next_actions:
+            reply_preview = self._append_next_actions_to_reply(
+                message,
+                mode=mode,
+                reply_preview=reply_preview,
+                artifacts=artifacts,
+            )
 
         if reply_preview and settings.feishu_reply_enabled and message.chat_id:
             try:
@@ -3165,6 +3254,49 @@ class FeishuWorkflowService:
             "reply_error": reply_error,
             "artifacts": artifacts or [],
         }
+
+    def _append_next_actions_to_reply(
+        self,
+        message: FeishuMessageContext,
+        *,
+        mode: str,
+        reply_preview: str | None,
+        artifacts: list[dict] | None,
+    ) -> str | None:
+        if not reply_preview or "我建议下一步可以：" in reply_preview:
+            return reply_preview
+        if mode in {"status", "help", "speech_notice"}:
+            return reply_preview
+        detail = self._synthetic_task_run_detail_for_message(message).model_copy(
+            update={
+                "intent": mode,
+                "title": self._task_run_title(message.text, mode),
+                "latest_reply_preview": reply_preview,
+                "artifacts": self._artifact_records_from_payloads(artifacts or []),
+            }
+        )
+        bundle = self.next_action_service.build_for_task_run(detail)
+        return self.response_formatter.append_next_actions(reply_preview, bundle)
+
+    @staticmethod
+    def _artifact_records_from_payloads(artifacts: list[dict]) -> list[ArtifactRecord]:
+        records: list[ArtifactRecord] = []
+        for index, artifact in enumerate(artifacts, start=1):
+            if not isinstance(artifact, dict):
+                continue
+            artifact_type = str(artifact.get("artifact_type") or "note").strip() or "note"
+            records.append(
+                ArtifactRecord(
+                    artifact_id=str(artifact.get("artifact_id") or f"pending_{index}_{artifact_type}"),
+                    artifact_type=artifact_type,
+                    provider=str(artifact.get("provider") or "local"),
+                    title=str(artifact.get("title") or "协作产物"),
+                    status=str(artifact.get("status") or "ready"),
+                    url=str(artifact.get("url") or "").strip() or None,
+                    version=coerce_positive_int(artifact.get("version")),
+                )
+            )
+        return records
 
     def _task_run_title(self, text: str, mode: str | None = None) -> str:
         candidate = " ".join((text or "").split()).strip()

@@ -4,6 +4,7 @@ import zipfile
 from pathlib import Path
 
 from app.services.presentation_artifact_service import PresentationArtifactService
+from app.services.presentation_tool import PresentationTool
 
 
 class PresentationArtifactServiceTests(unittest.TestCase):
@@ -48,6 +49,12 @@ class PresentationArtifactServiceTests(unittest.TestCase):
             with zipfile.ZipFile(pptx_path) as archive:
                 self.assertIn("ppt/presentation.xml", archive.namelist())
                 self.assertIn("ppt/slides/slide1.xml", archive.namelist())
+
+            reply = PresentationTool(artifact_service=service).format_reply(artifact["preview"], artifact=artifact)
+            self.assertIn("产物链接：", reply)
+            self.assertIn("预览链接：", reply)
+            self.assertIn("PPT 下载：", reply)
+            self.assertIn("run_slides.pptx", reply)
 
     def test_presentation_service_tolerates_non_numeric_version(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

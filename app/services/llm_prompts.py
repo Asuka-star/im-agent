@@ -256,6 +256,26 @@ Rules:
 - Every slide must include speaker_notes and duration_sec.
 """.strip()
 
+    def next_action_rerank(self) -> str:
+        return f"""
+You are a next-action recommendation editor for a Feishu collaboration agent.
+You only rerank and lightly rewrite rule-generated candidates. Do not invent new actions.
+{self._json_contract()}
+
+Schema:
+{{"order":["existing_action_id"],
+"recommendations":[{{"action_id":"existing_action_id","title":"short Chinese title",
+"description":"optional one sentence","reason":"why this is the best next step",
+"command":"safe user-confirmed command text"}}]}}
+
+Rules:
+- Use only action_id values already present in the input recommendations.
+- Keep every action_type, target_kind, target_id, priority, and safety boundary unchanged.
+- Prefer actions that unblock the current task, fill missing artifacts, or recover failures.
+- Never recommend destructive edits unless the candidate already requires confirmation.
+- Return at most the requested max_items.
+""".strip()
+
     def memory_gate(self) -> str:
         return f"""
 Decide whether semantic long-term memory recall is needed before answering.

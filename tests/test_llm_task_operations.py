@@ -729,7 +729,11 @@ class LLMTaskOperationTests(unittest.TestCase):
             self.assertEqual(artifact["provider"], "llm")
             self.assertEqual(artifact["url"], "/api/artifacts/slides/run_slides.html")
             self.assertTrue((Path(tmpdir) / "run_slides.html").is_file())
+            self.assertTrue((Path(tmpdir) / "run_slides.pptx").is_file())
             self.assertIn("speaker_notes", artifact["preview"]["slides"][0])
+            self.assertIn("预览链接：", result["reply_preview"])
+            self.assertIn("PPT 下载：", result["reply_preview"])
+            self.assertIn("run_slides.pptx", result["reply_preview"])
 
     def test_prepare_slides_execution_marks_template_fallback_provider(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir, patch.object(

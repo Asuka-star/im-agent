@@ -2102,6 +2102,80 @@ class DocSyncTests(unittest.TestCase):
         self.assertIn("Backend development", result["reply_preview"])
         self.assertNotIn("8 tasks", result["reply_preview"])
 
+    def test_next_action_status_query_returns_recommendations_not_task_list(self) -> None:
+        self.workflow.session_document_service.save_current_document(
+            "doc_next_action_session",
+            document_id="doc_next_action",
+            url="https://feishu.cn/docx/doc_next_action",
+            title="Project Tasks",
+            version=3,
+            sync_mode="updated",
+            section_snapshot=[
+                {
+                    "heading": "Task list",
+                    "paragraphs": [
+                        "Backend development | owner: Zeleous | due: TBD | priority: medium | status: draft",
+                    ],
+                }
+            ],
+        )
+        message = type(
+            "FakeMessage",
+            (),
+            {
+                "session_id": "doc_next_action_session",
+                "message_id": "m_doc_next_action",
+                "text": "下一步行动是什么",
+                "chat_id": "c1",
+                "chat_type": "group",
+            },
+        )()
+
+        result = self.workflow._prepare_status_execution(message, llm_result={})
+
+        self.assertIn("我建议下一步可以：", result["reply_preview"])
+        self.assertIn("基于当前文档生成汇报 PPT", result["reply_preview"])
+        self.assertNotIn("任务明细", result["reply_preview"])
+
+    def test_doc_reply_appends_contextual_next_actions(self) -> None:
+        self.workflow.session_document_service.save_current_document(
+            "doc_next_action_append_session",
+            document_id="doc_next_action_append",
+            url="https://feishu.cn/docx/doc_next_action_append",
+            title="Project Tasks",
+            version=1,
+            sync_mode="created",
+        )
+        message = type(
+            "FakeMessage",
+            (),
+            {
+                "session_id": "doc_next_action_append_session",
+                "message_id": "m_doc_next_action_append",
+                "text": "整理成文档",
+                "chat_id": None,
+                "chat_type": "group",
+            },
+        )()
+
+        result = self.workflow._deliver_reply(
+            message,
+            "doc",
+            "【文档同步】\n已完成",
+            analysis=None,
+            artifacts=[
+                {
+                    "artifact_type": "document",
+                    "provider": "feishu_doc",
+                    "title": "Project Tasks",
+                    "url": "https://feishu.cn/docx/doc_next_action_append",
+                }
+            ],
+        )
+
+        self.assertIn("我建议下一步可以：", result["reply_preview"])
+        self.assertIn("基于当前文档生成汇报 PPT", result["reply_preview"])
+
     def test_status_uses_content_column_instead_of_speaker_as_task_title(self) -> None:
         self.workflow.session_document_service.save_current_document(
             "doc_status_speaker_session",

@@ -258,6 +258,19 @@ class LLMService:
             return package
         return result
 
+    def rerank_next_actions(self, context: dict[str, Any]) -> dict[str, Any]:
+        self._ensure_configured()
+        payload = self._json_payload(
+            system_prompt=self._next_action_rerank_prompt(),
+            user_content=json.dumps(context, ensure_ascii=False),
+            temperature=0.1,
+        )
+        return self._chat_json(
+            payload,
+            request_name="rerank_next_actions",
+            timeout_seconds=settings.llm_memory_gate_timeout_seconds,
+        )
+
     def _ensure_configured(self) -> None:
         if not self.is_configured():
             raise RuntimeError("LLM config is incomplete.")
@@ -300,6 +313,9 @@ class LLMService:
 
     def _presentation_revision_prompt(self) -> str:
         return self.prompts.presentation_revision()
+
+    def _next_action_rerank_prompt(self) -> str:
+        return self.prompts.next_action_rerank()
 
     def _intent_prompt(self) -> str:
         return self.prompts.intent()

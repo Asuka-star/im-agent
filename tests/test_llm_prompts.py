@@ -34,6 +34,7 @@ class LLMPromptTests(unittest.TestCase):
         self.assertEqual(service._route_prompt(), service.prompts.route())
         self.assertEqual(service._analysis_request_prompt("risks"), service.prompts.analysis_request("risks"))
         self.assertEqual(service._doc_edit_intent_prompt(), service.prompts.doc_edit_intent())
+        self.assertEqual(service._next_action_rerank_prompt(), service.prompts.next_action_rerank())
 
     def test_doc_edit_intent_prompt_is_contract_only(self) -> None:
         prompt = LLMPromptBuilder().doc_edit_intent()
@@ -51,6 +52,15 @@ class LLMPromptTests(unittest.TestCase):
         self.assertIn("Compound requests", prompt)
         self.assertIn("analysis intent", prompt)
         self.assertIn("requested_outputs", prompt)
+
+    def test_next_action_rerank_prompt_is_dedicated_and_bounded(self) -> None:
+        prompt = LLMPromptBuilder().next_action_rerank()
+
+        self.assertIn("rule-generated candidates", prompt)
+        self.assertIn("Do not invent new actions", prompt)
+        self.assertIn('"order"', prompt)
+        self.assertIn("action_id values already present", prompt)
+        self.assertNotIn('"plan"', prompt)
 
     def test_llm_service_builds_standard_json_payload(self) -> None:
         service = LLMService()
