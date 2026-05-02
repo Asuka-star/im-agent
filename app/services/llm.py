@@ -62,6 +62,7 @@ class LLMService:
             request_name="route_workspace_request",
             timeout_seconds=settings.llm_memory_gate_timeout_seconds,
         )
+        result = self._sanitize_route_result(result)
         logger.info(
             "LLM lightweight route resolved: route=%s confidence=%s clarification=%s",
             result.get("route"),
@@ -138,6 +139,7 @@ class LLMService:
             request_name="plan_workspace_request",
             timeout_seconds=settings.llm_memory_gate_timeout_seconds,
         )
+        result = self._sanitize_planning_result(result)
         self._remember_plan_cache(cache_key, result)
         logger.info(
             "LLM lightweight DAG plan resolved: operation=%s object=%s confidence=%s steps=%s",
@@ -400,6 +402,170 @@ class LLMService:
             oldest_key = next(iter(self._plan_cache))
             self._plan_cache.pop(oldest_key, None)
         self._plan_cache[cache_key] = json.loads(json.dumps(result, ensure_ascii=False))
+
+    @classmethod
+    def _sanitize_route_result(cls, result: dict[str, Any]) -> dict[str, Any]:
+        if "route" not in result and "intent" in result:
+            result = {**result, "route": result.get("intent")}
+        allowed_keys = {
+            "route",
+            "intent",
+            "confidence",
+            "needs_clarification",
+            "requested_outputs",
+            "reason",
+        }
+        sanitized = {key: result[key] for key in allowed_keys if key in result}
+        if "requested_outputs" in sanitized:
+            sanitized["requested_outputs"] = cls._sanitize_requested_outputs(sanitized["requested_outputs"])
+        return sanitized
+
+    @classmethod
+    def _sanitize_planning_result(cls, result: dict[str, Any]) -> dict[str, Any]:
+        if "operation" not in result and "action" in result:
+            result = {**result, "operation": result.get("action")}
+        if "object" not in result and "target" in result:
+            result = {**result, "object": result.get("target")}
+        allowed_keys = {
+            "operation",
+            "object",
+            "route",
+            "intent",
+            "confidence",
+            "reason",
+            "requested_outputs",
+            "plan",
+            "clarification",
+        }
+        sanitized = {key: result[key] for key in allowed_keys if key in result}
+        if "requested_outputs" in sanitized:
+            sanitized["requested_outputs"] = cls._sanitize_requested_outputs(sanitized["requested_outputs"])
+        if "plan" in sanitized:
+            sanitized["plan"] = cls._sanitize_plan(sanitized["plan"])
+        if "clarification" in sanitized:
+            sanitized["clarification"] = cls._sanitize_clarification(sanitized["clarification"])
+        return sanitized
+
+    @staticmethod
+    def _sanitize_requested_outputs(value: Any) -> list[str]:
+        if isinstance(value, str):
+            raw_items = [value]
+        elif isinstance(value, list):
+            raw_items = value
+        else:
+            return []
+        outputs: list[str] = []
+        aliases = {
+            "document": "doc",
+            "feishu_doc": "doc",
+            "ppt": "slides",
+            "presentation": "slides",
+            "deck": "slides",
+            "whiteboard": "canvas",
+            "board": "canvas",
+            "diagram": "canvas",
+            "flowchart": "canvas",
+        }
+        for item in raw_items:
+            normalized = str(item or "").strip().lower().replace("-", "_")
+            normalized = aliases.get(normalized, normalized)
+            if normalized in {"doc", "slides", "canvas"} and normalized not in outputs:
+                outputs.append(normalized)
+        return outputs
+
+    @classmethod
+    def _sanitize_plan(cls, value: Any) -> dict[str, Any]:
+        if not isinstance(value, dict):
+            return {}
+        steps: list[dict[str, Any]] = []
+        raw_steps = value.get("steps") if isinstance(value.get("steps"), list) else []
+        allowed_step_types = {
+            "analyze_discussion",
+            "sync_doc",
+            "generate_slides",
+            "generate_canvas",
+            "answer_status",
+            "reply_help",
+        }
+        for index, item in enumerate(raw_steps, start=1):
+            if not isinstance(item, dict):
+                continue
+            step_type = cls._normalize_plan_step_type(item.get("type") or item.get("step_type"))
+            if step_type not in allowed_step_types:
+                continue
+            step = {
+                "id": str(item.get("id") or item.get("step_id") or f"step_{index}").strip() or f"step_{index}",
+                "type": step_type,
+                "title": str(item.get("title") or "").strip()[:120],
+                "depends_on": [
+                    str(dep).strip()
+                    for dep in item.get("depends_on", [])
+                    if dep is not None and str(dep).strip()
+                ]
+                if isinstance(item.get("depends_on"), list)
+                else [],
+            }
+            notes = str(item.get("notes") or "").strip()
+            if notes:
+                step["notes"] = notes[:240]
+            steps.append(step)
+        valid_step_ids = {step["id"] for step in steps}
+        for step in steps:
+            step["depends_on"] = [dep for dep in step["depends_on"] if dep in valid_step_ids and dep != step["id"]]
+        return {
+            "goal": str(value.get("goal") or "").strip()[:160],
+            "steps": steps,
+        }
+
+    @staticmethod
+    def _normalize_plan_step_type(value: Any) -> str:
+        normalized = str(value or "").strip().lower().replace("-", "_")
+        mapping = {
+            "analyze_discussion": "analyze_discussion",
+            "analyze": "analyze_discussion",
+            "summary": "analyze_discussion",
+            "summarize_context": "analyze_discussion",
+            "sync_doc": "sync_doc",
+            "generate_doc": "sync_doc",
+            "write_doc": "sync_doc",
+            "doc": "sync_doc",
+            "document": "sync_doc",
+            "feishu_doc": "sync_doc",
+            "generate_slides": "generate_slides",
+            "slides": "generate_slides",
+            "slide": "generate_slides",
+            "ppt": "generate_slides",
+            "presentation": "generate_slides",
+            "deck": "generate_slides",
+            "generate_canvas": "generate_canvas",
+            "canvas": "generate_canvas",
+            "whiteboard": "generate_canvas",
+            "board": "generate_canvas",
+            "diagram": "generate_canvas",
+            "flowchart": "generate_canvas",
+            "answer_status": "answer_status",
+            "status": "answer_status",
+            "reply_help": "reply_help",
+            "help": "reply_help",
+        }
+        return mapping.get(normalized, "")
+
+    @staticmethod
+    def _sanitize_clarification(value: Any) -> dict[str, Any]:
+        if not isinstance(value, dict):
+            return {}
+        options = (
+            [str(item).strip() for item in value.get("options", []) if str(item).strip()][:4]
+            if isinstance(value.get("options"), list)
+            else []
+        )
+        return {
+            "needed": bool(value.get("needed")),
+            "question": str(value.get("question") or "").strip()[:200],
+            "reason": str(value.get("reason") or "").strip()[:240],
+            "options": options,
+            "blocking": True if value.get("blocking") is None else bool(value.get("blocking")),
+        }
 
     @staticmethod
     def _instruction_needs_doc_edit_intent(instruction: str, workspace_context: str = "") -> bool:

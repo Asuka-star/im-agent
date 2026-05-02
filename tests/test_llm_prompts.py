@@ -45,6 +45,7 @@ class LLMPromptTests(unittest.TestCase):
         self.assertIn("Do not draft document text", prompt)
         self.assertIn("sync_doc|generate_slides|generate_canvas", prompt)
         self.assertIn("requested_outputs", prompt)
+        self.assertIn("Do not include content payload keys", prompt)
 
     def test_doc_edit_intent_prompt_is_contract_only(self) -> None:
         prompt = LLMPromptBuilder().doc_edit_intent()
@@ -62,6 +63,7 @@ class LLMPromptTests(unittest.TestCase):
         self.assertIn("Compound requests", prompt)
         self.assertIn("analysis intent", prompt)
         self.assertIn("requested_outputs", prompt)
+        self.assertIn("Do not include content payload keys", prompt)
 
     def test_next_action_rerank_prompt_is_dedicated_and_bounded(self) -> None:
         prompt = LLMPromptBuilder().next_action_rerank()
@@ -107,6 +109,106 @@ class LLMPromptTests(unittest.TestCase):
         self.assertEqual(second["requested_outputs"], ["slides", "canvas"])
         chat_json.assert_called_once()
         self.assertEqual(chat_json.call_args.kwargs["request_name"], "plan_workspace_request")
+
+    def test_lightweight_plan_strips_generated_content_payloads(self) -> None:
+        service = LLMService()
+        service.api_key = "test-key"
+        service.base_url = "https://example.test"
+        service.model = "demo-model"
+        result = {
+            "action": "create",
+            "target": "slides",
+            "confidence": 0.82,
+            "requested_outputs": ["presentation", "diagram", "slides", "deck"],
+            "plan": {
+                "goal": "生成汇报",
+                "steps": [
+                    {
+                        "id": "step_1",
+                        "type": "presentation",
+                        "title": "生成汇报材料",
+                        "depends_on": [None, "", "step_0"],
+                        "payload": {"slides": ["should be dropped"]},
+                    },
+                    {"id": "step_2", "type": "write_full_deck", "title": "非法步骤"},
+                ],
+            },
+            "slides": {"slides": [{"title": "不该被轻量规划结果携带"}]},
+            "doc": {"title": "不该被轻量规划结果携带"},
+            "tasks": [{"title": "不该被轻量规划结果携带"}],
+            "summary": "不该被轻量规划结果携带",
+            "next_actions": ["不该被轻量规划结果携带"],
+        }
+
+        with patch.object(service, "_chat_json", return_value=result):
+            planned = service.plan_workspace_request("[workspace]", "生成汇报材料")
+
+        self.assertEqual(planned["requested_outputs"], ["slides", "canvas"])
+        self.assertEqual(planned["operation"], "create")
+        self.assertEqual(planned["object"], "slides")
+        self.assertEqual(planned["plan"]["steps"], [
+            {
+                "id": "step_1",
+                "type": "generate_slides",
+                "title": "生成汇报材料",
+                "depends_on": [],
+            }
+        ])
+        self.assertNotIn("slides", planned)
+        self.assertNotIn("doc", planned)
+        self.assertNotIn("tasks", planned)
+        self.assertNotIn("summary", planned)
+        self.assertNotIn("next_actions", planned)
+
+    def test_lightweight_route_strips_non_route_payloads(self) -> None:
+        service = LLMService()
+        service.api_key = "test-key"
+        service.base_url = "https://example.test"
+        service.model = "demo-model"
+
+        with patch.object(
+            service,
+            "_chat_json",
+            return_value={
+                "route": "presentation",
+                "confidence": 0.91,
+                "requested_outputs": ["presentation", "feishu_doc"],
+                "reason": "用户需要汇报材料",
+                "slides": {"slides": [{"title": "不该保留"}]},
+            },
+        ):
+            routed = service.route_workspace_request("生成项目汇报 PPT")
+
+        self.assertEqual(routed["requested_outputs"], ["slides", "doc"])
+        self.assertNotIn("slides", routed)
+
+    def test_lightweight_sanitizers_tolerate_scalar_outputs_and_dropped_dependencies(self) -> None:
+        service = LLMService()
+        service.api_key = "test-key"
+        service.base_url = "https://example.test"
+        service.model = "demo-model"
+
+        with patch.object(
+            service,
+            "_chat_json",
+            return_value={
+                "operation": "create",
+                "object": "canvas",
+                "requested_outputs": "flowchart",
+                "plan": {
+                    "steps": [
+                        {"id": "step_1", "type": "generate_canvas", "depends_on": ["step_2", "step_1", "missing"]},
+                        {"id": "step_2", "type": "write_full_deck"},
+                    ]
+                },
+            },
+        ):
+            planned = service.plan_workspace_request("[workspace]", "画流程图")
+
+        self.assertEqual(planned["requested_outputs"], ["canvas"])
+        self.assertEqual(planned["plan"]["steps"], [
+            {"id": "step_1", "type": "generate_canvas", "title": "", "depends_on": []}
+        ])
 
     def test_llm_service_context_wrapper_uses_clean_chinese(self) -> None:
         content = LLMService._context_request_content("上下文", "生成文档")

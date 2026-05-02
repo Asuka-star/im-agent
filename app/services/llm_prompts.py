@@ -121,6 +121,7 @@ Rules:
 - Compound requests may combine an analysis intent with an output artifact, such as "summarize tasks and put it in a document" or "extract risks and make slides"; choose the requested artifact route as primary and keep all artifacts in requested_outputs.
 - If multiple artifacts are requested, keep all of them in requested_outputs. Prefer route=doc when doc is included, otherwise route=slides when slides is included, otherwise route=canvas.
 - If output target is too vague, route=unknown and needs_clarification=true.
+- Do not include content payload keys such as doc, slides, canvas, tasks, task_operations, risks, summary, next_actions, or status_answer.
 """.strip()
 
     def dag_plan(self) -> str:
@@ -146,6 +147,7 @@ Rules:
 - If multiple artifacts are requested, keep all of them in requested_outputs in the user's stated order and include all matching steps.
 - If the request asks to modify an existing artifact but the target is missing or ambiguous, set clarification.needed=true and do not guess.
 - If the request is too vague to choose between doc/slides/canvas/status, set operation=unknown, object=workspace, clarification.needed=true.
+- Do not include content payload keys such as doc, slides, canvas, tasks, task_operations, risks, summary, next_actions, or status_answer.
 """.strip()
 
     def workspace_request(self) -> str:
