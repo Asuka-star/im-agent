@@ -42,6 +42,11 @@ class DeliveryArtifactService:
         now = datetime.now(timezone.utc).isoformat()
         items = manifest.get("artifacts") if isinstance(manifest.get("artifacts"), list) else []
         checks = manifest.get("checks") if isinstance(manifest.get("checks"), list) else []
+        artifact_summaries = (
+            manifest.get("artifact_summaries")
+            if isinstance(manifest.get("artifact_summaries"), list)
+            else []
+        )
         return {
             "schema": "agent-pilot.delivery.v1",
             "version": self._coerce_version(manifest.get("version")),
@@ -53,6 +58,13 @@ class DeliveryArtifactService:
             "source": manifest.get("source") if isinstance(manifest.get("source"), dict) else {},
             "checks": [item for item in checks if isinstance(item, dict)],
             "artifacts": [item for item in items if isinstance(item, dict)],
+            "artifact_summaries": [item for item in artifact_summaries if isinstance(item, dict)],
+            "context_pack": manifest.get("context_pack") if isinstance(manifest.get("context_pack"), dict) else {},
+            "highlights": [
+                str(item).strip()
+                for item in (manifest.get("highlights") if isinstance(manifest.get("highlights"), list) else [])
+                if str(item).strip()
+            ],
             "next_steps": [
                 str(item).strip()
                 for item in (manifest.get("next_steps") if isinstance(manifest.get("next_steps"), list) else [])
@@ -72,6 +84,9 @@ class DeliveryArtifactService:
         generated_at = html.escape(str(manifest.get("generated_at") or ""))
         checks_html = "\n".join(self._render_check(item) for item in manifest.get("checks", []))
         artifacts_html = "\n".join(self._render_artifact(item) for item in manifest.get("artifacts", []))
+        summaries_html = "\n".join(self._render_artifact_summary(item) for item in manifest.get("artifact_summaries", []))
+        highlights_html = "\n".join(f"<li>{html.escape(str(item))}</li>" for item in manifest.get("highlights", []))
+        context_html = self._render_context_pack(manifest.get("context_pack") if isinstance(manifest.get("context_pack"), dict) else {})
         next_steps_html = "\n".join(f"<li>{html.escape(str(item))}</li>" for item in manifest.get("next_steps", []))
         return f"""<!doctype html>
 <html lang="zh-CN">
@@ -88,6 +103,11 @@ class DeliveryArtifactService:
     .meta {{ color: #b8c7ce; }}
     .grid {{ display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }}
     .card {{ background: white; border: 1px solid #dce5e9; border-radius: 12px; padding: 16px; }}
+    .wide {{ grid-column: 1 / -1; }}
+    .chips {{ display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }}
+    .chip {{ background: #edf4f6; color: #31515e; border-radius: 999px; padding: 4px 10px; font-size: 13px; }}
+    .muted {{ color: #60717a; }}
+    .warn-box {{ color: #8a4b13; background: #fff7e6; border-radius: 8px; padding: 8px 10px; margin-top: 10px; }}
     .ok {{ color: #116a7b; font-weight: 700; }}
     .warn {{ color: #b7791f; font-weight: 700; }}
     .miss {{ color: #c85d3a; font-weight: 700; }}
@@ -101,8 +121,14 @@ class DeliveryArtifactService:
       <div class="meta">Generated at {generated_at}</div>
       <p>{summary}</p>
     </header>
+    <h2>交付摘要</h2>
+    <section class="card wide"><ul>{highlights_html}</ul></section>
+    <h2>上下文依据</h2>
+    {context_html}
     <h2>验收清单</h2>
     <section class="grid">{checks_html}</section>
+    <h2>产物详情</h2>
+    <section class="grid">{summaries_html}</section>
     <h2>交付物</h2>
     <section class="grid">{artifacts_html}</section>
     <h2>建议下一步</h2>
@@ -127,6 +153,64 @@ class DeliveryArtifactService:
         version = html.escape(str(item.get("version") or 1))
         link = f'<a href="{html.escape(url)}">{html.escape(url)}</a>' if url else "<span>无链接</span>"
         return f'<article class="card"><strong>{title}</strong><p>{artifact_type} · v{version}</p>{link}</article>'
+
+    def _render_context_pack(self, pack: dict[str, Any]) -> str:
+        summary = html.escape(str(pack.get("summary") or "暂无上下文摘要"))
+        used = pack.get("used_sources") if isinstance(pack.get("used_sources"), list) else []
+        missing = pack.get("missing_items") if isinstance(pack.get("missing_items"), list) else []
+        suggestions = pack.get("suggested_inputs") if isinstance(pack.get("suggested_inputs"), list) else []
+        used_html = "".join(self._render_context_item(item) for item in used if isinstance(item, dict))
+        missing_html = "".join(self._render_context_item(item) for item in missing if isinstance(item, dict))
+        suggestions_html = "".join(f'<span class="chip">{html.escape(str(item))}</span>' for item in suggestions)
+        return (
+            '<section class="grid">'
+            f'<article class="card"><strong>已使用材料</strong><p>{summary}</p>{used_html}</article>'
+            f'<article class="card"><strong>建议补充</strong>{missing_html}<div class="chips">{suggestions_html}</div></article>'
+            '</section>'
+        )
+
+    def _render_context_item(self, item: dict[str, Any]) -> str:
+        label = html.escape(str(item.get("label") or item.get("kind") or "上下文"))
+        detail = html.escape(str(item.get("detail") or ""))
+        status = html.escape(str(item.get("status") or "ready"))
+        url = str(item.get("url") or "").strip()
+        link = f' <a href="{html.escape(url)}">打开</a>' if url else ""
+        return f'<p><strong>{label}</strong> <span class="muted">{status}</span><br>{detail}{link}</p>'
+
+    def _render_artifact_summary(self, item: dict[str, Any]) -> str:
+        title = html.escape(str(item.get("title") or item.get("label") or "产物"))
+        label = html.escape(str(item.get("label") or item.get("artifact_type") or "产物"))
+        status = html.escape(str(item.get("status") or "ready"))
+        metrics = item.get("metrics") if isinstance(item.get("metrics"), list) else []
+        highlights = item.get("highlights") if isinstance(item.get("highlights"), list) else []
+        warnings = item.get("warnings") if isinstance(item.get("warnings"), list) else []
+        exports = item.get("exports") if isinstance(item.get("exports"), list) else []
+        metrics_html = "".join(f'<span class="chip">{html.escape(str(metric))}</span>' for metric in metrics)
+        highlights_html = "".join(f"<li>{html.escape(str(text))}</li>" for text in highlights)
+        warnings_html = "".join(f"<li>{html.escape(str(text))}</li>" for text in warnings)
+        export_links = " ".join(
+            self._render_export_link(export)
+            for export in exports
+            if isinstance(export, dict)
+        )
+        warning_block = f'<div class="warn-box"><ul>{warnings_html}</ul></div>' if warnings_html else ""
+        return (
+            '<article class="card">'
+            f'<div class="muted">{label} · {status}</div>'
+            f'<strong>{title}</strong>'
+            f'<div class="chips">{metrics_html}</div>'
+            f'<ul>{highlights_html}</ul>'
+            f'{warning_block}'
+            f'<p>{export_links}</p>'
+            '</article>'
+        )
+
+    def _render_export_link(self, export: dict[str, Any]) -> str:
+        label = html.escape(str(export.get("label") or "导出"))
+        url = str(export.get("url") or "").strip()
+        if not url:
+            return ""
+        return f'<a href="{html.escape(url)}">{label}</a>'
 
     def _slugify_filename(self, value: str) -> str:
         slug = re.sub(r"[^A-Za-z0-9._-]+", "-", value.strip()).strip(".-_")

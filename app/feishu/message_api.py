@@ -28,3 +28,16 @@ class FeishuMessageAPI:
                 "content": json.dumps({"text": text}, ensure_ascii=False),
             },
         )
+
+    def send_interactive_message(self, receive_id: str, card: dict, *, receive_id_type: str = "chat_id") -> dict:
+        access_token = self.auth_service.get_tenant_access_token()
+        return self.client.post_json(
+            "/open-apis/im/v1/messages",
+            params={"receive_id_type": receive_id_type},
+            headers={"Authorization": f"Bearer {access_token}"},
+            json={
+                "receive_id": receive_id,
+                "msg_type": "interactive",
+                "content": json.dumps(card, ensure_ascii=False),
+            },
+        )

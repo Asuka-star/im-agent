@@ -30,6 +30,29 @@ class ArtifactRecord(BaseModel):
     updated_at: datetime | None = None
 
 
+class ArtifactCheckRecord(BaseModel):
+    key: str
+    label: str
+    status: str
+    detail: str
+    category: str = "artifact"
+
+
+class ContextPackItemRecord(BaseModel):
+    kind: str
+    label: str
+    detail: str
+    status: str = "ready"
+    url: str | None = None
+
+
+class ContextPackRecord(BaseModel):
+    summary: str
+    used_sources: list[ContextPackItemRecord] = Field(default_factory=list)
+    missing_items: list[ContextPackItemRecord] = Field(default_factory=list)
+    suggested_inputs: list[str] = Field(default_factory=list)
+
+
 class SessionDocumentRecord(BaseModel):
     session_id: str
     document_id: str
@@ -78,6 +101,8 @@ class TaskRunDetail(TaskRunSummary):
     metadata_json: str | None = None
     steps: list[TaskRunStepRecord] = Field(default_factory=list)
     artifacts: list[ArtifactRecord] = Field(default_factory=list)
+    artifact_checks: list[ArtifactCheckRecord] = Field(default_factory=list)
+    context_pack: ContextPackRecord | None = None
     confirmations: list[ConfirmationRequestRecord] = Field(default_factory=list)
     session_documents: list[SessionDocumentRecord] = Field(default_factory=list)
 

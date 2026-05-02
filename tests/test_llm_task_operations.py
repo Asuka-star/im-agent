@@ -2123,7 +2123,7 @@ class LLMTaskOperationTests(unittest.TestCase):
             task_run_id="run_delivery",
             session_id="s1",
             source_type="im",
-            source_ref="m1",
+            source_ref="chat_1",
             trigger_message_id="m1",
             title="报名系统汇报",
             status="completed",
@@ -2146,15 +2146,36 @@ class LLMTaskOperationTests(unittest.TestCase):
                     status="ready",
                     url="/api/artifacts/slides/run_delivery.html",
                     version=1,
+                    preview_json=json.dumps(
+                        {
+                            "slides": [
+                                {"title": "目标", "bullets": ["入口", "产物"], "speaker_notes": "讲清楚 IM 入口", "duration_sec": 45},
+                                {"title": "验收", "bullets": ["Doc", "PPT", "Canvas"], "speaker_notes": "展示交付闭环", "duration_sec": 60},
+                            ],
+                            "exports": {
+                                "html": "/api/artifacts/slides/run_delivery.html",
+                                "pptx": "/api/artifacts/slides/run_delivery.pptx",
+                            },
+                        },
+                        ensure_ascii=False,
+                    ),
                 ),
             ],
             confirmations=[],
             session_documents=[],
         )
         final_detail = SimpleNamespace(task_run_id="run_delivery", session_id="s1")
+        card_calls = []
+        fake_message_api = SimpleNamespace(
+            send_interactive_message=lambda receive_id, card, receive_id_type="chat_id": card_calls.append(
+                {"receive_id": receive_id, "card": card, "receive_id_type": receive_id_type}
+            )
+            or {"code": 0}
+        )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             self.service.delivery_artifact_service.root_dir = Path(tmpdir)
+            self.service.message_api = fake_message_api
             with patch.object(
                 self.service.task_run_service,
                 "get_task_run",
@@ -2168,7 +2189,15 @@ class LLMTaskOperationTests(unittest.TestCase):
             ) as create_artifact, patch.object(
                 self.service.task_run_service,
                 "update_task_run",
-            ) as update_task_run:
+            ) as update_task_run, patch.object(
+                settings,
+                "feishu_reply_enabled",
+                True,
+            ), patch.object(
+                settings,
+                "feishu_reply_card_enabled",
+                True,
+            ):
                 result = self.service.bundle_delivery_from_task_run("run_delivery", requested_by="tester")
 
             self.assertTrue((Path(tmpdir) / "run_delivery.html").is_file())
@@ -2180,10 +2209,20 @@ class LLMTaskOperationTests(unittest.TestCase):
         preview = create_artifact.call_args.kwargs["preview"]
         self.assertEqual(preview["schema"], "agent-pilot.delivery.v1")
         self.assertEqual(len(preview["artifacts"]), 2)
+        self.assertGreaterEqual(len(preview["artifact_summaries"]), 2)
+        slides_summary = next(item for item in preview["artifact_summaries"] if item["artifact_type"] == "slides_package")
+        self.assertIn("2 页", slides_summary["metrics"])
+        self.assertTrue(any("讲者备注" in item for item in slides_summary["metrics"]))
+        self.assertTrue(preview["highlights"])
+        self.assertIn("context_pack", preview)
+        self.assertTrue(preview["context_pack"]["used_sources"])
         self.assertEqual({item["key"]: item["status"] for item in preview["checks"]}["document"], "ready")
         self.assertEqual({item["key"]: item["status"] for item in preview["checks"]}["presentation_or_canvas"], "ready")
+        self.assertEqual(card_calls[0]["receive_id"], "chat_1")
+        self.assertEqual(card_calls[0]["card"]["header"]["title"]["content"], "任务交付包已生成")
         upsert_step.assert_called_once()
         self.assertEqual(upsert_step.call_args.kwargs["step_key"], "delivery_bundle")
+        self.assertTrue(upsert_step.call_args.kwargs["output_payload"]["im_card_sent"])
         update_task_run.assert_called_once()
         self.assertEqual(update_task_run.call_args.kwargs["stage"], "delivered")
 

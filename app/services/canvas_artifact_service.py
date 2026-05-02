@@ -68,14 +68,17 @@ class CanvasArtifactService:
         canvas = llm_result.get("canvas") if isinstance(llm_result.get("canvas"), dict) else {}
         raw_shapes = canvas.get("shapes") if isinstance(canvas.get("shapes"), list) else []
         shapes = self._normalize_shapes(raw_shapes)
+        template = self._select_template(canvas, instruction=instruction, workspace_context=workspace_context)
         if not shapes:
             labels = self._flow_labels(canvas, instruction=instruction, workspace_context=workspace_context)
-            shapes = self._flow_shapes(labels)
+            shapes = self._template_shapes(template, labels)
         return {
             "canvas_id": f"canvas_{uuid.uuid4().hex[:12]}",
             "title": str(canvas.get("title") or title or "Canvas").strip() or "Canvas",
             "version": 1,
             "schema": "im-agent.canvas.v1",
+            "template": template,
+            "summary": self._scene_summary(template, shapes),
             "shapes": shapes,
         }
 
@@ -128,6 +131,48 @@ class CanvasArtifactService:
         if re.fullmatch(r"#[0-9A-Fa-f]{6}", text):
             return text.upper()
         return default
+
+    def _select_template(self, canvas: dict, *, instruction: str, workspace_context: str) -> str:
+        raw_template = str(canvas.get("template") or canvas.get("kind") or "").strip().lower()
+        aliases = {
+            "risk": "risk",
+            "risks": "risk",
+            "risk_map": "risk",
+            "module": "module",
+            "modules": "module",
+            "architecture": "module",
+            "flow": "flow",
+            "flowchart": "flow",
+            "process": "flow",
+        }
+        if raw_template in aliases:
+            return aliases[raw_template]
+        text = f"{instruction}\n{workspace_context}".lower()
+        if re.search(r"(风险|隐患|阻塞|延期|延迟|应对|缓解|risk|mitigation|blocker)", text, flags=re.IGNORECASE):
+            return "risk"
+        if re.search(r"(流程图|流程画布|流程|flowchart|process|flow)", str(instruction or ""), flags=re.IGNORECASE):
+            return "flow"
+        if re.search(r"(模块|架构|分工|前端|后端|设计|测试|交付|frontend|backend|module|architecture)", text, flags=re.IGNORECASE):
+            return "module"
+        return "flow"
+
+    def _template_shapes(self, template: str, labels: list[str]) -> list[dict]:
+        if template == "risk":
+            return self._risk_shapes(labels)
+        if template == "module":
+            return self._module_shapes(labels)
+        return self._flow_shapes(labels)
+
+    def _scene_summary(self, template: str, shapes: list[dict]) -> dict:
+        nodes = [shape for shape in shapes if isinstance(shape, dict) and shape.get("type") != "arrow"]
+        arrows = [shape for shape in shapes if isinstance(shape, dict) and shape.get("type") == "arrow"]
+        groups = sorted({str(shape.get("group") or "").strip() for shape in nodes if str(shape.get("group") or "").strip()})
+        return {
+            "template": template,
+            "node_count": len(nodes),
+            "arrow_count": len(arrows),
+            "groups": groups,
+        }
 
     def _flow_labels(self, canvas: dict, *, instruction: str, workspace_context: str) -> list[str]:
         raw_nodes = canvas.get("nodes") if isinstance(canvas.get("nodes"), list) else []
@@ -289,6 +334,135 @@ class CanvasArtifactService:
                     }
                 )
         return shapes
+
+    def _risk_shapes(self, labels: list[str]) -> list[dict]:
+        risk_labels = (labels or ["关键任务延期", "外部接口权限不稳定", "交付材料缺少验收证据"])[:5]
+        shapes: list[dict] = []
+        for index, label in enumerate(risk_labels, start=1):
+            y = 88 + (index - 1) * 116
+            risk_id = f"r{index}"
+            mitigation_id = f"m{index}"
+            risk_text = label if re.search(r"(风险|隐患|阻塞|延期|延迟|risk)", label, flags=re.IGNORECASE) else f"风险：{label}"
+            shapes.extend(
+                [
+                    {
+                        "id": risk_id,
+                        "type": "sticky",
+                        "text": risk_text[:42],
+                        "x": 80,
+                        "y": y,
+                        "w": 210,
+                        "h": 82,
+                        "color": "#FFF1D7",
+                        "stroke": "#D6A04B",
+                        "group": "风险",
+                    },
+                    {
+                        "id": mitigation_id,
+                        "type": "node",
+                        "text": self._mitigation_for_label(label),
+                        "x": 380,
+                        "y": y,
+                        "w": 230,
+                        "h": 82,
+                        "color": "#E7F3E8",
+                        "stroke": "#67A77B",
+                        "group": "应对",
+                    },
+                    {
+                        "id": f"ra{index}",
+                        "type": "arrow",
+                        "from": risk_id,
+                        "to": mitigation_id,
+                        "color": "#2F7F8A",
+                        "label": "缓解",
+                    },
+                ]
+            )
+        return shapes
+
+    def _mitigation_for_label(self, label: str) -> str:
+        text = str(label or "")
+        if re.search(r"(权限|接口|api|API|飞书|外部)", text):
+            return "应对：准备本地 artifact 兜底，并提前校验权限"
+        if re.search(r"(延期|延迟|进度|排期|截止)", text):
+            return "应对：拆分里程碑，设置每日同步和缓冲时间"
+        if re.search(r"(验收|评委|证据|材料|演示)", text):
+            return "应对：补齐验收检查、截图和 Demo 脚本"
+        if re.search(r"(质量|错误|失败|不稳定)", text):
+            return "应对：增加自动检查和失败降级说明"
+        return "应对：明确负责人、截止时间和可验证结果"
+
+    def _module_shapes(self, labels: list[str]) -> list[dict]:
+        module_labels = self._module_labels(labels)
+        shapes: list[dict] = []
+        for index, label in enumerate(module_labels, start=1):
+            col = (index - 1) % 3
+            row = (index - 1) // 3
+            node_id = f"mod{index}"
+            shapes.append(
+                {
+                    "id": node_id,
+                    "type": "frame",
+                    "text": label,
+                    "x": 80 + col * 240,
+                    "y": 92 + row * 138,
+                    "w": 190,
+                    "h": 92,
+                    "color": self.NODE_PALETTE[(index - 1) % len(self.NODE_PALETTE)]["color"],
+                    "stroke": self.NODE_PALETTE[(index - 1) % len(self.NODE_PALETTE)]["stroke"],
+                    "group": "模块",
+                }
+            )
+        if len(shapes) > 1:
+            delivery_id = "mod_delivery"
+            y = 92 + ((len(module_labels) + 2) // 3) * 138
+            shapes.append(
+                {
+                    "id": delivery_id,
+                    "type": "node",
+                    "text": "集成交付与验收",
+                    "x": 320,
+                    "y": y,
+                    "w": 220,
+                    "h": 82,
+                    "color": "#FFF1D7",
+                    "stroke": "#EF8354",
+                    "group": "交付",
+                }
+            )
+            for index in range(1, len(module_labels) + 1):
+                shapes.append(
+                    {
+                        "id": f"ma{index}",
+                        "type": "arrow",
+                        "from": f"mod{index}",
+                        "to": delivery_id,
+                        "color": "#2F7F8A",
+                    }
+                )
+        return shapes
+
+    def _module_labels(self, labels: list[str]) -> list[str]:
+        text = "\n".join(labels)
+        candidates: list[str] = []
+        modules = [
+            ("前端体验", r"(前端|UI|页面|Web|web|frontend)"),
+            ("后端服务", r"(后端|接口|API|api|服务|backend)"),
+            ("设计与内容", r"(设计|内容|文案|视觉|素材)"),
+            ("测试验收", r"(测试|验收|质量|回归|检查)"),
+            ("交付归档", r"(交付|归档|打包|Demo|demo|演示)"),
+        ]
+        for label, pattern in modules:
+            if re.search(pattern, text, flags=re.IGNORECASE):
+                candidates.append(label)
+        for label in labels:
+            cleaned = self._clean_flow_candidate(label)
+            if cleaned and cleaned not in candidates:
+                candidates.append(cleaned[:24])
+            if len(candidates) >= 6:
+                break
+        return candidates[:6] or ["前端体验", "后端服务", "测试验收", "交付归档"]
 
     def _flow_node_style(self, index: int, total: int) -> dict[str, str]:
         if index == 1:

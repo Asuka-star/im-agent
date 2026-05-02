@@ -77,12 +77,15 @@ class PresentationTool:
 
         preview_url = self.public_preview_url(artifact.get("url") if artifact else exports.get("html"))
         pptx_url = self.public_preview_url(exports.get("pptx"))
-        if preview_url or pptx_url:
+        pdf_url = self.public_preview_url(exports.get("pdf"))
+        if preview_url or pptx_url or pdf_url:
             lines.append("产物链接：")
             if preview_url:
                 lines.append(f"- 预览链接：{preview_url}")
             if pptx_url:
                 lines.append(f"- PPT 下载：{pptx_url}")
+            if pdf_url:
+                lines.append(f"- PDF 下载：{pdf_url}")
 
         return "\n".join(lines)
 

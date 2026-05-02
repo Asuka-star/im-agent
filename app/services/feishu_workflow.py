@@ -81,6 +81,7 @@ class FeishuWorkflowService:
         self.delivery_tool = DeliveryTool(
             delivery_artifact_service=self.delivery_artifact_service,
             task_run_service=self.task_run_service,
+            message_api=self.message_api,
         )
         self.workbench_revision_tool = WorkbenchRevisionTool(
             task_run_service=self.task_run_service,
@@ -855,6 +856,7 @@ class FeishuWorkflowService:
     def _delivery_tool(self) -> DeliveryTool:
         self.delivery_tool.delivery_artifact_service = self.delivery_artifact_service
         self.delivery_tool.task_run_service = self.task_run_service
+        self.delivery_tool.message_api = self.message_api
         return self.delivery_tool
 
     def _presentation_tool(self) -> PresentationTool:

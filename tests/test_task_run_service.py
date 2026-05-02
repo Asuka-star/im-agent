@@ -114,6 +114,15 @@ class TaskRunServiceTests(unittest.TestCase):
         self.assertEqual(detail.steps[0].step_key, "request_received")
         self.assertEqual(len(detail.artifacts), 1)
         self.assertEqual(detail.artifacts[0].artifact_type, "document")
+        self.assertTrue(detail.artifact_checks)
+        check_status = {item.key: item.status for item in detail.artifact_checks}
+        self.assertEqual(check_status["document"], "ready")
+        self.assertIn("canvas", check_status)
+        self.assertIsNotNone(detail.context_pack)
+        assert detail.context_pack is not None
+        self.assertTrue(any(item.kind == "im" for item in detail.context_pack.used_sources))
+        self.assertTrue(any(item.kind == "document" for item in detail.context_pack.used_sources))
+        self.assertTrue(any(item.kind == "canvas" for item in detail.context_pack.missing_items))
         self.assertEqual(len(detail.confirmations), 1)
         self.assertEqual(detail.confirmations[0].status, "pending")
 

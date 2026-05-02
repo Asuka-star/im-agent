@@ -88,13 +88,63 @@ class WorkflowResultPersistence:
         for artifact in artifacts or []:
             if not isinstance(artifact, dict):
                 continue
+            artifact_type = str(artifact.get("artifact_type") or "note")
+            preview = artifact.get("preview") if isinstance(artifact.get("preview"), dict) else None
             workflow.task_run_service.create_artifact(
                 task_run_id,
-                artifact_type=str(artifact.get("artifact_type") or "note"),
+                artifact_type=artifact_type,
                 title=str(artifact.get("title") or "协作产物"),
                 provider=str(artifact.get("provider") or "local"),
                 status=str(artifact.get("status") or "ready"),
                 url=str(artifact.get("url") or "").strip() or None,
-                preview=artifact.get("preview") if isinstance(artifact.get("preview"), dict) else None,
+                preview=preview,
                 version=coerce_positive_int(artifact.get("version")),
             )
+            if artifact_type == "slides_package" and preview is not None:
+                self.record_rehearsal_step(task_run_id, preview)
+
+    def record_rehearsal_step(self, task_run_id: str, preview: dict) -> None:
+        summary = self._rehearsal_summary(preview)
+        if not summary["slide_count"]:
+            return
+        self.workflow.task_run_service.upsert_step(
+            task_run_id,
+            step_key="slides_rehearsal_prepared",
+            title="生成排练建议",
+            step_type="artifact",
+            status="done",
+            output_payload=summary,
+        )
+
+    def _rehearsal_summary(self, preview: dict) -> dict:
+        slides = preview.get("slides") if isinstance(preview.get("slides"), list) else []
+        missing_notes_pages: list[int] = []
+        dense_slide_pages: list[int] = []
+        speaker_notes_count = 0
+        duration_sec = 0
+        for index, slide in enumerate(slides, start=1):
+            payload = slide if isinstance(slide, dict) else {}
+            notes = str(payload.get("speaker_notes") or "").strip()
+            if notes:
+                speaker_notes_count += 1
+            else:
+                missing_notes_pages.append(index)
+            bullets = payload.get("bullets") if isinstance(payload.get("bullets"), list) else []
+            if len([item for item in bullets if str(item).strip()]) > 5:
+                dense_slide_pages.append(index)
+            duration_sec += self._optional_positive_int(payload.get("duration_sec"))
+        return {
+            "slide_count": len(slides),
+            "speaker_notes_count": speaker_notes_count,
+            "duration_sec": duration_sec,
+            "missing_notes_pages": missing_notes_pages,
+            "dense_slide_pages": dense_slide_pages,
+        }
+
+    def _optional_positive_int(self, value: object) -> int:
+        if value is None or value == "":
+            return 0
+        try:
+            return max(int(value), 0)
+        except (TypeError, ValueError):
+            return 0

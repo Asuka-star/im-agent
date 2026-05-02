@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 import zipfile
@@ -5,6 +6,11 @@ from pathlib import Path
 
 from app.services.presentation_artifact_service import PresentationArtifactService
 from app.services.tools.presentation_tool import PresentationTool
+
+
+class FailingPdfPresentationArtifactService(PresentationArtifactService):
+    def _write_pdf(self, path: Path, package: dict) -> None:
+        raise RuntimeError("pdf unavailable")
 
 
 class PresentationArtifactServiceTests(unittest.TestCase):
@@ -30,6 +36,7 @@ class PresentationArtifactServiceTests(unittest.TestCase):
             json_path = Path(tmpdir) / "run_slides.json"
             html_path = Path(tmpdir) / "run_slides.html"
             pptx_path = Path(tmpdir) / "run_slides.pptx"
+            pdf_path = Path(tmpdir) / "run_slides.pdf"
 
             self.assertEqual(artifact["artifact_type"], "slides_package")
             self.assertEqual(artifact["provider"], "llm")
@@ -37,9 +44,12 @@ class PresentationArtifactServiceTests(unittest.TestCase):
             self.assertEqual(artifact["preview"]["exports"]["json"], "/api/artifacts/slides/run_slides.json")
             self.assertEqual(artifact["preview"]["exports"]["html"], "/api/artifacts/slides/run_slides.html")
             self.assertEqual(artifact["preview"]["exports"]["pptx"], "/api/artifacts/slides/run_slides.pptx")
+            self.assertEqual(artifact["preview"]["exports"]["pdf"], "/api/artifacts/slides/run_slides.pdf")
             self.assertTrue(json_path.is_file())
             self.assertTrue(html_path.is_file())
             self.assertTrue(pptx_path.is_file())
+            self.assertTrue(pdf_path.is_file())
+            self.assertTrue(pdf_path.read_bytes().startswith(b"%PDF-1.4"))
             self.assertEqual(artifact["preview"]["slides"][0]["duration_sec"], 45)
             self.assertIn("speaker_notes", artifact["preview"]["slides"][0])
             html = html_path.read_text(encoding="utf-8")
@@ -59,7 +69,46 @@ class PresentationArtifactServiceTests(unittest.TestCase):
             self.assertIn("产物链接：", reply)
             self.assertIn("预览链接：", reply)
             self.assertIn("PPT 下载：", reply)
+            self.assertIn("PDF 下载：", reply)
             self.assertIn("run_slides.pptx", reply)
+            self.assertIn("run_slides.pdf", reply)
+
+    def test_pdf_export_failure_keeps_ready_slides_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = FailingPdfPresentationArtifactService(root_dir=Path(tmpdir))
+            artifact = service.persist_package(
+                {
+                    "theme": "PDF fallback",
+                    "slides": [
+                        {
+                            "title": "Main chain",
+                            "bullets": ["HTML and PPTX remain available"],
+                        }
+                    ],
+                },
+                provider="llm",
+                task_run_id="run_slides",
+                session_id="s1",
+            )
+
+            json_path = Path(tmpdir) / "run_slides.json"
+            html_path = Path(tmpdir) / "run_slides.html"
+            pptx_path = Path(tmpdir) / "run_slides.pptx"
+            pdf_path = Path(tmpdir) / "run_slides.pdf"
+            exports = artifact["preview"]["exports"]
+
+            self.assertEqual(artifact["status"], "ready")
+            self.assertEqual(artifact["url"], "/api/artifacts/slides/run_slides.html")
+            self.assertEqual(exports["html"], "/api/artifacts/slides/run_slides.html")
+            self.assertEqual(exports["pptx"], "/api/artifacts/slides/run_slides.pptx")
+            self.assertNotIn("pdf", exports)
+            self.assertTrue(json_path.is_file())
+            self.assertTrue(html_path.is_file())
+            self.assertTrue(pptx_path.is_file())
+            self.assertFalse(pdf_path.exists())
+            self.assertEqual(artifact["preview"]["export_warnings"][0]["export"], "pdf")
+            persisted = json.loads(json_path.read_text(encoding="utf-8"))
+            self.assertNotIn("pdf", persisted["exports"])
 
     def test_presentation_service_tolerates_non_numeric_version(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

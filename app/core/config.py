@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     feishu_encrypt_key: str = Field(default="", alias="FEISHU_ENCRYPT_KEY")
     feishu_api_base_url: str = Field(default="https://open.feishu.cn", alias="FEISHU_API_BASE_URL")
     feishu_reply_enabled: bool = Field(default=False, alias="FEISHU_REPLY_ENABLED")
+    feishu_reply_card_enabled: bool = Field(default=False, alias="FEISHU_REPLY_CARD_ENABLED")
     feishu_bot_name: str = Field(default="", alias="FEISHU_BOT_NAME")
     feishu_bot_user_id: str = Field(default="", alias="FEISHU_BOT_USER_ID")
     feishu_bot_open_id: str = Field(default="", alias="FEISHU_BOT_OPEN_ID")

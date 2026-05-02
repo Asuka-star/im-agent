@@ -8,9 +8,11 @@ from sqlalchemy import desc, select
 from app.db.database import SessionLocal
 from app.db.models import Artifact, ConfirmationRequest, TaskRun, TaskRunStep
 from app.schemas.task_run import (
+    ArtifactCheckRecord,
     ArtifactRecord,
     ConfirmationAnswerResponse,
     ConfirmationRequestRecord,
+    ContextPackRecord,
     SessionDocumentRecord,
     TaskRunDetail,
     TaskRunStepRecord,
@@ -19,6 +21,8 @@ from app.schemas.task_run import (
 from app.services.realtime_hub import realtime_hub
 from app.services.session_display_service import SessionDisplayService
 from app.services.session_document_service import SessionDocumentService
+from app.services.task_artifact_verifier import TaskArtifactVerifier
+from app.services.task_context_pack import TaskContextPackBuilder
 from app.utils.values import coerce_positive_int
 
 
@@ -33,9 +37,13 @@ class TaskRunService:
         *,
         session_display_service: SessionDisplayService | None = None,
         session_document_service: SessionDocumentService | None = None,
+        artifact_verifier: TaskArtifactVerifier | None = None,
+        context_pack_builder: TaskContextPackBuilder | None = None,
     ) -> None:
         self.session_display_service = session_display_service or SessionDisplayService()
         self.session_document_service = session_document_service or SessionDocumentService()
+        self.artifact_verifier = artifact_verifier or TaskArtifactVerifier()
+        self.context_pack_builder = context_pack_builder or TaskContextPackBuilder()
 
     def create_task_run(
         self,
@@ -121,7 +129,7 @@ class TaskRunService:
                 .order_by(ConfirmationRequest.id.asc())
             ).scalars().all()
 
-            return TaskRunDetail(
+            detail = TaskRunDetail(
                 **self._summary_from_row(row).model_dump(),
                 metadata_json=row.metadata_json,
                 steps=[self._step_from_row(item) for item in steps],
@@ -129,6 +137,12 @@ class TaskRunService:
                 confirmations=[self._confirmation_from_row(item) for item in confirmations],
                 session_documents=self._session_documents_for_session(row.session_id),
             )
+            detail.artifact_checks = [
+                ArtifactCheckRecord(**item)
+                for item in self.artifact_verifier.build_for_task_run(detail)
+            ]
+            detail.context_pack = ContextPackRecord(**self.context_pack_builder.build_for_task_run(detail))
+            return detail
 
     def update_task_run(
         self,

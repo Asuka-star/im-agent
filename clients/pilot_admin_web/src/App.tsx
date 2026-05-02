@@ -47,7 +47,9 @@ import {
 } from './labels';
 import type {
   ArtifactRecord,
+  ArtifactCheckRecord,
   ConfirmationRequestRecord,
+  ContextPackRecord,
   JsonMap,
   NextActionBundle,
   RealtimeEvent,
@@ -338,6 +340,8 @@ function TaskDetail(props: {
   onReviseSlides: (artifactId: string, instruction: string) => void;
 }) {
   const { detail, recommendations } = props;
+  const deliveryArtifact = detail.artifacts.find((artifact) => artifact.artifact_type === 'delivery_bundle' && artifact.url);
+  const deliveryUrl = deliveryArtifact?.url ? artifactUrl(deliveryArtifact.url) : '';
   return (
     <div className="detail-stack">
       <section className="summary-band">
@@ -360,13 +364,31 @@ function TaskDetail(props: {
         <div className="summary-actions">
           <button className="primary-button" onClick={props.onBundle} disabled={!detail.artifacts.length || props.submitting === 'bundle'}>
             {props.submitting === 'bundle' ? <Loader2 className="spin" size={17} /> : <PackageCheck size={17} />}
-            生成交付包
+            {deliveryArtifact ? '更新交付包' : '生成交付包'}
           </button>
+          {deliveryUrl && (
+            <>
+              <a className="line-button" href={deliveryUrl} target="_blank" rel="noreferrer">
+                <PlayCircle size={16} />打开交付包
+              </a>
+              <button className="line-button" onClick={() => navigator.clipboard.writeText(deliveryUrl)}>
+                <Clipboard size={16} />复制链接
+              </button>
+            </>
+          )}
         </div>
       </section>
 
-      <NextActions bundle={recommendations} />
+      <NextActions
+        bundle={recommendations}
+        detail={detail}
+        submitting={props.submitting}
+        onBundle={props.onBundle}
+        onReviseSlides={props.onReviseSlides}
+      />
       <ReplyPreview text={detail.latest_reply_preview} error={detail.latest_error} />
+      <ContextPackPanel pack={detail.context_pack} />
+      <ArtifactChecks checks={detail.artifact_checks || []} />
       <Timeline steps={detail.steps} />
       <Artifacts detail={detail} submitting={props.submitting} onReviseDocument={props.onReviseDocument} onReviseSlides={props.onReviseSlides} />
       <Confirmations detail={detail} submitting={props.submitting} onConfirm={props.onConfirm} />
@@ -374,22 +396,147 @@ function TaskDetail(props: {
   );
 }
 
-function NextActions({ bundle }: { bundle: NextActionBundle | null }) {
+function NextActions({
+  bundle,
+  detail,
+  submitting,
+  onBundle,
+  onReviseSlides,
+}: {
+  bundle: NextActionBundle | null;
+  detail: TaskRunDetail;
+  submitting: string;
+  onBundle: () => void;
+  onReviseSlides: (artifactId: string, instruction: string) => void;
+}) {
   const items = bundle?.recommendations || [];
+  const slidesArtifact = detail.artifacts.find((artifact) => artifact.artifact_type === 'slides_package');
   if (!items.length) return null;
   return (
     <section className="section-block">
       <SectionTitle icon={<Sparkles size={17} />} title="推荐下一步" count={items.length} />
       <div className="next-action-grid">
-        {items.map((item) => (
-          <div className="next-action" key={item.action_id}>
-            <div className="row-between">
-              <b>{item.title}</b>
-              <Badge tone={item.priority === 'high' ? 'wait' : 'muted'}>{item.priority}</Badge>
+        {items.map((item) => {
+          const command = item.command?.trim() || '';
+          const canBundle = item.action_type === 'bundle_delivery' && detail.artifacts.length > 0;
+          const canReviseSlides = item.action_type === 'revise_slides' && Boolean(slidesArtifact?.artifact_id && command);
+          return (
+            <div className="next-action" key={item.action_id}>
+              <div className="row-between">
+                <b>{item.title}</b>
+                <Badge tone={item.priority === 'high' ? 'wait' : 'muted'}>{item.priority}</Badge>
+              </div>
+              {item.reason && <p>{item.reason}</p>}
+              {command && <code>{command}</code>}
+              <div className="button-row">
+                {canBundle && (
+                  <button className="line-button" disabled={submitting === 'bundle'} onClick={onBundle}>
+                    {submitting === 'bundle' ? <Loader2 className="spin" size={15} /> : <PackageCheck size={15} />}
+                    打包
+                  </button>
+                )}
+                {canReviseSlides && slidesArtifact && (
+                  <button
+                    className="line-button"
+                    disabled={submitting.startsWith('revise-slides')}
+                    onClick={() => onReviseSlides(slidesArtifact.artifact_id, command)}
+                  >
+                    {submitting.startsWith('revise-slides') ? <Loader2 className="spin" size={15} /> : <Presentation size={15} />}
+                    修订 PPT
+                  </button>
+                )}
+                {command && (
+                  <button className="line-button" onClick={() => navigator.clipboard.writeText(command)}>
+                    <Clipboard size={15} />复制指令
+                  </button>
+                )}
+              </div>
             </div>
-            {item.reason && <p>{item.reason}</p>}
-            {item.command && <code>{item.command}</code>}
-          </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function ContextPackPanel({ pack }: { pack?: ContextPackRecord | null }) {
+  if (!pack) return null;
+  const usedSources = pack.used_sources || [];
+  const missingItems = pack.missing_items || [];
+  const suggestions = pack.suggested_inputs || [];
+  return (
+    <section className="section-block">
+      <SectionTitle icon={<Gauge size={17} />} title="上下文依据" />
+      <p className="context-summary">{pack.summary}</p>
+      <div className="context-pack-grid">
+        <ContextPackColumn title="已使用材料" items={usedSources} empty="暂无可追溯材料" />
+        <ContextPackColumn title="建议补充" items={missingItems} empty="上下文较完整" />
+      </div>
+      {suggestions.length > 0 && (
+        <div className="context-suggestions">
+          {suggestions.slice(0, 4).map((item, index) => (
+            <span key={index}>{item}</span>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function ContextPackColumn({
+  title,
+  items,
+  empty,
+}: {
+  title: string;
+  items: Array<{ kind: string; label: string; detail: string; status: string; url?: string | null }>;
+  empty: string;
+}) {
+  return (
+    <div className="context-column">
+      <h4>{title}</h4>
+      {items.length === 0 ? <p className="muted-text">{empty}</p> : (
+        <div className="context-item-list">
+          {items.slice(0, 6).map((item, index) => {
+            const url = item.url ? artifactUrl(item.url) : '';
+            return (
+              <article className={`context-item tone-${artifactCheckTone(item.status)}`} key={`${item.kind}-${index}`}>
+                <div>
+                  <b>{item.label}</b>
+                  <span>{contextKindLabel(item.kind)} · {artifactCheckLabel(item.status)}</span>
+                </div>
+                <p>{item.detail}</p>
+                {url && <a href={url} target="_blank" rel="noreferrer">打开</a>}
+              </article>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ArtifactChecks({ checks }: { checks: ArtifactCheckRecord[] }) {
+  if (!checks.length) return null;
+  const ready = checks.filter((item) => item.status === 'ready').length;
+  const sceneChecks = checks.filter((item) => item.category === 'scene_c' || item.category === 'scene_d' || item.category === 'scene_cd');
+  return (
+    <section className="section-block">
+      <SectionTitle icon={<CheckCircle2 size={17} />} title="验收检查" count={checks.length} />
+      <div className="check-summary-row">
+        <Badge tone={ready === checks.length ? 'ok' : 'wait'}>{ready}/{checks.length} 已满足</Badge>
+        <span>场景 C/D：{sceneChecks.filter((item) => item.status === 'ready').length}/{sceneChecks.length} 已满足</span>
+      </div>
+      <div className="check-grid">
+        {checks.map((check) => (
+          <article className={`check-card tone-${artifactCheckTone(check.status)}`} key={check.key}>
+            <div className="check-card-head">
+              {artifactCheckIcon(check.status)}
+              <b>{check.label}</b>
+              <Badge tone={artifactCheckTone(check.status)}>{artifactCheckLabel(check.status)}</Badge>
+            </div>
+            <p>{check.detail || '等待检查结果'}</p>
+          </article>
         ))}
       </div>
     </section>
@@ -469,6 +616,7 @@ function ArtifactCard(props: {
   const exportsMap = asMap(preview?.exports);
   const htmlUrl = artifactUrl((exportsMap?.html as string | undefined) || artifact.url);
   const pptxUrl = artifactUrl(exportsMap?.pptx as string | undefined);
+  const pdfUrl = artifactUrl(exportsMap?.pdf as string | undefined);
   const doc = detail.session_documents.find((item) => item.is_current) || detail.session_documents[0];
 
   return (
@@ -487,10 +635,18 @@ function ArtifactCard(props: {
         <Dot />
         <span>{statusLabel(artifact.status)}</span>
       </div>
-      <ArtifactPreview artifact={artifact} preview={preview} />
+      <ArtifactPreview
+        artifact={artifact}
+        preview={preview}
+        quickRevisionBusy={props.submitting.startsWith('revise-slides')}
+        onQuickRevise={artifact.artifact_type === 'slides_package'
+          ? (instruction) => props.onReviseSlides(artifact.artifact_id, instruction)
+          : undefined}
+      />
       <div className="button-row">
         {htmlUrl && <a className="line-button" href={htmlUrl} target="_blank" rel="noreferrer"><PlayCircle size={16} />预览</a>}
         {pptxUrl && <a className="line-button" href={pptxUrl} target="_blank" rel="noreferrer"><Download size={16} />PPT</a>}
+        {pdfUrl && <a className="line-button" href={pdfUrl} target="_blank" rel="noreferrer"><Download size={16} />PDF</a>}
         {artifact.artifact_type === 'document' && (
           <button className="line-button" onClick={() => {
             const instruction = window.prompt('文档修订指令');
@@ -513,21 +669,188 @@ function ArtifactCard(props: {
   );
 }
 
-function ArtifactPreview({ artifact, preview }: { artifact: ArtifactRecord; preview: JsonMap | null }) {
+function ArtifactPreview({
+  artifact,
+  preview,
+  quickRevisionBusy,
+  onQuickRevise,
+}: {
+  artifact: ArtifactRecord;
+  preview: JsonMap | null;
+  quickRevisionBusy?: boolean;
+  onQuickRevise?: (instruction: string) => void;
+}) {
   if (!preview) return <p className="muted-text">{artifact.url || '无结构化预览'}</p>;
   if (artifact.artifact_type === 'slides_package') {
-    const slides = Array.isArray(preview.slides) ? preview.slides.slice(0, 4) as JsonMap[] : [];
-    return <div className="mini-list">{slides.map((slide, index) => <span key={index}>P{index + 1}. {String(slide.title || `第 ${index + 1} 页`)}</span>)}</div>;
+    return <SlidesRehearsalPreview preview={preview} quickRevisionBusy={quickRevisionBusy} onQuickRevise={onQuickRevise} />;
   }
   if (artifact.artifact_type === 'document') {
     const sections = Array.isArray(preview.sections) ? preview.sections.slice(0, 4) as JsonMap[] : [];
     return <div className="mini-list">{sections.map((section, index) => <span key={index}>{String(section.heading || `章节 ${index + 1}`)}</span>)}</div>;
   }
   if (artifact.artifact_type === 'canvas') {
-    const shapes = Array.isArray(preview.shapes) ? preview.shapes : [];
-    return <p className="muted-text">{shapes.length} 个节点/连线</p>;
+    return <CanvasArtifactPreview preview={preview} />;
+  }
+  if (artifact.artifact_type === 'delivery_bundle') {
+    return <DeliveryBundlePreview preview={preview} />;
   }
   return <pre className="json-snippet">{JSON.stringify(preview, null, 2).slice(0, 360)}</pre>;
+}
+
+function DeliveryBundlePreview({ preview }: { preview: JsonMap }) {
+  const checks = Array.isArray(preview.checks) ? preview.checks.map(asMap).filter((item): item is JsonMap => Boolean(item)) : [];
+  const summaries = Array.isArray(preview.artifact_summaries)
+    ? preview.artifact_summaries.map(asMap).filter((item): item is JsonMap => Boolean(item))
+    : [];
+  const contextPack = asMap(preview.context_pack);
+  const missingItems = Array.isArray(contextPack?.missing_items)
+    ? contextPack.missing_items.map(asMap).filter((item): item is JsonMap => Boolean(item))
+    : [];
+  const highlights = Array.isArray(preview.highlights) ? preview.highlights.map(String).filter(Boolean) : [];
+  const ready = checks.filter((item) => stringValue(item.status) === 'ready').length;
+  return (
+    <div className="delivery-preview">
+      <div className="rehearsal-metrics">
+        <span><PackageCheck size={15} />{ready}/{checks.length} 项验收</span>
+        <span><Layers3 size={15} />{summaries.length} 个交付物</span>
+        <span><Gauge size={15} />{missingItems.length} 项待补依据</span>
+      </div>
+      {highlights.length > 0 && (
+        <div className="mini-list">
+          {highlights.slice(0, 3).map((item, index) => <span key={index}>{item}</span>)}
+        </div>
+      )}
+      <div className="delivery-summary-list">
+        {summaries.slice(0, 4).map((item, index) => {
+          const metrics = Array.isArray(item.metrics) ? item.metrics.map(String).filter(Boolean) : [];
+          const warnings = Array.isArray(item.warnings) ? item.warnings.map(String).filter(Boolean) : [];
+          return (
+            <div className="delivery-summary-row" key={stringValue(item.artifact_id) || index}>
+              <b>{stringValue(item.label) || artifactLabel(stringValue(item.artifact_type))}</b>
+              <span>{stringValue(item.title) || '协作产物'}</span>
+              {metrics.length > 0 && <small>{metrics.slice(0, 3).join(' · ')}</small>}
+              {warnings.length > 0 && <em>{warnings[0]}</em>}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function CanvasArtifactPreview({ preview }: { preview: JsonMap }) {
+  const shapes = Array.isArray(preview.shapes) ? preview.shapes.filter((item) => asMap(item)).map((item) => item as JsonMap) : [];
+  const summary = asMap(preview.summary);
+  const nodeCount = numberValue(summary?.node_count) || shapes.filter((shape) => stringValue(shape.type) !== 'arrow').length;
+  const arrowCount = numberValue(summary?.arrow_count) || shapes.filter((shape) => stringValue(shape.type) === 'arrow').length;
+  const groups = Array.isArray(summary?.groups)
+    ? summary.groups.map(String).filter(Boolean)
+    : [...new Set(shapes.map((shape) => stringValue(shape.group)).filter(Boolean))];
+  const template = stringValue(preview.template || summary?.template) || 'flow';
+  return (
+    <div className="canvas-preview">
+      <div className="rehearsal-metrics">
+        <span><Layers3 size={15} />{canvasTemplateLabel(template)}</span>
+        <span><Boxes size={15} />{nodeCount} 节点</span>
+        <span><Route size={15} />{arrowCount} 连线</span>
+      </div>
+      {groups.length > 0 && <p className="muted-text">分组：{groups.slice(0, 6).join('、')}</p>}
+      <div className="mini-list">
+        {shapes.filter((shape) => stringValue(shape.type) !== 'arrow').slice(0, 4).map((shape, index) => (
+          <span key={index}>{stringValue(shape.group) ? `${stringValue(shape.group)} · ` : ''}{String(shape.text || `节点 ${index + 1}`)}</span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function SlidesRehearsalPreview({
+  preview,
+  quickRevisionBusy,
+  onQuickRevise,
+}: {
+  preview: JsonMap;
+  quickRevisionBusy?: boolean;
+  onQuickRevise?: (instruction: string) => void;
+}) {
+  const slides = Array.isArray(preview.slides)
+    ? preview.slides.map(asMap).filter((item): item is JsonMap => Boolean(item))
+    : [];
+  const notesCount = slides.filter((slide) => stringValue(slide.speaker_notes).length > 0).length;
+  const totalDuration = slides.reduce((sum, slide) => sum + numberValue(slide.duration_sec), 0);
+  const missingNotes = slides
+    .map((slide, index) => ({ index: index + 1, hasNotes: stringValue(slide.speaker_notes).length > 0 }))
+    .filter((item) => !item.hasNotes)
+    .map((item) => item.index);
+  const denseSlides = slides
+    .map((slide, index) => ({ index: index + 1, bullets: Array.isArray(slide.bullets) ? slide.bullets.length : 0 }))
+    .filter((item) => item.bullets > 5)
+    .map((item) => item.index);
+  return (
+    <div className="slides-rehearsal">
+      <div className="rehearsal-metrics">
+        <span><Presentation size={15} />{slides.length} 页</span>
+        <span><MessageSquare size={15} />{notesCount}/{slides.length} 页备注</span>
+        <span><Clock3 size={15} />{totalDuration ? `${Math.ceil(totalDuration / 60)} 分钟` : '未设置时长'}</span>
+      </div>
+      {(missingNotes.length > 0 || denseSlides.length > 0) && (
+        <div className="rehearsal-alerts">
+          {missingNotes.length > 0 && <span>缺少讲稿：P{missingNotes.join('、P')}</span>}
+          {denseSlides.length > 0 && <span>内容偏密：P{denseSlides.join('、P')}</span>}
+        </div>
+      )}
+      <div className="slide-quick-list">
+        {slides.slice(0, 6).map((slide, index) => (
+          <SlideQuickRevisionRow
+            key={index}
+            slide={slide}
+            page={index + 1}
+            disabled={quickRevisionBusy || !onQuickRevise}
+            onQuickRevise={onQuickRevise}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function SlideQuickRevisionRow({
+  slide,
+  page,
+  disabled,
+  onQuickRevise,
+}: {
+  slide: JsonMap;
+  page: number;
+  disabled?: boolean;
+  onQuickRevise?: (instruction: string) => void;
+}) {
+  const title = String(slide.title || `第 ${page} 页`);
+  const notes = stringValue(slide.speaker_notes);
+  const bulletCount = Array.isArray(slide.bullets) ? slide.bullets.length : 0;
+  const run = (kind: 'notes' | 'judge' | 'concise') => {
+    if (!onQuickRevise) return;
+    onQuickRevise(slideRevisionInstruction(kind, page, title));
+  };
+  return (
+    <div className="slide-quick-row">
+      <div className="slide-quick-main">
+        <b>P{page}. {title}</b>
+        <span>{notes ? notes.slice(0, 54) : '待补讲者备注'}{bulletCount > 0 ? ` · ${bulletCount} 条要点` : ''}</span>
+      </div>
+      <div className="slide-quick-actions">
+        <button className="mini-action-button" disabled={disabled} onClick={() => run('notes')}>
+          <MessageSquare size={14} />{notes ? '润色备注' : '补备注'}
+        </button>
+        <button className="mini-action-button" disabled={disabled} onClick={() => run('judge')}>
+          <Sparkles size={14} />评委视角
+        </button>
+        <button className="mini-action-button" disabled={disabled} onClick={() => run('concise')}>
+          <SquarePen size={14} />精简此页
+        </button>
+      </div>
+    </div>
+  );
 }
 
 function Confirmations(props: {
@@ -674,6 +997,57 @@ function artifactIcon(type: string) {
   return <Layers3 size={18} />;
 }
 
+function artifactCheckIcon(status: string) {
+  if (status === 'ready') return <CheckCircle2 size={17} />;
+  if (status === 'partial') return <Clock3 size={17} />;
+  return <AlertCircle size={17} />;
+}
+
+function artifactCheckLabel(status: string) {
+  if (status === 'ready') return '已满足';
+  if (status === 'partial') return '部分满足';
+  if (status === 'missing') return '待补齐';
+  return status || '未知';
+}
+
+function artifactCheckTone(status: string) {
+  if (status === 'ready') return 'ok';
+  if (status === 'partial') return 'wait';
+  if (status === 'missing') return 'bad';
+  return 'muted';
+}
+
+function slideRevisionInstruction(kind: 'notes' | 'judge' | 'concise', page: number, title: string) {
+  if (kind === 'notes') {
+    return `请为第 ${page} 页「${title}」补充或润色讲者备注，并给出建议讲述时长。`;
+  }
+  if (kind === 'judge') {
+    return `请把第 ${page} 页「${title}」改成评委视角，突出赛题价值、完成度和验收证据。`;
+  }
+  return `请精简第 ${page} 页「${title}」的要点，保留最多 4 条 bullet，并保持讲者备注可用。`;
+}
+
+function canvasTemplateLabel(template: string) {
+  if (template === 'risk') return '风险应对图';
+  if (template === 'module') return '模块分工图';
+  return '流程图';
+}
+
+function contextKindLabel(kind: string) {
+  const labels: Record<string, string> = {
+    im: 'IM',
+    plan: '编排',
+    document: '文档',
+    document_link: '文档',
+    canvas: '白板',
+    slides: 'PPT',
+    slides_package: 'PPT',
+    im_trace: 'IM',
+    confirmation: '确认',
+  };
+  return labels[kind] || kind || '上下文';
+}
+
 function connectionLabel(state: ConnectionState) {
   const map: Record<ConnectionState, string> = {
     idle: '待机',
@@ -739,8 +1113,8 @@ function buildStatusOptions(runs: TaskRunSummary[]) {
 }
 
 function summaryFromDetail(detail: TaskRunDetail): TaskRunSummary {
-  const { steps, artifacts, confirmations, session_documents, metadata_json, ...summary } = detail;
-  void steps; void artifacts; void confirmations; void session_documents; void metadata_json;
+  const { steps, artifacts, artifact_checks, context_pack, confirmations, session_documents, metadata_json, ...summary } = detail;
+  void steps; void artifacts; void artifact_checks; void context_pack; void confirmations; void session_documents; void metadata_json;
   return summary;
 }
 
@@ -766,6 +1140,19 @@ function parseJsonMap(value?: string | null): JsonMap | null {
 
 function asMap(value: unknown): JsonMap | null {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as JsonMap : null;
+}
+
+function stringValue(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function numberValue(value: unknown): number {
+  if (typeof value === 'number') return Number.isFinite(value) ? Math.max(value, 0) : 0;
+  if (typeof value === 'string') {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? Math.max(parsed, 0) : 0;
+  }
+  return 0;
 }
 
 function confirmationOptions(confirmation: ConfirmationRequestRecord): string[] {

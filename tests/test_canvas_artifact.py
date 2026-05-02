@@ -77,6 +77,46 @@ class CanvasArtifactTests(unittest.TestCase):
         self.assertNotIn("\u534f\u4f5c\u4e0a\u4e0b\u6587", " ".join(labels))
         self.assertNotIn("\u53d1\u8a00\u4eba", " ".join(labels))
 
+    def test_canvas_service_uses_risk_template_for_risk_requests(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = CanvasArtifactService(root_dir=Path(tmpdir))
+            artifact = service.generate_flow(
+                title="风险画布",
+                instruction="把项目延期、飞书 API 权限和验收材料不足整理成风险应对图",
+                llm_result={},
+                workspace_context="",
+                task_run_id="run_risk",
+                session_id="s1",
+            )
+
+        preview = artifact["preview"]
+        self.assertEqual(preview["template"], "risk")
+        self.assertEqual(preview["summary"]["template"], "risk")
+        groups = {shape.get("group") for shape in preview["shapes"] if shape["type"] != "arrow"}
+        self.assertIn("风险", groups)
+        self.assertIn("应对", groups)
+        self.assertTrue(any(shape.get("label") == "缓解" for shape in preview["shapes"] if shape["type"] == "arrow"))
+
+    def test_canvas_service_uses_module_template_for_architecture_requests(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = CanvasArtifactService(root_dir=Path(tmpdir))
+            artifact = service.generate_flow(
+                title="模块图",
+                instruction="画一个前端、后端、测试和交付模块图",
+                llm_result={},
+                workspace_context="",
+                task_run_id="run_module",
+                session_id="s1",
+            )
+
+        preview = artifact["preview"]
+        self.assertEqual(preview["template"], "module")
+        labels = [shape["text"] for shape in preview["shapes"] if shape["type"] != "arrow"]
+        self.assertIn("前端体验", labels)
+        self.assertIn("后端服务", labels)
+        self.assertIn("测试验收", labels)
+        self.assertIn("集成交付与验收", labels)
+
     def test_canvas_tool_formats_public_preview_url(self) -> None:
         tool = CanvasTool(artifact_service=CanvasArtifactService())
         reply = tool.format_reply(

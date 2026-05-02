@@ -57,6 +57,29 @@ export type SessionDocumentRecord = {
   is_current: boolean;
 };
 
+export type ArtifactCheckRecord = {
+  key: string;
+  label: string;
+  status: string;
+  detail: string;
+  category: string;
+};
+
+export type ContextPackItemRecord = {
+  kind: string;
+  label: string;
+  detail: string;
+  status: string;
+  url?: string | null;
+};
+
+export type ContextPackRecord = {
+  summary: string;
+  used_sources: ContextPackItemRecord[];
+  missing_items: ContextPackItemRecord[];
+  suggested_inputs: string[];
+};
+
 export type ConfirmationRequestRecord = {
   confirmation_id: string;
   prompt: string;
@@ -73,6 +96,8 @@ export type TaskRunDetail = TaskRunSummary & {
   metadata_json?: string | null;
   steps: TaskRunStepRecord[];
   artifacts: ArtifactRecord[];
+  artifact_checks: ArtifactCheckRecord[];
+  context_pack?: ContextPackRecord | null;
   confirmations: ConfirmationRequestRecord[];
   session_documents: SessionDocumentRecord[];
 };
