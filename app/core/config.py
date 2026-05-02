@@ -8,6 +8,10 @@ class Settings(BaseSettings):
     app_host: str = Field(default="0.0.0.0", alias="APP_HOST")
     app_port: int = Field(default=8000, alias="APP_PORT")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
+    artifact_public_base_url: str = Field(
+        default="http://science.topviewclub.cn",
+        alias="ARTIFACT_PUBLIC_BASE_URL",
+    )
 
     database_url: str = Field(default="sqlite:///./data/app.db", alias="DATABASE_URL")
 

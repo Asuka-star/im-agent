@@ -1617,7 +1617,26 @@ class DocSyncTests(unittest.TestCase):
         self.assertIn("- 已更新章节：关键风险", reply)
         self.assertIn("- 已新增章节：验收标准", reply)
         self.assertIn("- 已重命名：风险与卡点 -> 关键风险", reply)
+        self.assertNotIn("内容预览：", reply)
+
+    def test_doc_reply_keeps_preview_for_created_document(self) -> None:
+        reply = self.workflow._format_doc_reply(
+            {
+                "title": "项目分工文档",
+                "sections": [
+                    {"heading": "讨论摘要", "paragraphs": ["团队明确了前后端分工。"]},
+                ],
+            },
+            [
+                "- Created document: 项目分工文档",
+                "- Current version: v1",
+                "- Document URL: https://feishu.cn/docx/doc_1",
+            ],
+        )
+
         self.assertIn("内容预览：", reply)
+        self.assertIn("讨论摘要", reply)
+        self.assertIn("团队明确了前后端分工。", reply)
 
     def test_doc_reply_infers_actions_from_sync_lines_without_edit_plan(self) -> None:
         reply = self.workflow._format_doc_reply(

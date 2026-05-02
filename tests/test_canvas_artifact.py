@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from app.services.canvas_artifact_service import CanvasArtifactService
+from app.services.canvas_tool import CanvasTool
 from app.services.feishu_workflow import FeishuWorkflowService
 
 
@@ -43,6 +44,50 @@ class CanvasArtifactTests(unittest.TestCase):
             self.assertIn("自由画布预览", html)
             self.assertNotIn("鑷", html)
             self.assertIn("<svg", html)
+
+    def test_canvas_service_derives_flow_nodes_from_discussion_content(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = CanvasArtifactService(root_dir=Path(tmpdir))
+            context = (
+                "[\u534f\u4f5c\u4e0a\u4e0b\u6587]\n"
+                "[\u8fd1\u671f\u7fa4\u804a\u8ba8\u8bba]\n"
+                "- \u53d1\u8a00\u4eba Zeleous | \u5185\u5bb9: "
+                "\u5f53\u524d\u7aef\u4e0eUI\u8bbe\u8ba1\u5b8c\u6210\u540e\uff0c"
+                "\u518d\u7b49\u540e\u7aef\u5b8c\u6210\uff0c"
+                "\u90a3\u4e48\u6211\u4eec\u7684\u9879\u76ee\u5c31\u53ef\u4ee5\u4e0a\u7ebf\u4e86"
+            )
+            artifact = service.generate_flow(
+                title="\u6d41\u7a0b\u753b\u5e03",
+                instruction="\u6839\u636e\u8ba8\u8bba\u6765\u751f\u6210\u4e00\u4e2a\u6d41\u7a0b\u753b\u5e03",
+                llm_result={},
+                workspace_context=context,
+                task_run_id="run_canvas",
+                session_id="s1",
+            )
+
+        labels = [shape["text"] for shape in artifact["preview"]["shapes"] if shape["type"] == "node"]
+        self.assertEqual(
+            labels,
+            [
+                "\u524d\u7aef\u4e0e UI \u8bbe\u8ba1\u5b8c\u6210",
+                "\u540e\u7aef\u5b8c\u6210",
+                "\u9879\u76ee\u4e0a\u7ebf",
+            ],
+        )
+        self.assertNotIn("\u534f\u4f5c\u4e0a\u4e0b\u6587", " ".join(labels))
+        self.assertNotIn("\u53d1\u8a00\u4eba", " ".join(labels))
+
+    def test_canvas_tool_formats_public_preview_url(self) -> None:
+        tool = CanvasTool(artifact_service=CanvasArtifactService())
+        reply = tool.format_reply(
+            {
+                "title": "Canvas",
+                "url": "/api/artifacts/canvas/run_canvas.html",
+                "preview": {"shapes": [{"type": "node"}]},
+            }
+        )
+
+        self.assertIn("http://science.topviewclub.cn/api/artifacts/canvas/run_canvas.html", reply)
 
     def test_canvas_service_normalizes_shape_style_and_group(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

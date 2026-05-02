@@ -137,6 +137,10 @@ class CanvasArtifactService:
         if labels:
             return labels[:8]
 
+        inferred_labels = self._infer_flow_labels(instruction=instruction, workspace_context=workspace_context)
+        if inferred_labels:
+            return inferred_labels[:8]
+
         candidates = re.split(r"[\n,，;；。.!?？]+", f"{instruction}\n{workspace_context}")
         labels = []
         for item in candidates:
@@ -147,6 +151,114 @@ class CanvasArtifactService:
             if len(labels) >= 5:
                 break
         return labels or ["Input", "Agent planning", "Tool execution", "Artifact delivery"]
+
+    def _infer_flow_labels(self, *, instruction: str, workspace_context: str) -> list[str]:
+        discussion_text = self._discussion_content(workspace_context)
+        labels = self._flow_labels_from_discussion(discussion_text)
+        if labels:
+            return labels
+        return self._flow_labels_from_discussion(instruction)
+
+    def _discussion_content(self, workspace_context: str) -> str:
+        lines: list[str] = []
+        for raw_line in str(workspace_context or "").splitlines():
+            text = raw_line.strip().lstrip("-").strip()
+            if not text:
+                continue
+            if text.startswith("[") and text.endswith("]"):
+                continue
+            text = self._extract_message_content(text)
+            text = self._clean_flow_candidate(text)
+            if text and not self._is_canvas_meta_text(text):
+                lines.append(text)
+        return "\n".join(lines)
+
+    def _extract_message_content(self, text: str) -> str:
+        segments = [segment.strip() for segment in re.split(r"\s*\|\s*", text) if segment.strip()]
+        for segment in segments:
+            safe_match = re.match(r"^(?:\u5185\u5bb9|content)\s*[:\uff1a]\s*(.+)$", segment, flags=re.IGNORECASE)
+            if safe_match:
+                return safe_match.group(1).strip()
+            match = re.match(r"^(?:内容|content)\s*[:：]\s*(.+)$", segment, flags=re.IGNORECASE)
+            if match:
+                return match.group(1).strip()
+        return text
+
+    def _flow_labels_from_discussion(self, text: str) -> list[str]:
+        labels: list[str] = []
+        for sentence in re.split(r"[\n\u3002.!?\uff1f]+", str(text or "")):
+            sentence = self._clean_flow_candidate(sentence)
+            if not sentence or self._is_canvas_meta_text(sentence):
+                continue
+            for part in self._split_flow_sentence(sentence):
+                label = self._normalize_flow_label(part)
+                if label and label not in labels and not self._is_canvas_meta_text(label):
+                    labels.append(label[:36])
+                if len(labels) >= 6:
+                    return labels
+        return labels
+
+    def _split_flow_sentence(self, sentence: str) -> list[str]:
+        parts: list[str] = []
+        for chunk in re.split(r"(?:\u7136\u540e|\u4e4b\u540e|\u5e76\u4e14|\u540c\u65f6|\u518d\u7b49|\u518d|\uff0c|,|\uff1b|;)", sentence):
+            chunk = self._clean_flow_candidate(chunk)
+            if chunk:
+                parts.append(chunk)
+        expanded: list[str] = []
+        for part in parts or [sentence]:
+            if "\u90a3\u4e48" in part:
+                before, after = part.split("\u90a3\u4e48", 1)
+                expanded.extend([before, after])
+            elif "\u5c31\u53ef\u4ee5" in part:
+                before, after = part.split("\u5c31\u53ef\u4ee5", 1)
+                expanded.extend([before, after])
+            else:
+                expanded.append(part)
+        return [item for item in expanded if self._clean_flow_candidate(item)]
+
+    def _normalize_flow_label(self, text: str) -> str:
+        text = self._clean_flow_candidate(text)
+        if not text:
+            return ""
+        text = re.sub(r"^\u5f53(.+?)\u5b8c\u6210\u540e$", lambda match: f"{match.group(1)}\u5b8c\u6210", text)
+        text = re.sub(r"^(.+?)\u5b8c\u6210\u540e$", lambda match: f"{match.group(1)}\u5b8c\u6210", text)
+        text = re.sub(r"^(?:\u7b49|\u7b49\u5f85)(.+?)\u5b8c\u6210$", lambda match: f"{match.group(1)}\u5b8c\u6210", text)
+        text = re.sub(
+            r"^(?:\u6211\u4eec\u7684)?\u9879\u76ee(?:\u5c31\u53ef\u4ee5|\u53ef\u4ee5)?\u4e0a\u7ebf(?:\u4e86)?$",
+            "\u9879\u76ee\u4e0a\u7ebf",
+            text,
+        )
+        text = re.sub(r"^(.{1,12}?)(?:\u4f60)?\u6765(.+)$", r"\1\2", text)
+        text = text.replace("UI", " UI ").replace("  ", " ").strip()
+        return text
+
+    def _clean_flow_candidate(self, text: str) -> str:
+        text = " ".join(str(text or "").split()).strip()
+        text = re.sub(r"^[-*\u2022]\s*", "", text).strip()
+        return text.strip("\uff1a:，,\u3002.;\uff1b ")
+
+    def _is_canvas_meta_text(self, text: str) -> bool:
+        normalized = self._clean_flow_candidate(text)
+        if not normalized:
+            return True
+        if normalized.startswith("[") and normalized.endswith("]"):
+            return True
+        if re.search(
+            r"(?:\u751f\u6210|\u753b|\u521b\u5efa|\u5236\u4f5c).{0,8}(?:\u753b\u5e03|\u6d41\u7a0b\u56fe|\u6d41\u7a0b\u753b\u5e03|canvas)",
+            normalized,
+            flags=re.IGNORECASE,
+        ):
+            return True
+        if normalized.lower() in {"canvas", "flowchart", "diagram"}:
+            return True
+        return normalized.startswith(
+            (
+                "\u53d1\u8a00\u4eba",
+                "speaker",
+                "\u534f\u4f5c\u4e0a\u4e0b\u6587",
+                "\u8fd1\u671f\u7fa4\u804a\u8ba8\u8bba",
+            )
+        )
 
     def _flow_shapes(self, labels: list[str]) -> list[dict]:
         shapes: list[dict] = []

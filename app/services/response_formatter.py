@@ -52,7 +52,7 @@ class ResponseFormatter:
             lines.extend(action_lines)
         lines.append("执行结果：")
         lines.extend(result_lines or ["- 已完成处理。"])
-        if sections and mode in {"created", "updated"} and not self._doc_has_delete_only_plan(package):
+        if sections and mode == "created":
             lines.append("内容预览：")
             for index, section in enumerate(sections[:6], start=1):
                 if not isinstance(section, dict):
@@ -244,18 +244,6 @@ class ResponseFormatter:
         if any(line.startswith("- 未检测到可写入变化") for line in translated):
             translated.append("- 可能原因：目标内容没有匹配到、已被处理过，或本轮生成内容与当前快照一致。")
         return translated
-
-    def _doc_has_delete_only_plan(self, package: dict) -> bool:
-        edit_plan = package.get("artifact_edit_plan") if isinstance(package.get("artifact_edit_plan"), dict) else {}
-        operations = edit_plan.get("operations") or edit_plan.get("ops") if isinstance(edit_plan, dict) else []
-        if not isinstance(operations, list) or not operations:
-            return False
-        op_types = {
-            str(operation.get("type") or operation.get("op") or operation.get("action") or "").strip().lower()
-            for operation in operations
-            if isinstance(operation, dict)
-        }
-        return bool(op_types) and op_types <= {"delete", "remove"}
 
     def format_analysis_reply(
         self,

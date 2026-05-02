@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import json
 
+from app.core.config import settings
 from app.services.artifact_edit_plan import ArtifactEditPlan, ArtifactEditPlanner
 from app.services.canvas_artifact_service import CanvasArtifactService
 
 
 class CanvasTool:
     """Generates free-canvas artifacts and concise user-facing previews."""
+
+    PUBLIC_PREVIEW_BASE_URL = settings.artifact_public_base_url
 
     def __init__(self, *, artifact_service: CanvasArtifactService) -> None:
         self.artifact_service = artifact_service
@@ -34,12 +37,24 @@ class CanvasTool:
     def format_reply(self, artifact: dict) -> str:
         preview = artifact.get("preview") if isinstance(artifact.get("preview"), dict) else {}
         shapes = preview.get("shapes") if isinstance(preview.get("shapes"), list) else []
+        preview_url = self.public_preview_url(artifact.get("url"))
         return (
             "【Canvas 产物】\n"
             f"标题：{artifact.get('title') or 'Canvas'}\n"
             f"节点/连线数量：{len(shapes)}\n"
-            f"预览链接：{artifact.get('url') or ''}"
+            f"预览链接：{preview_url}"
         )
+
+    @classmethod
+    def public_preview_url(cls, value: object) -> str:
+        url = str(value or "").strip()
+        if not url:
+            return ""
+        if url.startswith(("http://", "https://")):
+            return url
+        if not url.startswith("/"):
+            url = f"/{url}"
+        return f"{cls.PUBLIC_PREVIEW_BASE_URL.rstrip('/')}{url}"
 
     def plan_revision(self, scene: dict, instruction: str, llm_result: dict | None = None) -> ArtifactEditPlan:
         shapes = scene.get("shapes") if isinstance(scene.get("shapes"), list) else []
