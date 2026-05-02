@@ -5,11 +5,15 @@ from zoneinfo import ZoneInfo
 
 from app.core.config import settings
 from app.schemas.analyze import AnalyzeResponse
+from app.services.artifact_skills import DocSkill
 from app.services.doc_tool import DocTool
 
 
 class DocumentPackageBuilder:
     """Builds structured document packages from agent outputs."""
+
+    def __init__(self) -> None:
+        self.doc_skill = DocSkill()
 
     def package_from_llm_result(
         self,
@@ -41,7 +45,7 @@ class DocumentPackageBuilder:
         )
         if isinstance(edit_plan, dict):
             package["artifact_edit_plan"] = edit_plan
-        return package
+        return self.doc_skill.normalize(package)
 
     @staticmethod
     def is_outline_request(instruction: str) -> bool:
@@ -78,11 +82,11 @@ class DocumentPackageBuilder:
                     "paragraphs": [f"{idx}. {item}" for idx, item in enumerate(analysis.next_actions, start=1)],
                 }
             )
-        return {
+        return self.doc_skill.normalize({
             "title": self.default_title(instruction, stats_as_of=stats_as_of),
             "stats_as_of": stats_as_of,
             "sections": DocTool.normalize_doc_sections(sections),
-        }
+        })
 
     def from_presentation(self, package: dict, instruction: str, *, stats_as_of: str | None = None) -> dict:
         theme = str(package.get("theme") or "汇报大纲").strip()
@@ -122,11 +126,11 @@ class DocumentPackageBuilder:
                     "paragraphs": [str(item).strip() for item in assets if str(item).strip()],
                 }
             )
-        return {
+        return self.doc_skill.normalize({
             "title": self.default_title(instruction, fallback=theme, stats_as_of=stats_as_of),
             "stats_as_of": stats_as_of,
             "sections": DocTool.normalize_doc_sections(sections),
-        }
+        })
 
     def default_title(self, instruction: str, fallback: str | None = None, stats_as_of: str | None = None) -> str:
         timestamp = stats_as_of or self.title_timestamp()

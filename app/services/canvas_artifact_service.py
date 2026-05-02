@@ -4,17 +4,15 @@ import uuid
 from html import escape
 from pathlib import Path
 
+from app.services.artifact_skills import CanvasSkill
+
 
 class CanvasArtifactService:
-    NODE_PALETTE = [
-        {"color": "#EAF5FF", "stroke": "#5A9FD6", "group": "Input"},
-        {"color": "#F3F0FF", "stroke": "#8B6FD6", "group": "Agent"},
-        {"color": "#EEF8F1", "stroke": "#67A77B", "group": "Tools"},
-        {"color": "#FFF4E5", "stroke": "#D6923D", "group": "Artifact"},
-    ]
+    NODE_PALETTE = CanvasSkill.node_palette
 
     def __init__(self, *, root_dir: Path | None = None) -> None:
         self.root_dir = root_dir or Path("data") / "artifacts" / "canvas"
+        self.canvas_skill = CanvasSkill()
 
     def generate_flow(
         self,
@@ -26,12 +24,12 @@ class CanvasArtifactService:
         task_run_id: str | None,
         session_id: str,
     ) -> dict:
-        scene = self._build_scene(
+        scene = self.canvas_skill.normalize(self._build_scene(
             title=title,
             instruction=instruction,
             llm_result=llm_result,
             workspace_context=workspace_context,
-        )
+        ))
         filename = self._canvas_filename(scene, task_run_id=task_run_id, session_id=session_id)
         svg_filename = self._svg_filename(filename)
         html_filename = self._html_filename(filename)

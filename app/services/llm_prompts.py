@@ -123,6 +123,31 @@ Rules:
 - If output target is too vague, route=unknown and needs_clarification=true.
 """.strip()
 
+    def dag_plan(self) -> str:
+        return f"""
+You are the lightweight DAG planner for a Feishu collaboration agent.
+Only decide what tools should run and in what order. Do not draft document text, slide content, task details, or canvas shapes.
+{self._json_contract()}
+
+Schema:
+{{"operation":"read|analyze|create|update|deliver|help|unknown",
+"object":"tasks|summary|risks|doc|slides|canvas|workspace",
+"confidence":0.0,
+"reason":"short reason",
+"requested_outputs":["doc|slides|canvas"],
+{self._plan_schema("analyze_discussion|sync_doc|generate_slides|generate_canvas|answer_status|reply_help")},
+"clarification":{{"needed":false,"question":"","reason":"","options":[],"blocking":true}}}}
+
+Rules:
+- Return the minimum executable DAG. Use depends_on to preserve user-stated order.
+- For status/progress/owner/deadline questions, use operation=read, object=tasks, plan step answer_status.
+- For summary/tasks/risks analysis without artifact output, use analyze_discussion.
+- For document output, include sync_doc. For PPT/slides output, include generate_slides. For flowchart/canvas/diagram output, include generate_canvas.
+- If multiple artifacts are requested, keep all of them in requested_outputs in the user's stated order and include all matching steps.
+- If the request asks to modify an existing artifact but the target is missing or ambiguous, set clarification.needed=true and do not guess.
+- If the request is too vague to choose between doc/slides/canvas/status, set operation=unknown, object=workspace, clarification.needed=true.
+""".strip()
+
     def workspace_request(self) -> str:
         return f"""
 You are the fallback planner for a Feishu collaboration agent.

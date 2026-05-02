@@ -32,9 +32,19 @@ class LLMPromptTests(unittest.TestCase):
         service = LLMService()
 
         self.assertEqual(service._route_prompt(), service.prompts.route())
+        self.assertEqual(service._dag_plan_prompt(), service.prompts.dag_plan())
         self.assertEqual(service._analysis_request_prompt("risks"), service.prompts.analysis_request("risks"))
         self.assertEqual(service._doc_edit_intent_prompt(), service.prompts.doc_edit_intent())
         self.assertEqual(service._next_action_rerank_prompt(), service.prompts.next_action_rerank())
+
+    def test_dag_plan_prompt_is_planning_only_and_bounded(self) -> None:
+        prompt = LLMPromptBuilder().dag_plan()
+
+        self.assertLess(len(prompt), 3500)
+        self.assertIn("lightweight DAG planner", prompt)
+        self.assertIn("Do not draft document text", prompt)
+        self.assertIn("sync_doc|generate_slides|generate_canvas", prompt)
+        self.assertIn("requested_outputs", prompt)
 
     def test_doc_edit_intent_prompt_is_contract_only(self) -> None:
         prompt = LLMPromptBuilder().doc_edit_intent()
@@ -72,6 +82,31 @@ class LLMPromptTests(unittest.TestCase):
         self.assertEqual(payload["response_format"], {"type": "json_object"})
         self.assertEqual(payload["messages"][0], {"role": "system", "content": "sys"})
         self.assertEqual(payload["messages"][1], {"role": "user", "content": "user"})
+
+    def test_plan_workspace_request_uses_lightweight_timeout_and_cache(self) -> None:
+        service = LLMService()
+        service.api_key = "test-key"
+        service.base_url = "https://example.test"
+        service.model = "demo-model"
+        result = {
+            "operation": "create",
+            "object": "slides",
+            "confidence": 0.82,
+            "requested_outputs": ["slides", "canvas"],
+            "plan": {"steps": [{"id": "step_1", "type": "generate_slides"}]},
+        }
+
+        with patch.object(service, "_chat_json", return_value=result) as chat_json:
+            first = service.plan_workspace_request("[workspace]", "做汇报材料并画流程图")
+            first["object"] = "workspace"
+            first["requested_outputs"].append("doc")
+            second = service.plan_workspace_request("[workspace]", "做汇报材料并画流程图")
+
+        self.assertEqual(first["object"], "workspace")
+        self.assertEqual(second["object"], "slides")
+        self.assertEqual(second["requested_outputs"], ["slides", "canvas"])
+        chat_json.assert_called_once()
+        self.assertEqual(chat_json.call_args.kwargs["request_name"], "plan_workspace_request")
 
     def test_llm_service_context_wrapper_uses_clean_chinese(self) -> None:
         content = LLMService._context_request_content("上下文", "生成文档")

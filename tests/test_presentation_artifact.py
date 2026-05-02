@@ -44,11 +44,16 @@ class PresentationArtifactServiceTests(unittest.TestCase):
             self.assertIn("speaker_notes", artifact["preview"]["slides"][0])
             html = html_path.read_text(encoding="utf-8")
             self.assertIn("报名汇报", html)
-            self.assertIn("讲者备注", html)
+            self.assertIn("Speaker notes", html)
             self.assertNotIn("鎶", html)
+            self.assertNotIn("Speaker notes/strong", html)
             with zipfile.ZipFile(pptx_path) as archive:
                 self.assertIn("ppt/presentation.xml", archive.namelist())
                 self.assertIn("ppt/slides/slide1.xml", archive.namelist())
+            from pptx import Presentation
+
+            deck = Presentation(pptx_path)
+            self.assertEqual(len(deck.slides), 1)
 
             reply = PresentationTool(artifact_service=service).format_reply(artifact["preview"], artifact=artifact)
             self.assertIn("产物链接：", reply)

@@ -52,20 +52,16 @@ class ExecutionPlanner:
         instruction: str,
         llm_result: dict,
     ) -> RequestProtocol:
-        if protocol.object in {"doc", "slides"}:
+        if protocol.object in {"doc", "slides", "canvas"}:
             return protocol
         if protocol.operation in {"read", "help", "unknown"}:
             self.store_request_protocol(llm_result, protocol)
             return protocol
-        requested_outputs = self.requested_output_set(llm_result)
-        if "doc" in requested_outputs:
+        requested_outputs = self.requested_output_list(llm_result)
+        if requested_outputs:
+            output = requested_outputs[0]
             operation = "update" if protocol.operation == "update" else "create"
-            adjusted = RequestProtocol(operation=operation, object="doc", route="doc")
-            self.store_request_protocol(llm_result, adjusted)
-            return adjusted
-        if "slides" in requested_outputs:
-            operation = "update" if protocol.operation == "update" else "create"
-            adjusted = RequestProtocol(operation=operation, object="slides", route="slides")
+            adjusted = RequestProtocol(operation=operation, object=output, route=output)
             self.store_request_protocol(llm_result, adjusted)
             return adjusted
         if not (
@@ -356,7 +352,9 @@ class ExecutionPlanner:
                 instruction=instruction,
                 llm_result=llm_result,
             )
-            return ExecutionPlan(goal=plan.goal, primary_intent=protocol.route, steps=filtered_steps)
+            return self.schedule_execution_plan(
+                ExecutionPlan(goal=plan.goal, primary_intent=protocol.route, steps=filtered_steps)
+            )
         return self.build_fallback_plan(
             intent=protocol.route,
             reason=reason,
@@ -400,6 +398,110 @@ class ExecutionPlanner:
                 )
         return ExecutionPlan(goal=goal, primary_intent=intent or "help", steps=steps)
 
+    def schedule_execution_plan(self, plan: ExecutionPlan) -> ExecutionPlan:
+        return ExecutionPlan(
+            goal=plan.goal,
+            primary_intent=plan.primary_intent,
+            steps=self.schedule_plan_steps(plan.steps),
+        )
+
+    def schedule_plan_steps(self, steps: list[PlannerStep]) -> list[PlannerStep]:
+        normalized_steps = self._normalize_step_ids(steps)
+        sanitized_steps = self._sanitize_step_dependencies(normalized_steps)
+        return self._topological_sort_steps(sanitized_steps)
+
+    @staticmethod
+    def _normalize_step_ids(steps: list[PlannerStep]) -> list[PlannerStep]:
+        used_ids: set[str] = set()
+        normalized_steps: list[PlannerStep] = []
+        for index, step in enumerate(steps, start=1):
+            base_id = str(step.step_id or f"step_{index}").strip() or f"step_{index}"
+            step_id = base_id
+            suffix = 2
+            while step_id in used_ids:
+                step_id = f"{base_id}_{suffix}"
+                suffix += 1
+            used_ids.add(step_id)
+            normalized_steps.append(
+                PlannerStep(
+                    step_id=step_id,
+                    step_type=step.step_type,
+                    title=step.title,
+                    depends_on=list(step.depends_on),
+                    notes=step.notes,
+                )
+            )
+        return normalized_steps
+
+    @staticmethod
+    def _sanitize_step_dependencies(steps: list[PlannerStep]) -> list[PlannerStep]:
+        known_ids = {step.step_id for step in steps}
+        sanitized: list[PlannerStep] = []
+        for step in steps:
+            dependencies: list[str] = []
+            for dependency in step.depends_on:
+                dependency_id = str(dependency or "").strip()
+                if not dependency_id or dependency_id == step.step_id or dependency_id not in known_ids:
+                    continue
+                if dependency_id not in dependencies:
+                    dependencies.append(dependency_id)
+            sanitized.append(
+                PlannerStep(
+                    step_id=step.step_id,
+                    step_type=step.step_type,
+                    title=step.title,
+                    depends_on=dependencies,
+                    notes=step.notes,
+                )
+            )
+        return sanitized
+
+    @staticmethod
+    def _topological_sort_steps(steps: list[PlannerStep]) -> list[PlannerStep]:
+        if len(steps) <= 1:
+            return steps
+
+        by_id = {step.step_id: step for step in steps}
+        dependents: dict[str, list[str]] = {step.step_id: [] for step in steps}
+        in_degree: dict[str, int] = {step.step_id: 0 for step in steps}
+        for step in steps:
+            for dependency in step.depends_on:
+                if dependency not in by_id:
+                    continue
+                in_degree[step.step_id] += 1
+                dependents[dependency].append(step.step_id)
+
+        ready = [step.step_id for step in steps if in_degree[step.step_id] == 0]
+        ordered_ids: list[str] = []
+        while ready:
+            step_id = ready.pop(0)
+            ordered_ids.append(step_id)
+            for dependent_id in dependents.get(step_id, []):
+                in_degree[dependent_id] -= 1
+                if in_degree[dependent_id] == 0:
+                    ready.append(dependent_id)
+
+        if len(ordered_ids) == len(steps):
+            return [by_id[step_id] for step_id in ordered_ids]
+
+        ordered_set = set(ordered_ids)
+        ordered_steps = [by_id[step_id] for step_id in ordered_ids]
+        for step in steps:
+            if step.step_id in ordered_set:
+                continue
+            executable_dependencies = [dependency for dependency in step.depends_on if dependency in ordered_set]
+            ordered_steps.append(
+                PlannerStep(
+                    step_id=step.step_id,
+                    step_type=step.step_type,
+                    title=step.title,
+                    depends_on=executable_dependencies,
+                    notes=step.notes,
+                )
+            )
+            ordered_set.add(step.step_id)
+        return ordered_steps
+
     def build_fallback_plan(
         self,
         *,
@@ -409,62 +511,21 @@ class ExecutionPlanner:
         llm_result: dict,
     ) -> ExecutionPlan:
         primary_intent = intent or "help"
-        wants_slides = self.should_include_slides_step(primary_intent, instruction, llm_result)
-        wants_canvas = self.should_include_canvas_step(primary_intent, instruction, llm_result)
         if primary_intent in {"summary", "tasks", "risks"}:
             steps = [PlannerStep(step_id="step_1", step_type="analyze_discussion", title="分析讨论并整理结果")]
-        elif primary_intent == "doc":
-            steps = [PlannerStep(step_id="step_1", step_type="sync_doc", title="生成并同步文档")]
-            if wants_slides:
-                steps.append(
-                    PlannerStep(
-                        step_id="step_2",
-                        step_type="generate_slides",
-                        title="基于当前上下文生成演示稿",
-                        depends_on=["step_1"],
-                    )
-                )
-            if wants_canvas:
-                dependency = steps[-1].step_id if steps else None
-                steps.append(
-                    PlannerStep(
-                        step_id=f"step_{len(steps) + 1}",
-                        step_type="generate_canvas",
-                        title="生成自由画布",
-                        depends_on=[dependency] if dependency else [],
-                    )
-                )
-        elif primary_intent == "slides":
-            steps = [PlannerStep(step_id="step_1", step_type="generate_slides", title="生成演示稿大纲")]
-            if wants_canvas:
-                steps.append(
-                    PlannerStep(
-                        step_id="step_2",
-                        step_type="generate_canvas",
-                        title="生成自由画布",
-                        depends_on=["step_1"],
-                    )
-                )
-        elif primary_intent == "canvas":
-            steps = [PlannerStep(step_id="step_1", step_type="generate_canvas", title="Generate canvas artifact")]
-            if wants_slides:
-                steps.append(
-                    PlannerStep(
-                        step_id="step_2",
-                        step_type="generate_slides",
-                        title="生成演示稿",
-                        depends_on=["step_1"],
-                    )
-                )
+        elif primary_intent in {"doc", "slides", "canvas"}:
+            steps = self._artifact_steps_for_outputs(primary_intent, instruction, llm_result)
         elif primary_intent == "status":
             steps = [PlannerStep(step_id="step_1", step_type="answer_status", title="回答当前协作状态")]
         else:
             steps = [PlannerStep(step_id="step_1", step_type="reply_help", title="给出下一步指引")]
 
-        return ExecutionPlan(
-            goal=self.default_plan_goal(primary_intent, instruction, reason=reason),
-            primary_intent=primary_intent,
-            steps=steps,
+        return self.schedule_execution_plan(
+            ExecutionPlan(
+                goal=self.default_plan_goal(primary_intent, instruction, reason=reason),
+                primary_intent=primary_intent,
+                steps=steps,
+            )
         )
 
     @staticmethod
@@ -524,6 +585,47 @@ class ExecutionPlanner:
             "answer_status": "回答状态问题",
             "reply_help": "给出下一步指引",
         }.get(step_type, "执行计划步骤")
+
+    def _artifact_steps_for_outputs(
+        self,
+        primary_intent: str,
+        instruction: str,
+        llm_result: dict,
+    ) -> list[PlannerStep]:
+        outputs = self.requested_output_list(llm_result)
+        if not outputs:
+            outputs = [primary_intent]
+        elif primary_intent in {"doc", "slides", "canvas"} and primary_intent not in outputs:
+            outputs.insert(0, primary_intent)
+
+        if self.should_include_slides_step(primary_intent, instruction, llm_result) and "slides" not in outputs:
+            outputs.append("slides")
+        if self.should_include_canvas_step(primary_intent, instruction, llm_result) and "canvas" not in outputs:
+            outputs.append("canvas")
+
+        steps: list[PlannerStep] = []
+        for output in outputs:
+            step_type = self.step_type_for_artifact_output(output)
+            if not step_type or any(step.step_type == step_type for step in steps):
+                continue
+            dependency = steps[-1].step_id if steps else None
+            steps.append(
+                PlannerStep(
+                    step_id=f"step_{len(steps) + 1}",
+                    step_type=step_type,
+                    title=self.default_plan_step_title(step_type, primary_intent),
+                    depends_on=[dependency] if dependency else [],
+                )
+            )
+        return steps or [PlannerStep(step_id="step_1", step_type="reply_help", title="给出下一步指引")]
+
+    @staticmethod
+    def step_type_for_artifact_output(output: str) -> str:
+        return {
+            "doc": "sync_doc",
+            "slides": "generate_slides",
+            "canvas": "generate_canvas",
+        }.get(output, "")
 
     def should_include_slides_step(self, intent: str, instruction: str, llm_result: dict) -> bool:
         if intent == "slides":
@@ -585,45 +687,44 @@ class ExecutionPlanner:
         llm_result: dict,
     ) -> list[PlannerStep]:
         result = list(steps)
-        if (
-            protocol.route in {"doc", "canvas"}
-            and self.should_include_slides_step(protocol.route, instruction, llm_result)
-            and not any(step.step_type == "generate_slides" for step in result)
-        ):
+        if protocol.operation not in {"create", "update"} or protocol.route not in {"doc", "slides", "canvas"}:
+            return result
+
+        outputs = self.requested_output_list(llm_result)
+        if not outputs:
+            outputs = []
+            if self.should_include_slides_step(protocol.route, instruction, llm_result):
+                outputs.append("slides")
+            if self.should_include_canvas_step(protocol.route, instruction, llm_result):
+                outputs.append("canvas")
+
+        for output in outputs:
+            step_type = self.step_type_for_artifact_output(output)
+            if not step_type or any(step.step_type == step_type for step in result):
+                continue
             dependency = result[-1].step_id if result else None
             result.append(
                 PlannerStep(
                     step_id=f"step_{len(result) + 1}",
-                    step_type="generate_slides",
-                    title="基于当前上下文生成演示稿",
-                    depends_on=[dependency] if dependency else [],
-                )
-            )
-        if (
-            protocol.route in {"doc", "slides"}
-            and self.should_include_canvas_step(protocol.route, instruction, llm_result)
-            and not any(step.step_type == "generate_canvas" for step in result)
-        ):
-            dependency = result[-1].step_id if result else None
-            result.append(
-                PlannerStep(
-                    step_id=f"step_{len(result) + 1}",
-                    step_type="generate_canvas",
-                    title="生成自由画布",
+                    step_type=step_type,
+                    title=self.default_plan_step_title(step_type, protocol.route),
                     depends_on=[dependency] if dependency else [],
                 )
             )
         return result
 
-    def requested_output_set(self, llm_result: dict) -> set[str]:
+    def requested_output_list(self, llm_result: dict) -> list[str]:
         requested_outputs = llm_result.get("requested_outputs") if isinstance(llm_result, dict) else None
         raw_items = requested_outputs if isinstance(requested_outputs, list) else []
-        outputs: set[str] = set()
+        outputs: list[str] = []
         for item in raw_items:
             normalized = self.normalize_object(item)
-            if normalized in {"doc", "slides", "canvas"}:
-                outputs.add(normalized)
+            if normalized in {"doc", "slides", "canvas"} and normalized not in outputs:
+                outputs.append(normalized)
         return outputs
+
+    def requested_output_set(self, llm_result: dict) -> set[str]:
+        return set(self.requested_output_list(llm_result))
 
     def ensure_requested_output(self, llm_result: dict, output: str) -> None:
         normalized = self.normalize_object(output)

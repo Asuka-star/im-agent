@@ -212,12 +212,15 @@ class RequestRouter:
             )
 
         requested_outputs = self._requested_outputs(
+            text=text,
+            lowered=lowered,
             doc_requested=doc_requested,
             slides_requested=slides_requested,
             canvas_requested=canvas_requested,
         )
+        primary_artifact = requested_outputs[0] if requested_outputs else ""
 
-        if doc_requested:
+        if primary_artifact == "doc":
             reason = (
                 "用户要求生成文档并补充其他协作产物。"
                 if len(requested_outputs) > 1
@@ -231,7 +234,7 @@ class RequestRouter:
                 requested_outputs=requested_outputs,
             )
 
-        if slides_requested:
+        if primary_artifact == "slides":
             reason = (
                 "用户要求生成演示稿并补充画布产物。"
                 if canvas_requested
@@ -245,7 +248,7 @@ class RequestRouter:
                 requested_outputs=requested_outputs,
             )
 
-        if canvas_requested:
+        if primary_artifact == "canvas":
             return RouteDecision(
                 route="canvas",
                 source="rule",
@@ -385,18 +388,39 @@ class RequestRouter:
     @staticmethod
     def _requested_outputs(
         *,
+        text: str = "",
+        lowered: str = "",
         doc_requested: bool,
         slides_requested: bool,
         canvas_requested: bool,
     ) -> tuple[str, ...]:
-        outputs: list[str] = []
+        candidates: list[tuple[int, int, str]] = []
         if doc_requested:
-            outputs.append("doc")
+            candidates.append((RequestRouter._first_keyword_index(text, lowered, RequestRouter.DOC_KEYWORDS), 0, "doc"))
         if slides_requested:
-            outputs.append("slides")
+            candidates.append((RequestRouter._first_keyword_index(text, lowered, RequestRouter.SLIDES_KEYWORDS), 1, "slides"))
         if canvas_requested:
-            outputs.append("canvas")
+            candidates.append((RequestRouter._first_keyword_index(text, lowered, RequestRouter.CANVAS_KEYWORDS), 2, "canvas"))
+
+        outputs: list[str] = []
+        for _, _, output in sorted(candidates, key=lambda item: item[:2]):
+            if output not in outputs:
+                outputs.append(output)
         return tuple(outputs)
+
+    @staticmethod
+    def _first_keyword_index(text: str, lowered: str, keywords: tuple[str, ...]) -> int:
+        positions: list[int] = []
+        for keyword in keywords:
+            raw_keyword = str(keyword or "")
+            if not raw_keyword:
+                continue
+            candidates = [
+                text.find(raw_keyword),
+                lowered.find(raw_keyword.lower()),
+            ]
+            positions.extend(position for position in candidates if position >= 0)
+        return min(positions) if positions else 10**9
 
     def _contains_any(self, text: str, lowered: str, keywords: tuple[str, ...]) -> bool:
         return any(keyword in text or keyword.lower() in lowered for keyword in keywords)

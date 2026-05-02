@@ -98,6 +98,20 @@ class RequestRouterTests(unittest.TestCase):
         self.assertEqual(decision.route, "doc")
         self.assertEqual(decision.requested_outputs, ("doc", "slides", "canvas"))
 
+    def test_compound_outputs_follow_user_mentioned_order(self) -> None:
+        decision = self.router.route_by_rule("先生成PPT，再整理成文档")
+
+        self.assertIsNotNone(decision)
+        self.assertEqual(decision.route, "slides")
+        self.assertEqual(decision.requested_outputs, ("slides", "doc"))
+
+    def test_canvas_can_be_primary_when_mentioned_first(self) -> None:
+        decision = self.router.route_by_rule("先画流程图，再生成PPT")
+
+        self.assertIsNotNone(decision)
+        self.assertEqual(decision.route, "canvas")
+        self.assertEqual(decision.requested_outputs, ("canvas", "slides"))
+
     def test_presentation_only_request_with_doc_exclusion_routes_to_slides(self) -> None:
         decision = self.router.route_by_rule("只生成PPT，不要写文档")
 

@@ -337,6 +337,54 @@ class FeishuWorkflowService:
             route_decision.confidence,
             route_decision.needs_clarification,
         )
+        preplanned_llm_result: dict | None = None
+        if self.llm_service.is_configured() and self._should_run_dag_planner(route_decision):
+            try:
+                preplanned_llm_result = self.llm_service.plan_workspace_request(
+                    base_workspace_context,
+                    message.text,
+                )
+                route_decision = self._route_decision_from_dag_result(
+                    preplanned_llm_result,
+                    fallback=route_decision,
+                )
+                if task_run_id:
+                    self.task_run_service.upsert_step(
+                        task_run_id,
+                        step_key="intent_dag_plan",
+                        title="生成轻量 DAG 计划",
+                        step_type="intent",
+                        status="done",
+                        output_payload={
+                            "route": route_decision.route,
+                            "confidence": route_decision.confidence,
+                            "requested_outputs": list(route_decision.requested_outputs),
+                            "plan_steps": [
+                                item.get("type") or item.get("step_type")
+                                for item in (
+                                    preplanned_llm_result.get("plan", {}).get("steps", [])
+                                    if isinstance(preplanned_llm_result.get("plan"), dict)
+                                    else []
+                                )
+                                if isinstance(item, dict)
+                            ],
+                        },
+                    )
+                clarification = self._extract_clarification_request(preplanned_llm_result)
+                if clarification and clarification["blocking"]:
+                    return self._pause_for_clarification(
+                        message,
+                        intent=route_decision.route if route_decision.route != "unknown" else "help",
+                        clarification=clarification,
+                        active_episode_id=active_episode_id,
+                        task_run_id=task_run_id,
+                        workspace_context=workspace_context,
+                        artifacts=[],
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Lightweight DAG planning failed, continuing with route fallback: %s", exc)
+                preplanned_llm_result = None
+
         if route_decision.needs_clarification:
             return self._pause_for_clarification(
                 message,
@@ -393,7 +441,11 @@ class FeishuWorkflowService:
                     active_episode_id=active_episode_id,
                     target_document=target_document,
                 )
-                llm_result = self._resolve_llm_result_for_route(route_decision, resolution_context, message.text)
+                llm_result = (
+                    preplanned_llm_result
+                    if preplanned_llm_result is not None
+                    else self._resolve_llm_result_for_route(route_decision, resolution_context, message.text)
+                )
                 self._apply_route_decision_to_llm_result(llm_result, route_decision)
                 protocol = self._normalize_request_protocol(llm_result)
                 if task_run_id:
@@ -476,8 +528,79 @@ class FeishuWorkflowService:
     def _route_request(self, instruction: str) -> RouteDecision:
         return self.request_router.route(
             instruction,
-            llm_service=self.llm_service if self.llm_service.is_configured() else None,
+            llm_service=None,
         )
+
+    def _should_run_dag_planner(self, route_decision: RouteDecision) -> bool:
+        if route_decision.needs_clarification:
+            return True
+        if route_decision.route == "unknown":
+            return True
+        if len(route_decision.requested_outputs) > 1:
+            return True
+        return route_decision.source != "rule"
+
+    def _route_decision_from_dag_result(
+        self,
+        result: dict,
+        *,
+        fallback: RouteDecision,
+    ) -> RouteDecision:
+        requested_outputs = self.execution_planner.requested_output_list(result)
+        if not requested_outputs:
+            requested_outputs = self._requested_outputs_from_plan_result(result)
+        if requested_outputs:
+            primary_output = requested_outputs[0]
+            operation = self._normalize_operation(result.get("operation") or result.get("action"))
+            result["operation"] = "update" if operation == "update" else "create"
+            result["object"] = primary_output
+            result["route"] = primary_output
+            if not result.get("requested_outputs"):
+                result["requested_outputs"] = list(requested_outputs)
+
+        protocol = self._normalize_request_protocol(result)
+        if not requested_outputs and protocol.route in {"doc", "slides", "canvas"}:
+            requested_outputs = [protocol.route]
+
+        confidence = self._coerce_confidence(result.get("confidence"), default=fallback.confidence or 0.65)
+        clarification = self._extract_clarification_request(result)
+        needs_clarification = bool(clarification and clarification["blocking"]) or protocol.route == "unknown"
+        return RouteDecision(
+            route=protocol.route or fallback.route,
+            source="llm_dag",
+            confidence=confidence,
+            needs_clarification=needs_clarification,
+            reason=str(result.get("reason") or fallback.reason or "").strip(),
+            requested_outputs=tuple(requested_outputs),
+        )
+
+    def _requested_outputs_from_plan_result(self, result: dict) -> list[str]:
+        plan = result.get("plan") if isinstance(result, dict) else None
+        steps = plan.get("steps") if isinstance(plan, dict) else None
+        if not isinstance(steps, list):
+            return []
+        outputs: list[str] = []
+        step_outputs = {
+            "sync_doc": "doc",
+            "generate_slides": "slides",
+            "generate_canvas": "canvas",
+        }
+        for item in steps:
+            if not isinstance(item, dict):
+                continue
+            step_type = self._normalize_plan_step_type(str(item.get("type") or item.get("step_type") or ""))
+            output = step_outputs.get(step_type)
+            if output and output not in outputs:
+                outputs.append(output)
+        return outputs
+
+    @staticmethod
+    def _coerce_confidence(value: object, *, default: float = 0.0) -> float:
+        try:
+            confidence = float(value)
+        except (TypeError, ValueError):
+            confidence = default
+        return max(0.0, min(confidence, 1.0))
 
     def _apply_route_decision_to_llm_result(self, llm_result: dict, route_decision: RouteDecision) -> None:
         protocol = self._protocol_from_route_decision(route_decision)
@@ -1432,6 +1555,7 @@ class FeishuWorkflowService:
         base_artifacts: list[dict] | None = None,
         target_document: dict | None = None,
     ) -> dict:
+        plan = self.execution_planner.schedule_execution_plan(plan)
         combined_artifacts = list(base_artifacts or [])
         reply_parts: list[str] = []
         final_analysis: AnalyzeResponse | None = None
@@ -1594,13 +1718,18 @@ class FeishuWorkflowService:
         task_run_id: str | None = None,
     ) -> dict:
         package = llm_result.get("slides")
-        provider = "llm"
+        provider = str(llm_result.get("_slides_provider") or "llm").strip() or "llm"
         if not isinstance(package, dict) or not package.get("slides"):
             try:
                 package = self.llm_service.generate_presentation_package(workspace_context, message.text)
+                llm_result["slides"] = package
+                llm_result["_slides_provider"] = "llm"
+                provider = "llm"
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Slide package fallback generation failed: %s", exc)
                 package = self._build_fallback_presentation_package(message.session_id)
+                llm_result["slides"] = package
+                llm_result["_slides_provider"] = "fallback"
                 provider = "fallback"
         presentation_tool = self._presentation_tool()
         artifact = presentation_tool.persist_artifact(
@@ -2808,16 +2937,6 @@ class FeishuWorkflowService:
         if provided_package:
             return provided_package
 
-        if self._should_include_slides_step("doc", instruction, llm_result):
-            slides = llm_result.get("slides")
-            if not isinstance(slides, dict) or not slides.get("slides"):
-                try:
-                    slides = self.llm_service.generate_presentation_package(workspace_context, instruction)
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("Document fallback slide generation failed: %s", exc)
-                    slides = self._build_fallback_presentation_package(session_id)
-            return self._document_from_presentation(slides, instruction, stats_as_of=stats_as_of)
-
         source_text = self.memory_service.build_discussion_block(
             session_id,
             episode_id=episode_id,
@@ -2850,16 +2969,6 @@ class FeishuWorkflowService:
         )
         if provided_package:
             return provided_package, None
-
-        if self._should_include_slides_step("doc", instruction, llm_result):
-            package = self._build_document_package_from_workspace(
-                session_id=session_id,
-                instruction=instruction,
-                llm_result=llm_result,
-                workspace_context=workspace_context,
-                episode_id=episode_id,
-            )
-            return package, None
 
         source_text = self.memory_service.build_discussion_block(
             session_id,

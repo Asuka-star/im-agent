@@ -2,6 +2,7 @@ import unittest
 
 from app.services.document_package_builder import DocumentPackageBuilder
 from app.services.execution_planner import ExecutionPlanner, RequestProtocol
+from app.schemas.planner import PlannerStep
 
 
 class ExecutionPlannerTests(unittest.TestCase):
@@ -109,6 +110,113 @@ class ExecutionPlannerTests(unittest.TestCase):
         )
 
         self.assertEqual([step.step_type for step in plan.steps], ["generate_slides", "generate_canvas"])
+
+    def test_slides_plan_can_append_requested_doc_in_user_order(self) -> None:
+        llm_result = {"requested_outputs": ["slides", "doc"]}
+        protocol = RequestProtocol(operation="create", object="slides", route="slides")
+
+        plan = self.planner.resolve_execution_plan(
+            intent="slides",
+            reason="",
+            instruction="先生成 PPT，再整理成文档",
+            llm_result=llm_result,
+            protocol=protocol,
+        )
+
+        self.assertEqual([step.step_type for step in plan.steps], ["generate_slides", "sync_doc"])
+        self.assertEqual(plan.primary_intent, "slides")
+
+    def test_canvas_plan_can_append_requested_doc_and_slides_in_user_order(self) -> None:
+        llm_result = {"requested_outputs": ["canvas", "doc", "slides"]}
+        protocol = RequestProtocol(operation="create", object="canvas", route="canvas")
+
+        plan = self.planner.resolve_execution_plan(
+            intent="canvas",
+            reason="",
+            instruction="先画流程图，再整理成文档，最后生成 PPT",
+            llm_result=llm_result,
+            protocol=protocol,
+        )
+
+        self.assertEqual([step.step_type for step in plan.steps], ["generate_canvas", "sync_doc", "generate_slides"])
+        self.assertEqual(plan.primary_intent, "canvas")
+
+    def test_workspace_protocol_uses_first_requested_output_as_primary(self) -> None:
+        llm_result = {"requested_outputs": ["canvas", "doc"]}
+        protocol = RequestProtocol(operation="create", object="workspace", route="doc")
+
+        plan = self.planner.resolve_execution_plan(
+            intent="doc",
+            reason="",
+            instruction="先画流程图，再整理成文档",
+            llm_result=llm_result,
+            protocol=protocol,
+        )
+
+        self.assertEqual(plan.primary_intent, "canvas")
+        self.assertEqual([step.step_type for step in plan.steps], ["generate_canvas", "sync_doc"])
+
+    def test_dag_plan_is_topologically_sorted_before_execution(self) -> None:
+        llm_result = {
+            "operation": "create",
+            "object": "slides",
+            "requested_outputs": ["slides", "canvas"],
+            "plan": {
+                "steps": [
+                    {"id": "step_2", "type": "generate_canvas", "depends_on": ["step_1"]},
+                    {"id": "step_1", "type": "generate_slides"},
+                ]
+            },
+        }
+        protocol = RequestProtocol(operation="create", object="slides", route="slides")
+
+        plan = self.planner.resolve_execution_plan(
+            intent="slides",
+            reason="",
+            instruction="先生成 PPT，再画流程图",
+            llm_result=llm_result,
+            protocol=protocol,
+        )
+
+        self.assertEqual([step.step_id for step in plan.steps], ["step_1", "step_2"])
+        self.assertEqual([step.step_type for step in plan.steps], ["generate_slides", "generate_canvas"])
+        self.assertEqual(plan.steps[1].depends_on, ["step_1"])
+
+    def test_dag_scheduler_drops_missing_and_self_dependencies(self) -> None:
+        llm_result = {
+            "operation": "create",
+            "object": "slides",
+            "requested_outputs": ["slides", "canvas"],
+            "plan": {
+                "steps": [
+                    {"id": "step_1", "type": "generate_slides", "depends_on": ["missing", "step_1"]},
+                    {"id": "step_2", "type": "generate_canvas", "depends_on": ["step_1", "missing"]},
+                ]
+            },
+        }
+        protocol = RequestProtocol(operation="create", object="slides", route="slides")
+
+        plan = self.planner.resolve_execution_plan(
+            intent="slides",
+            reason="",
+            instruction="生成 PPT 并画流程图",
+            llm_result=llm_result,
+            protocol=protocol,
+        )
+
+        self.assertEqual(plan.steps[0].depends_on, [])
+        self.assertEqual(plan.steps[1].depends_on, ["step_1"])
+
+    def test_dag_scheduler_breaks_cycles_into_stable_order(self) -> None:
+        steps = [
+            PlannerStep(step_id="step_1", step_type="generate_slides", title="slides", depends_on=["step_2"]),
+            PlannerStep(step_id="step_2", step_type="generate_canvas", title="canvas", depends_on=["step_1"]),
+        ]
+
+        scheduled = self.planner.schedule_plan_steps(steps)
+
+        self.assertEqual([step.step_id for step in scheduled], ["step_1", "step_2"])
+        self.assertEqual([step.depends_on for step in scheduled], [[], ["step_1"]])
 
     def test_read_status_protocol_is_not_upgraded_by_stale_requested_outputs(self) -> None:
         llm_result = {"requested_outputs": ["doc"]}

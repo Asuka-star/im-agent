@@ -1,3 +1,4 @@
+import hashlib
 import json
 import logging
 from typing import Any
@@ -18,6 +19,7 @@ class LLMService:
         self.model = settings.llm_model or settings.anthropic_model
         self.client = OpenAICompatibleJSONClient(api_key=self.api_key, base_url=self.base_url)
         self.prompts = LLMPromptBuilder()
+        self._plan_cache: dict[str, dict[str, Any]] = {}
 
     def is_configured(self) -> bool:
         return bool(self.api_key and self.base_url and self.model)
@@ -111,6 +113,40 @@ class LLMService:
                     }
                 ],
             },
+        )
+        return result
+
+    def plan_workspace_request(self, workspace_context: str, instruction: str) -> dict[str, Any]:
+        self._ensure_configured()
+        cache_key = self._plan_cache_key(workspace_context, instruction)
+        cached = self._plan_cache.get(cache_key)
+        if cached is not None:
+            logger.info("LLM lightweight DAG plan cache hit")
+            return json.loads(json.dumps(cached, ensure_ascii=False))
+
+        payload = self._json_payload(
+            system_prompt=self._dag_plan_prompt(),
+            user_content=self._context_request_content(
+                self._compact_planning_context(workspace_context),
+                instruction,
+                context_label="轻量规划上下文",
+            ),
+            temperature=0.0,
+        )
+        result = self._chat_json(
+            payload,
+            request_name="plan_workspace_request",
+            timeout_seconds=settings.llm_memory_gate_timeout_seconds,
+        )
+        self._remember_plan_cache(cache_key, result)
+        logger.info(
+            "LLM lightweight DAG plan resolved: operation=%s object=%s confidence=%s steps=%s",
+            result.get("operation"),
+            result.get("object"),
+            result.get("confidence"),
+            len(result.get("plan", {}).get("steps", []))
+            if isinstance(result.get("plan"), dict) and isinstance(result.get("plan", {}).get("steps"), list)
+            else 0,
         )
         return result
 
@@ -308,6 +344,9 @@ class LLMService:
     def _workspace_request_prompt(self) -> str:
         return self.prompts.workspace_request()
 
+    def _dag_plan_prompt(self) -> str:
+        return self.prompts.dag_plan()
+
     def _presentation_prompt(self) -> str:
         return self.prompts.presentation()
 
@@ -334,6 +373,33 @@ class LLMService:
 
     def _memory_gate_prompt(self) -> str:
         return self.prompts.memory_gate()
+
+    @staticmethod
+    def _compact_planning_context(workspace_context: str, *, max_chars: int = 3000) -> str:
+        text = str(workspace_context or "").strip()
+        if len(text) <= max_chars:
+            return text
+        head = text[: max_chars // 2].rstrip()
+        tail = text[-max_chars // 2 :].lstrip()
+        return f"{head}\n...\n{tail}"
+
+    @staticmethod
+    def _plan_cache_key(workspace_context: str, instruction: str) -> str:
+        payload = json.dumps(
+            {
+                "context": LLMService._compact_planning_context(workspace_context),
+                "instruction": instruction,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _remember_plan_cache(self, cache_key: str, result: dict[str, Any]) -> None:
+        if len(self._plan_cache) >= 128:
+            oldest_key = next(iter(self._plan_cache))
+            self._plan_cache.pop(oldest_key, None)
+        self._plan_cache[cache_key] = json.loads(json.dumps(result, ensure_ascii=False))
 
     @staticmethod
     def _instruction_needs_doc_edit_intent(instruction: str, workspace_context: str = "") -> bool:

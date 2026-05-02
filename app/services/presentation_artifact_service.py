@@ -1,15 +1,19 @@
 import json
 import re
-import zipfile
 from html import escape
 from pathlib import Path
+from typing import Any
 
+from app.services.artifact_skills import ArtifactVerifier, SlidesSkill
+from app.services.artifact_skills.style_tokens import ARTIFACT_STYLE, css_color, pptx_color
 from app.utils.values import coerce_positive_int
 
 
 class PresentationArtifactService:
     def __init__(self, *, root_dir: Path | None = None) -> None:
         self.root_dir = root_dir or Path("data") / "artifacts" / "slides"
+        self.slides_skill = SlidesSkill()
+        self.verifier = ArtifactVerifier()
 
     def persist_package(
         self,
@@ -35,54 +39,24 @@ class PresentationArtifactService:
             encoding="utf-8",
         )
         (self.root_dir / html_filename).write_text(self._render_html(preview), encoding="utf-8")
-        self._write_pptx(self.root_dir / pptx_filename, preview)
+        pptx_path = self.root_dir / pptx_filename
+        self._write_pptx(pptx_path, preview)
+        pptx_check = self.verifier.verify_pptx_file(pptx_path)
+        if not pptx_check.ok:
+            raise ValueError(f"Generated pptx failed verification: {pptx_check.warnings}")
 
         return {
             "artifact_type": "slides_package",
             "provider": provider,
             "status": "ready",
-            "title": str(preview.get("theme") or "演示稿"),
+            "title": str(preview.get("theme") or "Presentation"),
             "url": f"/api/artifacts/slides/{html_filename}",
             "preview": preview,
             "version": coerce_positive_int(preview.get("version")),
         }
 
     def _normalize_package(self, package: dict) -> dict:
-        preview = dict(package or {})
-        preview.setdefault("schema", "im-agent.slides.v1")
-        preview["version"] = coerce_positive_int(preview.get("version"))
-        slides = preview.get("slides") if isinstance(preview.get("slides"), list) else []
-        preview["slides"] = [self._normalize_slide(slide, index) for index, slide in enumerate(slides, start=1)]
-        return preview
-
-    def _normalize_slide(self, slide: object, index: int) -> dict:
-        payload = slide if isinstance(slide, dict) else {}
-        title = str(payload.get("title") or f"第{index}页").strip() or f"第{index}页"
-        bullets = payload.get("bullets") if isinstance(payload.get("bullets"), list) else []
-        notes = (
-            payload.get("speaker_notes")
-            or payload.get("speaker_note")
-            or payload.get("notes")
-            or self._fallback_speaker_notes(title, bullets)
-        )
-        duration = payload.get("duration_sec") or payload.get("duration_seconds") or 45
-        try:
-            duration_sec = max(15, min(int(duration), 180))
-        except (TypeError, ValueError):
-            duration_sec = 45
-        return {
-            **payload,
-            "title": title,
-            "bullets": [str(item).strip() for item in bullets if str(item).strip()][:5],
-            "speaker_notes": str(notes).strip(),
-            "duration_sec": duration_sec,
-        }
-
-    def _fallback_speaker_notes(self, title: str, bullets: list[object]) -> str:
-        key_points = "；".join(str(item).strip() for item in bullets[:3] if str(item).strip())
-        if key_points:
-            return f"本页围绕“{title}”展开，重点说明：{key_points}。"
-        return f"本页围绕“{title}”展开，建议用一句业务场景引入，再给出结论。"
+        return self.slides_skill.normalize(package)
 
     def _slides_filename(self, package: dict, *, task_run_id: str | None, session_id: str) -> str:
         title = str(package.get("theme") or "slides").strip() or "slides"
@@ -102,11 +76,11 @@ class PresentationArtifactService:
         return slug or "artifact"
 
     def _render_html(self, package: dict) -> str:
-        theme = str(package.get("theme") or "演示稿").strip()
+        theme = str(package.get("theme") or "Presentation").strip()
         audience = str(package.get("audience") or "").strip()
         slides = package.get("slides") if isinstance(package.get("slides"), list) else []
         slide_html = "\n".join(self._render_slide(slide, index) for index, slide in enumerate(slides, start=1))
-        audience_html = f"<p>适用场景：{escape(audience)}</p>" if audience else ""
+        audience_html = f"<p>{escape(audience)}</p>" if audience else ""
         return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -114,18 +88,21 @@ class PresentationArtifactService:
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{escape(theme)}</title>
   <style>
-    :root {{ color-scheme: light; font-family: Inter, "Microsoft YaHei", "PingFang SC", sans-serif; }}
-    body {{ margin: 0; background: #f3f7f8; color: #172026; }}
-    header {{ padding: 28px 34px 18px; background: #172026; color: white; }}
-    header p {{ margin: 8px 0 0; color: #c8d9df; }}
-    main {{ display: grid; gap: 22px; padding: 24px; max-width: 1100px; margin: 0 auto; }}
-    section {{ aspect-ratio: 16 / 9; background: linear-gradient(135deg, #172026, #274755); color: white; border-radius: 16px; padding: 42px; box-sizing: border-box; box-shadow: 0 18px 38px rgba(23, 32, 38, .18); display: flex; flex-direction: column; }}
-    .index {{ font-size: 14px; letter-spacing: .04em; color: #9ed8e4; font-weight: 700; }}
-    h2 {{ font-size: clamp(28px, 5vw, 46px); margin: 20px 0 22px; line-height: 1.16; }}
-    ul {{ margin: 0; padding-left: 24px; font-size: clamp(17px, 2vw, 24px); line-height: 1.48; }}
-    li {{ margin-bottom: 12px; }}
-    aside {{ margin-top: auto; background: rgba(255,255,255,.1); border: 1px solid rgba(255,255,255,.16); border-radius: 12px; padding: 14px 16px; color: #eaf5f8; }}
-    aside strong {{ color: #f6b26b; }}
+    :root {{ color-scheme: light; font-family: {ARTIFACT_STYLE["font"]}; }}
+    * {{ box-sizing: border-box; }}
+    body {{ margin: 0; background: {css_color("background")}; color: {css_color("ink")}; }}
+    header {{ padding: 24px 32px 18px; background: {css_color("primary_dark")}; color: white; border-bottom: 5px solid {css_color("accent")}; }}
+    header h1 {{ margin: 0; font-size: 28px; line-height: 1.2; letter-spacing: 0; }}
+    header p {{ margin: 8px 0 0; color: #D4E7EA; }}
+    main {{ display: grid; gap: 22px; padding: 24px; max-width: 1120px; margin: 0 auto; }}
+    section {{ aspect-ratio: 16 / 9; background: {css_color("surface")}; border: 1px solid {css_color("border")}; border-radius: 8px; padding: 42px; display: grid; grid-template-rows: auto auto 1fr auto; gap: 18px; box-shadow: 0 14px 34px rgba(20, 92, 100, .12); }}
+    .index {{ font-size: 13px; color: {css_color("primary")}; font-weight: 800; text-transform: uppercase; }}
+    h2 {{ margin: 0; color: {css_color("ink")}; font-size: clamp(28px, 4vw, 44px); line-height: 1.14; letter-spacing: 0; }}
+    ul {{ margin: 0; padding: 0; list-style: none; display: grid; gap: 12px; font-size: clamp(17px, 2vw, 23px); line-height: 1.4; }}
+    li {{ position: relative; padding-left: 24px; }}
+    li::before {{ content: ""; position: absolute; left: 0; top: .62em; width: 8px; height: 8px; border-radius: 50%; background: {css_color("accent")}; }}
+    aside {{ margin-top: 4px; background: {css_color("accent_soft")}; border-left: 4px solid {css_color("accent")}; border-radius: 6px; padding: 12px 14px; color: {css_color("ink")}; font-size: 14px; line-height: 1.45; }}
+    aside strong {{ color: {css_color("primary")}; }}
   </style>
 </head>
 <body>
@@ -142,195 +119,169 @@ class PresentationArtifactService:
 
     def _render_slide(self, slide: object, index: int) -> str:
         payload = slide if isinstance(slide, dict) else {}
-        title = str(payload.get("title") or f"第{index}页").strip()
+        title = str(payload.get("title") or f"Slide {index}").strip()
         bullets = payload.get("bullets") if isinstance(payload.get("bullets"), list) else []
         notes = str(payload.get("speaker_notes") or "").strip()
         duration_sec = payload.get("duration_sec")
-        bullet_html = "\n".join(f"<li>{escape(str(item))}</li>" for item in bullets[:5]) or "<li>暂无要点</li>"
+        bullet_html = "\n".join(f"<li>{escape(str(item))}</li>" for item in bullets[:5]) or "<li>No key points yet</li>"
         note_html = ""
         if notes:
-            note_html = f"<aside><strong>讲者备注</strong> · {escape(str(duration_sec or 45))} 秒<br>{escape(notes)}</aside>"
+            note_html = (
+                f"<aside><strong>Speaker notes</strong> | {escape(str(duration_sec or 45))}s<br>"
+                f"{escape(notes)}</aside>"
+            )
         return f"""<section>
-  <div class="index">P{index:02d}</div>
+  <div class="index">Slide {index:02d}</div>
   <h2>{escape(title)}</h2>
   <ul>{bullet_html}</ul>
   {note_html}
 </section>"""
 
     def _write_pptx(self, path: Path, package: dict) -> None:
+        try:
+            from pptx import Presentation
+            from pptx.dml.color import RGBColor
+            from pptx.enum.shapes import MSO_SHAPE
+            from pptx.enum.text import PP_ALIGN
+            from pptx.util import Inches, Pt
+        except ImportError as exc:  # pragma: no cover - exercised only when dependency is missing.
+            raise RuntimeError("python-pptx is required to export pptx files") from exc
+
+        prs = Presentation()
+        prs.slide_width = Inches(13.333)
+        prs.slide_height = Inches(7.5)
+        blank_layout = prs.slide_layouts[6]
         slides = package.get("slides") if isinstance(package.get("slides"), list) else []
         if not slides:
-            slides = [{"title": package.get("theme") or "演示稿", "bullets": ["暂无要点"]}]
-        with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-            archive.writestr("[Content_Types].xml", self._pptx_content_types(len(slides)))
-            archive.writestr("_rels/.rels", self._pptx_root_rels())
-            archive.writestr("ppt/presentation.xml", self._pptx_presentation(len(slides)))
-            archive.writestr("ppt/_rels/presentation.xml.rels", self._pptx_presentation_rels(len(slides)))
-            archive.writestr("ppt/presProps.xml", self._pptx_empty("p:presentationPr"))
-            archive.writestr("ppt/viewProps.xml", self._pptx_empty("p:viewPr"))
-            archive.writestr("ppt/tableStyles.xml", self._pptx_table_styles())
-            for index, slide in enumerate(slides, start=1):
-                archive.writestr(f"ppt/slides/slide{index}.xml", self._pptx_slide(slide, index))
-                archive.writestr(f"ppt/slides/_rels/slide{index}.xml.rels", self._pptx_slide_rels())
+            slides = [{"title": package.get("theme") or "Presentation", "bullets": ["No key points yet"]}]
 
-    def _pptx_content_types(self, slide_count: int) -> str:
-        slide_overrides = "\n".join(
-            f'<Override PartName="/ppt/slides/slide{index}.xml" '
-            'ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>'
-            for index in range(1, slide_count + 1)
-        )
-        return f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
-  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
-  <Default Extension="xml" ContentType="application/xml"/>
-  <Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>
-  <Override PartName="/ppt/presProps.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presProps+xml"/>
-  <Override PartName="/ppt/viewProps.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.viewProps+xml"/>
-  <Override PartName="/ppt/tableStyles.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.tableStyles+xml"/>
-  {slide_overrides}
-</Types>"""
+        for index, slide_payload in enumerate(slides, start=1):
+            slide = prs.slides.add_slide(blank_layout)
+            payload = slide_payload if isinstance(slide_payload, dict) else {}
+            title = str(payload.get("title") or f"Slide {index}").strip()
+            bullets = payload.get("bullets") if isinstance(payload.get("bullets"), list) else []
+            notes = str(payload.get("speaker_notes") or "").strip()
 
-    def _pptx_root_rels(self) -> str:
-        return """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="ppt/presentation.xml"/>
-</Relationships>"""
+            background = slide.background.fill
+            background.solid()
+            background.fore_color.rgb = RGBColor.from_string(pptx_color("background"))
 
-    def _pptx_presentation(self, slide_count: int) -> str:
-        slide_ids = "\n".join(
-            f'<p:sldId id="{255 + index}" r:id="rId{index}"/>' for index in range(1, slide_count + 1)
-        )
-        return f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<p:presentation xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
-  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
-  xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
-  <p:sldSz cx="12192000" cy="6858000" type="screen16x9"/>
-  <p:notesSz cx="6858000" cy="9144000"/>
-  <p:sldIdLst>
-    {slide_ids}
-  </p:sldIdLst>
-</p:presentation>"""
+            band = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(0), Inches(0), Inches(13.333), Inches(0.18))
+            band.fill.solid()
+            band.fill.fore_color.rgb = RGBColor.from_string(pptx_color("accent"))
+            band.line.fill.background()
 
-    def _pptx_presentation_rels(self, slide_count: int) -> str:
-        slide_rels = "\n".join(
-            f'<Relationship Id="rId{index}" '
-            'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" '
-            f'Target="slides/slide{index}.xml"/>'
-            for index in range(1, slide_count + 1)
-        )
-        extra_index = slide_count + 1
-        return f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  {slide_rels}
-  <Relationship Id="rId{extra_index}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/presProps" Target="presProps.xml"/>
-  <Relationship Id="rId{extra_index + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/viewProps" Target="viewProps.xml"/>
-  <Relationship Id="rId{extra_index + 2}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/tableStyles" Target="tableStyles.xml"/>
-</Relationships>"""
-
-    def _pptx_slide_rels(self) -> str:
-        return """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>"""
-
-    def _pptx_slide(self, slide: object, index: int) -> str:
-        payload = slide if isinstance(slide, dict) else {}
-        title = self._xml_text(str(payload.get("title") or f"第{index}页").strip())
-        bullets = payload.get("bullets") if isinstance(payload.get("bullets"), list) else []
-        bullet_xml = "\n".join(
-            self._pptx_text_box(
-                shape_id=30 + bullet_index,
-                name=f"Bullet {bullet_index}",
-                x=1050000,
-                y=2050000 + (bullet_index - 1) * 620000,
-                cx=9800000,
-                cy=460000,
-                text="• " + self._xml_text(str(item).strip()),
-                font_size=2100,
-                color="334155",
+            self._add_textbox(
+                slide,
+                text=f"{index:02d}",
+                left=0.62,
+                top=0.55,
+                width=0.8,
+                height=0.28,
+                size=11,
+                color=pptx_color("primary"),
+                bold=True,
+                align=PP_ALIGN.LEFT,
             )
-            for bullet_index, item in enumerate(bullets[:5], start=1)
-            if str(item).strip()
-        )
-        if not bullet_xml:
-            bullet_xml = self._pptx_text_box(
-                shape_id=31,
-                name="Bullet 1",
-                x=1050000,
-                y=2050000,
-                cx=9800000,
-                cy=460000,
-                text="• 暂无要点",
-                font_size=2100,
-                color="334155",
+            self._add_textbox(
+                slide,
+                text=title,
+                left=0.62,
+                top=0.9,
+                width=11.5,
+                height=1.02,
+                size=30,
+                color=pptx_color("ink"),
+                bold=True,
+                align=PP_ALIGN.LEFT,
             )
-        notes = self._xml_text(str(payload.get("speaker_notes") or "").strip())
-        notes_xml = ""
-        if notes:
-            notes_xml = self._pptx_text_box(
-                shape_id=80,
-                name="Speaker Notes",
-                x=900000,
-                y=5850000,
-                cx=10400000,
-                cy=520000,
-                text=f"讲者备注：{notes}",
-                font_size=1200,
-                color="64748B",
-            )
-        return f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
-  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
-  xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
-  <p:cSld>
-    <p:bg><p:bgPr><a:solidFill><a:srgbClr val="F8FAFC"/></a:solidFill></p:bgPr></p:bg>
-    <p:spTree>
-      <p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
-      <p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/><a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr>
-      {self._pptx_text_box(2, "Title", 700000, 520000, 10800000, 820000, title, 3400, "0F172A", bold=True)}
-      {self._pptx_line(3, 700000, 1450000, 10800000, 0)}
-      {bullet_xml}
-      {notes_xml}
-      {self._pptx_text_box(90, "Page", 10900000, 6200000, 600000, 260000, str(index), 1100, "94A3B8")}
-    </p:spTree>
-  </p:cSld>
-  <p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr>
-</p:sld>"""
 
-    def _pptx_text_box(
+            card = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(0.62), Inches(2.05), Inches(12.05), Inches(4.2))
+            card.fill.solid()
+            card.fill.fore_color.rgb = RGBColor.from_string(pptx_color("surface"))
+            card.line.color.rgb = RGBColor.from_string(pptx_color("border"))
+            card.line.width = Pt(1)
+
+            self._add_bullets(
+                slide,
+                bullets=[str(item).strip() for item in bullets if str(item).strip()] or ["No key points yet"],
+                left=1.0,
+                top=2.42,
+                width=11.15,
+                height=3.32,
+            )
+            self._add_textbox(
+                slide,
+                text=str(package.get("theme") or "Presentation"),
+                left=0.66,
+                top=6.76,
+                width=9.8,
+                height=0.28,
+                size=9,
+                color=pptx_color("muted"),
+                align=PP_ALIGN.LEFT,
+            )
+            self._add_textbox(
+                slide,
+                text=f"{index}/{len(slides)}",
+                left=11.82,
+                top=6.76,
+                width=0.8,
+                height=0.28,
+                size=9,
+                color=pptx_color("muted"),
+                align=PP_ALIGN.RIGHT,
+            )
+
+            if notes:
+                slide.notes_slide.notes_text_frame.text = notes
+
+        prs.save(path)
+
+    def _add_textbox(
         self,
-        shape_id: int,
-        name: str,
-        x: int,
-        y: int,
-        cx: int,
-        cy: int,
-        text: str,
-        font_size: int,
-        color: str,
+        slide: Any,
         *,
+        text: str,
+        left: float,
+        top: float,
+        width: float,
+        height: float,
+        size: int,
+        color: str,
         bold: bool = False,
-    ) -> str:
-        bold_attr = ' b="1"' if bold else ""
-        return f"""<p:sp>
-  <p:nvSpPr><p:cNvPr id="{shape_id}" name="{self._xml_text(name)}"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr>
-  <p:spPr><a:xfrm><a:off x="{x}" y="{y}"/><a:ext cx="{cx}" cy="{cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></p:spPr>
-  <p:txBody><a:bodyPr wrap="square"/><a:lstStyle/><a:p><a:r><a:rPr lang="zh-CN" sz="{font_size}"{bold_attr}><a:solidFill><a:srgbClr val="{color}"/></a:solidFill></a:rPr><a:t>{text}</a:t></a:r><a:endParaRPr lang="zh-CN" sz="{font_size}"/></a:p></p:txBody>
-</p:sp>"""
+        align: Any = None,
+    ) -> None:
+        from pptx.dml.color import RGBColor
+        from pptx.util import Inches, Pt
 
-    def _pptx_line(self, shape_id: int, x: int, y: int, cx: int, cy: int) -> str:
-        return f"""<p:cxnSp>
-  <p:nvCxnSpPr><p:cNvPr id="{shape_id}" name="Divider"/><p:cNvCxnSpPr/><p:nvPr/></p:nvCxnSpPr>
-  <p:spPr><a:xfrm><a:off x="{x}" y="{y}"/><a:ext cx="{cx}" cy="{cy}"/></a:xfrm><a:prstGeom prst="line"><a:avLst/></a:prstGeom><a:ln w="22000"><a:solidFill><a:srgbClr val="116A7B"/></a:solidFill></a:ln></p:spPr>
-</p:cxnSp>"""
+        box = slide.shapes.add_textbox(Inches(left), Inches(top), Inches(width), Inches(height))
+        frame = box.text_frame
+        frame.clear()
+        frame.word_wrap = True
+        paragraph = frame.paragraphs[0]
+        if align is not None:
+            paragraph.alignment = align
+        run = paragraph.add_run()
+        run.text = text
+        run.font.size = Pt(size)
+        run.font.bold = bold
+        run.font.name = "Microsoft YaHei"
+        run.font.color.rgb = RGBColor.from_string(color)
 
-    def _pptx_empty(self, tag: str) -> str:
-        return f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<{tag} xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
-  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
-  xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"/>"""
+    def _add_bullets(self, slide: Any, *, bullets: list[str], left: float, top: float, width: float, height: float) -> None:
+        from pptx.dml.color import RGBColor
+        from pptx.util import Inches, Pt
 
-    def _pptx_table_styles(self) -> str:
-        return """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<a:tblStyleLst xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" def="{5C22544A-7EE6-4342-B048-85BDC9FD1C3A}"/>"""
-
-    def _xml_text(self, value: str) -> str:
-        return escape(value, quote=True)
+        box = slide.shapes.add_textbox(Inches(left), Inches(top), Inches(width), Inches(height))
+        frame = box.text_frame
+        frame.clear()
+        frame.word_wrap = True
+        for index, bullet in enumerate(bullets[:5]):
+            paragraph = frame.paragraphs[0] if index == 0 else frame.add_paragraph()
+            paragraph.space_after = Pt(9)
+            run = paragraph.add_run()
+            run.text = f"- {bullet}"
+            run.font.size = Pt(18)
+            run.font.name = "Microsoft YaHei"
+            run.font.color.rgb = RGBColor.from_string(pptx_color("ink"))

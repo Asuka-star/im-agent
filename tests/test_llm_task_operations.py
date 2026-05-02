@@ -6,7 +6,9 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.core.config import settings
+from app.schemas.analyze import AnalyzeResponse
 from app.schemas.task import TaskItem
+from app.services.doc_tool import DocumentSyncResult
 from app.services.feishu_workflow import FeishuWorkflowService
 from app.services.presentation_artifact_service import PresentationArtifactService
 from app.services.request_router import RouteDecision
@@ -201,7 +203,7 @@ class LLMTaskOperationTests(unittest.TestCase):
             options=["报名材料版", "组内评审版"],
         )
 
-    def test_ambiguous_route_pauses_before_deep_llm_resolution(self) -> None:
+    def test_ambiguous_route_uses_lightweight_dag_clarification_before_deep_resolution(self) -> None:
         message = type(
             "FakeMessage",
             (),
@@ -241,6 +243,25 @@ class LLMTaskOperationTests(unittest.TestCase):
             return_value=True,
         ), patch.object(
             self.service.llm_service,
+            "plan_workspace_request",
+            return_value={
+                "operation": "unknown",
+                "object": "workspace",
+                "confidence": 0.31,
+                "reason": "target output is unclear",
+                "clarification": {
+                    "needed": True,
+                    "question": "Which output should I prepare?",
+                    "reason": "Need the artifact type before execution.",
+                    "options": ["doc", "slides", "summary"],
+                    "blocking": True,
+                },
+            },
+        ) as plan_workspace, patch.object(
+            self.service.llm_service,
+            "route_workspace_request",
+        ) as route_workspace, patch.object(
+            self.service.llm_service,
             "resolve_workspace_request",
         ) as resolve_workspace_request, patch.object(
             self.service,
@@ -260,9 +281,11 @@ class LLMTaskOperationTests(unittest.TestCase):
 
         self.assertTrue(result["pending_confirmation"])
         self.assertEqual(result["confirmation_id"], "confirm_route")
+        plan_workspace.assert_called_once_with("[workspace]", message.text)
+        route_workspace.assert_not_called()
         resolve_workspace_request.assert_not_called()
         create_confirmation.assert_called_once()
-        self.assertIn("整理成飞书文档", create_confirmation.call_args.kwargs["options"])
+        self.assertIn("doc", create_confirmation.call_args.kwargs["options"])
         update_task_run.assert_any_call(
             "run_route",
             stage="awaiting_user_confirmation",
@@ -367,6 +390,300 @@ class LLMTaskOperationTests(unittest.TestCase):
             stage="awaiting_user_confirmation",
             status="waiting_confirmation",
         )
+
+    def test_ambiguous_route_can_be_rescued_by_lightweight_dag_plan(self) -> None:
+        message = SimpleNamespace(
+            session_id="s1",
+            message_id="m_ambiguous_dag",
+            text="帮我整理一下，给评委看",
+            chat_id="c1",
+            chat_type="group",
+        )
+        dag_result = {
+            "operation": "create",
+            "object": "slides",
+            "confidence": 0.74,
+            "reason": "Audience-facing material is best handled as slides.",
+            "plan": {
+                "steps": [
+                    {"id": "step_1", "type": "generate_slides", "title": "Prepare presentation"},
+                ],
+            },
+        }
+        with patch.object(
+            self.service.memory_service,
+            "get_active_episode",
+            return_value=None,
+        ), patch.object(
+            self.service,
+            "_build_workspace_context_for_message",
+            return_value="[workspace]",
+        ), patch.object(
+            self.service.llm_service,
+            "is_configured",
+            return_value=True,
+        ), patch.object(
+            self.service.llm_service,
+            "plan_workspace_request",
+            return_value=dag_result,
+        ) as plan_workspace, patch.object(
+            self.service.llm_service,
+            "route_workspace_request",
+        ) as route_workspace, patch.object(
+            self.service.llm_service,
+            "resolve_workspace_request",
+        ) as resolve_workspace, patch.object(
+            self.service,
+            "_prepare_slides_execution",
+            return_value={
+                "reply_preview": "[slides] ready",
+                "analysis": None,
+                "artifacts": [{"artifact_type": "slides_package"}],
+                "close_title": "slides",
+            },
+        ) as prepare_slides, patch.object(
+            self.service,
+            "_deliver_reply",
+            return_value={
+                "session_id": "s1",
+                "episode_id": None,
+                "mode": "slides",
+                "analysis": None,
+                "reply_preview": "done",
+                "reply_sent": False,
+                "reply_error": None,
+                "artifacts": [{"artifact_type": "slides_package"}],
+            },
+        ):
+            result = self.service._handle_mentioned_request(message)
+
+        self.assertEqual(result["mode"], "slides")
+        plan_workspace.assert_called_once_with("[workspace]", message.text)
+        route_workspace.assert_not_called()
+        resolve_workspace.assert_not_called()
+        prepare_slides.assert_called_once()
+
+    def test_compound_rule_route_uses_lightweight_dag_plan(self) -> None:
+        message = SimpleNamespace(
+            session_id="s1",
+            message_id="m_compound_rule_dag",
+            text="make slides and canvas",
+            chat_id="c1",
+            chat_type="group",
+        )
+        rule_decision = RouteDecision(
+            route="slides",
+            source="rule",
+            confidence=0.96,
+            requested_outputs=("slides", "canvas"),
+        )
+        dag_result = {
+            "operation": "create",
+            "object": "slides",
+            "confidence": 0.88,
+            "requested_outputs": ["slides", "canvas"],
+            "plan": {
+                "steps": [
+                    {"id": "step_1", "type": "generate_slides"},
+                    {"id": "step_2", "type": "generate_canvas", "depends_on": ["step_1"]},
+                ],
+            },
+        }
+        with patch.object(
+            self.service.memory_service,
+            "get_active_episode",
+            return_value=None,
+        ), patch.object(
+            self.service,
+            "_build_workspace_context_for_message",
+            return_value="[workspace]",
+        ), patch.object(
+            self.service,
+            "_route_request",
+            return_value=rule_decision,
+        ), patch.object(
+            self.service.llm_service,
+            "is_configured",
+            return_value=True,
+        ), patch.object(
+            self.service.llm_service,
+            "plan_workspace_request",
+            return_value=dag_result,
+        ) as plan_workspace, patch.object(
+            self.service.llm_service,
+            "route_workspace_request",
+        ) as route_workspace, patch.object(
+            self.service,
+            "_prepare_slides_execution",
+            return_value={
+                "reply_preview": "[slides]",
+                "analysis": None,
+                "artifacts": [{"artifact_type": "slides_package"}],
+                "close_title": "slides",
+            },
+        ) as prepare_slides, patch.object(
+            self.service,
+            "_prepare_canvas_execution",
+            return_value={
+                "reply_preview": "[canvas]",
+                "analysis": None,
+                "artifacts": [{"artifact_type": "canvas"}],
+                "close_title": "canvas",
+            },
+        ) as prepare_canvas, patch.object(
+            self.service,
+            "_deliver_reply",
+            return_value={
+                "session_id": "s1",
+                "episode_id": None,
+                "mode": "slides",
+                "analysis": None,
+                "reply_preview": "done",
+                "reply_sent": False,
+                "reply_error": None,
+                "artifacts": [],
+            },
+        ):
+            result = self.service._handle_mentioned_request(message)
+
+        self.assertEqual(result["mode"], "slides")
+        plan_workspace.assert_called_once_with("[workspace]", message.text)
+        route_workspace.assert_not_called()
+        prepare_slides.assert_called_once()
+        prepare_canvas.assert_called_once()
+
+    def test_dag_route_can_infer_outputs_from_plan_steps(self) -> None:
+        dag_result = {
+            "operation": "analyze",
+            "object": "workspace",
+            "confidence": 0.72,
+            "reason": "Concrete artifact steps were planned.",
+            "plan": {
+                "steps": [
+                    {"id": "step_1", "type": "generate_slides"},
+                    {"id": "step_2", "type": "generate_canvas"},
+                ],
+            },
+        }
+        decision = self.service._route_decision_from_dag_result(
+            dag_result,
+            fallback=RouteDecision(route="unknown", source="rule", confidence=0.4),
+        )
+
+        self.assertEqual(decision.route, "slides")
+        self.assertEqual(decision.requested_outputs, ("slides", "canvas"))
+        self.assertEqual(dag_result["operation"], "create")
+        self.assertEqual(dag_result["object"], "slides")
+
+    def test_dag_route_prefers_first_requested_output_over_conflicting_object(self) -> None:
+        dag_result = {
+            "operation": "analyze",
+            "object": "doc",
+            "confidence": 0.78,
+            "requested_outputs": ["slides", "doc"],
+            "reason": "User asked for slides first, then a document.",
+            "plan": {
+                "steps": [
+                    {"id": "step_1", "type": "generate_slides"},
+                    {"id": "step_2", "type": "sync_doc", "depends_on": ["step_1"]},
+                ],
+            },
+        }
+        decision = self.service._route_decision_from_dag_result(
+            dag_result,
+            fallback=RouteDecision(route="unknown", source="rule", confidence=0.4),
+        )
+
+        self.assertEqual(decision.route, "slides")
+        self.assertEqual(decision.requested_outputs, ("slides", "doc"))
+        self.assertEqual(dag_result["operation"], "create")
+        self.assertEqual(dag_result["object"], "slides")
+
+    def test_unmatched_request_uses_lightweight_dag_planner_before_execution(self) -> None:
+        message = SimpleNamespace(
+            session_id="s1",
+            message_id="m_dag",
+            text="把讨论结果做成给评委看的材料，顺便画个图",
+            chat_id="c1",
+            chat_type="group",
+        )
+        dag_result = {
+            "operation": "create",
+            "object": "slides",
+            "route": "slides",
+            "confidence": 0.86,
+            "reason": "用户需要汇报材料并补充图示",
+            "requested_outputs": ["slides", "canvas"],
+            "plan": {
+                "goal": "生成汇报材料和图示",
+                "steps": [
+                    {"id": "step_1", "type": "generate_slides", "title": "生成汇报材料", "depends_on": []},
+                    {"id": "step_2", "type": "generate_canvas", "title": "生成图示", "depends_on": ["step_1"]},
+                ],
+            },
+        }
+        with patch.object(
+            self.service.memory_service,
+            "get_active_episode",
+            return_value=None,
+        ), patch.object(
+            self.service,
+            "_build_workspace_context_for_message",
+            return_value="[workspace]",
+        ), patch.object(
+            self.service.llm_service,
+            "is_configured",
+            return_value=True,
+        ), patch.object(
+            self.service.llm_service,
+            "plan_workspace_request",
+            return_value=dag_result,
+        ) as plan_workspace, patch.object(
+            self.service.llm_service,
+            "route_workspace_request",
+        ) as route_workspace, patch.object(
+            self.service.llm_service,
+            "resolve_workspace_request",
+        ) as resolve_workspace, patch.object(
+            self.service,
+            "_prepare_slides_execution",
+            return_value={
+                "reply_preview": "【演示稿】已生成",
+                "analysis": None,
+                "artifacts": [{"artifact_type": "slides_package"}],
+                "close_title": "slides",
+            },
+        ) as prepare_slides, patch.object(
+            self.service,
+            "_prepare_canvas_execution",
+            return_value={
+                "reply_preview": "【Canvas】已生成",
+                "analysis": None,
+                "artifacts": [{"artifact_type": "canvas"}],
+                "close_title": "canvas",
+            },
+        ) as prepare_canvas, patch.object(
+            self.service,
+            "_deliver_reply",
+            return_value={
+                "session_id": "s1",
+                "episode_id": None,
+                "mode": "slides",
+                "analysis": None,
+                "reply_preview": "done",
+                "reply_sent": False,
+                "reply_error": None,
+                "artifacts": [{"artifact_type": "slides_package"}, {"artifact_type": "canvas"}],
+            },
+        ):
+            result = self.service._handle_mentioned_request(message)
+
+        self.assertEqual(result["mode"], "slides")
+        plan_workspace.assert_called_once_with("[workspace]", message.text)
+        route_workspace.assert_not_called()
+        resolve_workspace.assert_not_called()
+        prepare_slides.assert_called_once()
+        prepare_canvas.assert_called_once()
 
     def test_doc_revision_with_explicit_document_title_uses_matched_target_document(self) -> None:
         message = type(
@@ -528,8 +845,30 @@ class LLMTaskOperationTests(unittest.TestCase):
         self.assertEqual([step.step_type for step in plan.steps], ["sync_doc", "generate_slides"])
         self.assertEqual(plan.steps[1].depends_on, ["step_1"])
 
-    def test_doc_response_package_uses_requested_outputs_for_slides_without_keywords(self) -> None:
-        with patch.object(self.service, "_resolve_doc_stats_as_of", return_value=None):
+    def test_doc_response_package_keeps_doc_content_independent_from_requested_slides(self) -> None:
+        analysis_response = AnalyzeResponse(
+            session_id="doc_requested_outputs_session",
+            summary="Discussion summary",
+            tasks=[],
+            risks=[],
+            next_actions=["Next action"],
+            agent_traces=[],
+        )
+        with patch.object(self.service, "_resolve_doc_stats_as_of", return_value=None), patch.object(
+            self.service.memory_service,
+            "build_discussion_block",
+            return_value="Discussion context",
+        ), patch.object(
+            self.service,
+            "_build_analysis_from_llm",
+            return_value=analysis_response,
+        ), patch.object(
+            self.service.memory_service,
+            "save_round",
+        ) as save_round, patch.object(
+            self.service.llm_service,
+            "generate_presentation_package",
+        ) as generate_slides:
             package, analysis = self.service._build_doc_response_package(
                 session_id="doc_requested_outputs_session",
                 instruction="write this into a collaboration document",
@@ -549,8 +888,11 @@ class LLMTaskOperationTests(unittest.TestCase):
                 source_message_id=None,
             )
 
-        self.assertIsNone(analysis)
-        self.assertTrue(any(section["heading"].startswith("P1.") for section in package["sections"]))
+        self.assertEqual(analysis, analysis_response)
+        self.assertTrue(any(section["paragraphs"] == ["Discussion summary"] for section in package["sections"]))
+        self.assertFalse(any(section["heading"].startswith("P1.") for section in package["sections"]))
+        save_round.assert_called_once()
+        generate_slides.assert_not_called()
 
     def test_doc_instruction_overrides_summary_protocol(self) -> None:
         llm_result = {
@@ -965,6 +1307,164 @@ class LLMTaskOperationTests(unittest.TestCase):
         self.assertIn("agent_plan", artifact_types)
         self.assertIn("document", artifact_types)
         self.assertIn("slides_package", artifact_types)
+
+    def test_execute_llm_request_runs_dag_steps_by_dependency_order(self) -> None:
+        message = type(
+            "FakeMessage",
+            (),
+            {"session_id": "s1", "message_id": "m1", "text": "先生成PPT，再画流程图", "chat_id": "c1"},
+        )()
+        calls: list[str] = []
+
+        def slides_result(*args, **kwargs):
+            calls.append("slides")
+            return {
+                "reply_preview": "[slides]",
+                "analysis": None,
+                "artifacts": [{"artifact_type": "slides_package"}],
+                "close_title": "slides",
+            }
+
+        def canvas_result(*args, **kwargs):
+            calls.append("canvas")
+            return {
+                "reply_preview": "[canvas]",
+                "analysis": None,
+                "artifacts": [{"artifact_type": "canvas"}],
+                "close_title": "canvas",
+            }
+
+        with patch.object(
+            self.service,
+            "_prepare_slides_execution",
+            side_effect=slides_result,
+        ), patch.object(
+            self.service,
+            "_prepare_canvas_execution",
+            side_effect=canvas_result,
+        ), patch.object(
+            self.service,
+            "_deliver_reply",
+            return_value={
+                "session_id": "s1",
+                "episode_id": None,
+                "mode": "slides",
+                "analysis": None,
+                "reply_preview": "combined",
+                "reply_sent": False,
+                "reply_error": None,
+                "artifacts": [],
+            },
+        ):
+            self.service._execute_llm_request(
+                message,
+                {
+                    "operation": "create",
+                    "object": "slides",
+                    "requested_outputs": ["slides", "canvas"],
+                    "plan": {
+                        "steps": [
+                            {"id": "step_2", "type": "generate_canvas", "depends_on": ["step_1"]},
+                            {"id": "step_1", "type": "generate_slides"},
+                        ]
+                    },
+                },
+                "[workspace]",
+                None,
+                task_run_id=None,
+            )
+
+        self.assertEqual(calls, ["slides", "canvas"])
+
+    def test_execute_llm_request_reuses_slides_package_across_doc_and_slides(self) -> None:
+        package = {
+            "title": "Review Deck",
+            "theme": "review",
+            "audience": "team",
+            "slides": [
+                {"title": "Context", "bullets": ["Goal"]},
+                {"title": "Next Steps", "bullets": ["Ship"]},
+            ],
+        }
+        llm_result = {
+            "operation": "create",
+            "object": "doc",
+            "requested_outputs": ["doc", "slides"],
+            "plan": {
+                "steps": [
+                    {"id": "step_1", "type": "sync_doc"},
+                    {"id": "step_2", "type": "generate_slides", "depends_on": ["step_1"]},
+                ],
+            },
+        }
+        message = SimpleNamespace(session_id="s1", message_id="m_reuse", text="make doc and slides", chat_id="c1")
+        analysis_response = AnalyzeResponse(
+            session_id="s1",
+            summary="Discussion summary",
+            tasks=[],
+            risks=[],
+            next_actions=[],
+            agent_traces=[],
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(
+            self.service.llm_service,
+            "generate_presentation_package",
+            return_value=package,
+        ) as generate_package, patch.object(
+            self.service,
+            "_resolve_doc_stats_as_of",
+            return_value=None,
+        ), patch.object(
+            self.service.memory_service,
+            "build_discussion_block",
+            return_value="[workspace]",
+        ), patch.object(
+            self.service,
+            "_build_analysis_from_llm",
+            return_value=analysis_response,
+        ), patch.object(
+            self.service.memory_service,
+            "save_round",
+        ), patch.object(
+            self.service,
+            "_sync_package_to_session_doc",
+            return_value=DocumentSyncResult(
+                mode="created",
+                status="ready",
+                summary_lines=["- Document ready"],
+                document_info={"document_id": "doc_1", "url": "https://example.test/doc_1"},
+            ),
+        ), patch.object(
+            self.service,
+            "_build_document_artifact",
+            return_value={"artifact_type": "document", "title": "Document"},
+        ), patch.object(
+            self.service,
+            "_deliver_reply",
+            return_value={
+                "session_id": "s1",
+                "episode_id": None,
+                "mode": "doc",
+                "analysis": None,
+                "reply_preview": "combined",
+                "reply_sent": False,
+                "reply_error": None,
+                "artifacts": [],
+            },
+        ):
+            self.service.presentation_artifact_service = PresentationArtifactService(root_dir=Path(tmpdir))
+            self.service._execute_llm_request(
+                message,
+                llm_result,
+                "[workspace]",
+                None,
+                task_run_id=None,
+            )
+
+        generate_package.assert_called_once_with("[workspace]", message.text)
+        self.assertIs(llm_result["slides"], package)
+        self.assertEqual(llm_result["_slides_provider"], "llm")
 
     def test_handle_message_preserves_waiting_confirmation_status(self) -> None:
         message = type(
