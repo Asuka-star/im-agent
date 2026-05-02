@@ -4,7 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from app.services.canvas_artifact_service import CanvasArtifactService
-from app.services.canvas_tool import CanvasTool
+from app.services.tools.canvas_tool import CanvasTool
 from app.services.feishu_workflow import FeishuWorkflowService
 
 

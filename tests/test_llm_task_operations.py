@@ -8,7 +8,7 @@ from unittest.mock import patch
 from app.core.config import settings
 from app.schemas.analyze import AnalyzeResponse
 from app.schemas.task import TaskItem
-from app.services.doc_tool import DocumentSyncResult
+from app.services.tools.doc_tool import DocumentSyncResult
 from app.services.feishu_workflow import FeishuWorkflowService
 from app.services.presentation_artifact_service import PresentationArtifactService
 from app.services.request_router import RouteDecision

@@ -4,7 +4,7 @@ import zipfile
 from pathlib import Path
 
 from app.services.presentation_artifact_service import PresentationArtifactService
-from app.services.presentation_tool import PresentationTool
+from app.services.tools.presentation_tool import PresentationTool
 
 
 class PresentationArtifactServiceTests(unittest.TestCase):

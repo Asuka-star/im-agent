@@ -2,9 +2,9 @@ import unittest
 
 from app.services.artifact_edit_plan import ArtifactEditPlanner
 from app.services.canvas_artifact_service import CanvasArtifactService
-from app.services.canvas_tool import CanvasTool
+from app.services.tools.canvas_tool import CanvasTool
 from app.services.presentation_artifact_service import PresentationArtifactService
-from app.services.presentation_tool import PresentationTool
+from app.services.tools.presentation_tool import PresentationTool
 
 
 class ArtifactEditPlanTests(unittest.TestCase):

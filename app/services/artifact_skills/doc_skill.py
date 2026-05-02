@@ -4,7 +4,7 @@ import re
 from typing import Any
 
 from app.services.artifact_skills.base import ArtifactSkill, SkillCheckResult
-from app.services.doc_tool import DocTool
+from app.services.tools.doc_tool import DocTool
 
 
 class DocSkill(ArtifactSkill):

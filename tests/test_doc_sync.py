@@ -11,7 +11,7 @@ from app.schemas.task import TaskItem
 from app.services.memory_service import MemoryService
 from app.services.feishu_workflow import FeishuWorkflowService
 from app.services.interaction import InteractionService
-from app.services.doc_tool import DocTool, DocumentSyncResult
+from app.services.tools.doc_tool import DocTool, DocumentSyncResult
 from app.services.office_artifact_service import OfficeArtifactService
 from app.services.session_document_service import SessionDocumentService
 

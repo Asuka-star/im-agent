@@ -20,24 +20,24 @@ from app.schemas.task_run import ArtifactRecord, TaskRunDetail
 from app.services.due_date import normalize_task_dates
 from app.services.interaction import InteractionService
 from app.services.canvas_artifact_service import CanvasArtifactService
-from app.services.canvas_tool import CanvasTool
+from app.services.tools.canvas_tool import CanvasTool
 from app.services.delivery_artifact_service import DeliveryArtifactService
-from app.services.delivery_tool import DeliveryTool
+from app.services.tools.delivery_tool import DeliveryTool
 from app.services.document_package_builder import DocumentPackageBuilder
-from app.services.doc_tool import DocTool, DocumentSyncResult
+from app.services.tools.doc_tool import DocTool, DocumentSyncResult
 from app.services.execution_planner import ExecutionPlanner, RequestProtocol
 from app.services.llm import LLMService
 from app.services.memory_service import MemoryService
 from app.services.next_action_service import ContextualNextActionService
 from app.services.office_artifact_service import OfficeArtifactService
 from app.services.presentation_artifact_service import PresentationArtifactService
-from app.services.presentation_tool import PresentationTool
+from app.services.tools.presentation_tool import PresentationTool
 from app.services.response_formatter import ResponseFormatter
 from app.services.request_router import RequestRouter, RouteDecision
 from app.services.session_document_service import SessionDocumentService
-from app.services.task_operation_tool import TaskOperationTool
+from app.services.tools.task_operation_tool import TaskOperationTool
 from app.services.task_run_service import TaskRunService
-from app.services.workbench_revision_tool import WorkbenchRevisionTool
+from app.services.tools.workbench_revision_tool import WorkbenchRevisionTool
 from app.utils.values import coerce_positive_int
 from app.services.text_analysis import (
     apply_discussion_updates,

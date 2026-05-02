@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 from app.core.config import settings
 from app.schemas.analyze import AnalyzeResponse
 from app.services.artifact_skills import DocSkill
-from app.services.doc_tool import DocTool
+from app.services.tools.doc_tool import DocTool
 
 
 class DocumentPackageBuilder:
