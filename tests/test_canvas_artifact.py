@@ -161,7 +161,7 @@ class CanvasArtifactTests(unittest.TestCase):
                 chat_id=None,
             )
 
-            result = workflow._execute_llm_request(
+            result = workflow.execution_runner.execute_llm_request(
                 message,
                 {
                     "operation": "create",
@@ -191,7 +191,7 @@ class CanvasArtifactTests(unittest.TestCase):
                 chat_type="group",
             )
 
-            result = workflow._handle_fallback_request(
+            result = workflow.fallback_handler.handle_fallback_request(
                 message,
                 active_episode_id=None,
                 task_run_id=None,

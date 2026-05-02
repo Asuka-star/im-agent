@@ -9,6 +9,7 @@ from app.core.config import settings
 from app.schemas.analyze import AnalyzeResponse
 from app.schemas.task import TaskItem
 from app.services.tools.doc_tool import DocumentSyncResult
+from app.services.tools.task_operation_tool import TaskOperationTool
 from app.services.feishu_workflow import FeishuWorkflowService
 from app.services.presentation_artifact_service import PresentationArtifactService
 from app.services.request_router import RouteDecision
@@ -48,7 +49,7 @@ class LLMTaskOperationTests(unittest.TestCase):
             }
         ]
 
-        result = self.service._apply_llm_task_operations(current_tasks, operations)
+        result = TaskOperationTool.apply_llm_operations(current_tasks, operations)
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0].priority, "high")
         self.assertEqual(result[0].due_date, "2026-04-18")
@@ -67,7 +68,7 @@ class LLMTaskOperationTests(unittest.TestCase):
             }
         ]
 
-        result = self.service._apply_llm_task_operations(current_tasks, operations)
+        result = TaskOperationTool.apply_llm_operations(current_tasks, operations)
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0].title, "后端开发")
 
@@ -91,7 +92,7 @@ class LLMTaskOperationTests(unittest.TestCase):
             }
         ]
 
-        result = self.service._apply_llm_task_operations(current_tasks, operations)
+        result = TaskOperationTool.apply_llm_operations(current_tasks, operations)
         self.assertEqual(len(result), 2)
         self.assertTrue(any(task.title == "前端开发" and task.owner == "李四" for task in result))
 
@@ -112,8 +113,8 @@ class LLMTaskOperationTests(unittest.TestCase):
             self.service.memory_service,
             "close_active_episode",
         ), patch.object(
-            self.service,
-            "_deliver_reply",
+            self.service.reply_sender,
+            "deliver_reply",
             return_value={"reply_preview": "ok", "reply_sent": False},
         ):
             build_analysis.return_value = type(
@@ -126,7 +127,7 @@ class LLMTaskOperationTests(unittest.TestCase):
                     "next_actions": ["ok"],
                 },
             )()
-            self.service._execute_llm_request(
+            self.service.execution_runner.execute_llm_request(
                 type(
                     "FakeMessage",
                     (),
@@ -156,7 +157,7 @@ class LLMTaskOperationTests(unittest.TestCase):
             self.service.task_run_service,
             "merge_task_run_metadata",
         ):
-            result = self.service._execute_llm_request(
+            result = self.service.execution_runner.execute_llm_request(
                 message,
                 {
                     "intent": "doc",
@@ -264,8 +265,8 @@ class LLMTaskOperationTests(unittest.TestCase):
             self.service.llm_service,
             "resolve_workspace_request",
         ) as resolve_workspace_request, patch.object(
-            self.service,
-            "_deliver_reply",
+            self.service.reply_sender,
+            "deliver_reply",
             return_value={
                 "session_id": "s1",
                 "episode_id": None,
@@ -364,8 +365,8 @@ class LLMTaskOperationTests(unittest.TestCase):
             self.service.llm_service,
             "resolve_doc_request",
         ) as resolve_doc_request, patch.object(
-            self.service,
-            "_deliver_reply",
+            self.service.reply_sender,
+            "deliver_reply",
             return_value={
                 "session_id": "s1",
                 "episode_id": None,
@@ -433,8 +434,8 @@ class LLMTaskOperationTests(unittest.TestCase):
             self.service.llm_service,
             "resolve_workspace_request",
         ) as resolve_workspace, patch.object(
-            self.service,
-            "_prepare_slides_execution",
+            self.service.slides_execution,
+            "prepare_slides_execution",
             return_value={
                 "reply_preview": "[slides] ready",
                 "analysis": None,
@@ -442,8 +443,8 @@ class LLMTaskOperationTests(unittest.TestCase):
                 "close_title": "slides",
             },
         ) as prepare_slides, patch.object(
-            self.service,
-            "_deliver_reply",
+            self.service.reply_sender,
+            "deliver_reply",
             return_value={
                 "session_id": "s1",
                 "episode_id": None,
@@ -513,8 +514,8 @@ class LLMTaskOperationTests(unittest.TestCase):
             self.service.llm_service,
             "route_workspace_request",
         ) as route_workspace, patch.object(
-            self.service,
-            "_prepare_slides_execution",
+            self.service.slides_execution,
+            "prepare_slides_execution",
             return_value={
                 "reply_preview": "[slides]",
                 "analysis": None,
@@ -522,8 +523,8 @@ class LLMTaskOperationTests(unittest.TestCase):
                 "close_title": "slides",
             },
         ) as prepare_slides, patch.object(
-            self.service,
-            "_prepare_canvas_execution",
+            self.service.canvas_execution,
+            "prepare_canvas_execution",
             return_value={
                 "reply_preview": "[canvas]",
                 "analysis": None,
@@ -531,8 +532,8 @@ class LLMTaskOperationTests(unittest.TestCase):
                 "close_title": "canvas",
             },
         ) as prepare_canvas, patch.object(
-            self.service,
-            "_deliver_reply",
+            self.service.reply_sender,
+            "deliver_reply",
             return_value={
                 "session_id": "s1",
                 "episode_id": None,
@@ -645,8 +646,8 @@ class LLMTaskOperationTests(unittest.TestCase):
             self.service.llm_service,
             "resolve_workspace_request",
         ) as resolve_workspace, patch.object(
-            self.service,
-            "_prepare_slides_execution",
+            self.service.slides_execution,
+            "prepare_slides_execution",
             return_value={
                 "reply_preview": "【演示稿】已生成",
                 "analysis": None,
@@ -654,8 +655,8 @@ class LLMTaskOperationTests(unittest.TestCase):
                 "close_title": "slides",
             },
         ) as prepare_slides, patch.object(
-            self.service,
-            "_prepare_canvas_execution",
+            self.service.canvas_execution,
+            "prepare_canvas_execution",
             return_value={
                 "reply_preview": "【Canvas】已生成",
                 "analysis": None,
@@ -663,8 +664,8 @@ class LLMTaskOperationTests(unittest.TestCase):
                 "close_title": "canvas",
             },
         ) as prepare_canvas, patch.object(
-            self.service,
-            "_deliver_reply",
+            self.service.reply_sender,
+            "deliver_reply",
             return_value={
                 "session_id": "s1",
                 "episode_id": None,
@@ -730,8 +731,8 @@ class LLMTaskOperationTests(unittest.TestCase):
             "_resolve_llm_result_for_route",
             return_value={"intent": "doc", "reason": "doc route", "doc": {"title": "Release Review", "sections": []}},
         ), patch.object(
-            self.service,
-            "_execute_llm_request",
+            self.service.execution_runner,
+            "execute_llm_request",
             return_value={
                 "session_id": "s1",
                 "episode_id": None,
@@ -776,7 +777,7 @@ class LLMTaskOperationTests(unittest.TestCase):
         self.assertIs(version_doc, documents[1])
 
     def test_fallback_plan_for_doc_can_chain_slides(self) -> None:
-        plan = self.service._resolve_execution_plan(
+        plan = self.service.execution_planner.resolve_execution_plan(
             intent="doc",
             reason="需要先沉淀文档，再给出演示材料",
             llm_result={
@@ -792,7 +793,7 @@ class LLMTaskOperationTests(unittest.TestCase):
         self.assertEqual([step.step_type for step in plan.steps], ["sync_doc", "generate_slides"])
 
     def test_doc_route_requires_doc_step_before_optional_slides(self) -> None:
-        plan = self.service._resolve_execution_plan(
+        plan = self.service.execution_planner.resolve_execution_plan(
             intent="slides",
             reason="planner missed the required document step",
             llm_result={
@@ -820,7 +821,7 @@ class LLMTaskOperationTests(unittest.TestCase):
         self.assertEqual([step.step_type for step in plan.steps], ["sync_doc", "generate_slides"])
 
     def test_doc_protocol_keeps_sync_doc_and_adds_requested_slides_step(self) -> None:
-        plan = self.service._resolve_execution_plan(
+        plan = self.service.execution_planner.resolve_execution_plan(
             intent="doc",
             reason="专项文档 prompt 只返回了文档计划",
             llm_result={
@@ -854,7 +855,7 @@ class LLMTaskOperationTests(unittest.TestCase):
             next_actions=["Next action"],
             agent_traces=[],
         )
-        with patch.object(self.service, "_resolve_doc_stats_as_of", return_value=None), patch.object(
+        with patch.object(self.service.doc_execution, "resolve_doc_stats_as_of", return_value=None), patch.object(
             self.service.memory_service,
             "build_discussion_block",
             return_value="Discussion context",
@@ -869,7 +870,7 @@ class LLMTaskOperationTests(unittest.TestCase):
             self.service.llm_service,
             "generate_presentation_package",
         ) as generate_slides:
-            package, analysis = self.service._build_doc_response_package(
+            package, analysis = self.service.doc_execution.build_doc_response_package(
                 session_id="doc_requested_outputs_session",
                 instruction="write this into a collaboration document",
                 llm_result={
@@ -907,7 +908,7 @@ class LLMTaskOperationTests(unittest.TestCase):
             },
         }
 
-        plan = self.service._resolve_execution_plan(
+        plan = self.service.execution_planner.resolve_execution_plan(
             intent="summary",
             reason="误判成普通总结",
             llm_result=llm_result,
@@ -921,7 +922,7 @@ class LLMTaskOperationTests(unittest.TestCase):
         self.assertEqual([step.step_type for step in plan.steps], ["sync_doc"])
 
     def test_plain_doc_instruction_uses_doc_fallback_plan(self) -> None:
-        plan = self.service._resolve_execution_plan(
+        plan = self.service.execution_planner.resolve_execution_plan(
             intent="summary",
             reason="误判成总结",
             llm_result={"operation": "analyze", "object": "summary"},
@@ -932,7 +933,7 @@ class LLMTaskOperationTests(unittest.TestCase):
         self.assertEqual([step.step_type for step in plan.steps], ["sync_doc"])
 
     def test_operation_object_protocol_derives_route_without_legacy_intent(self) -> None:
-        protocol = self.service._normalize_request_protocol(
+        protocol = self.service.execution_planner.normalize_request_protocol(
             {
                 "operation": "read",
                 "object": "tasks",
@@ -955,7 +956,7 @@ class LLMTaskOperationTests(unittest.TestCase):
             llm_result,
             RouteDecision(route="doc", source="rule", confidence=0.98, reason="文档规则命中"),
         )
-        protocol = self.service._normalize_request_protocol(llm_result)
+        protocol = self.service.execution_planner.normalize_request_protocol(llm_result)
 
         self.assertEqual(protocol.operation, "create")
         self.assertEqual(protocol.object, "doc")
@@ -972,7 +973,7 @@ class LLMTaskOperationTests(unittest.TestCase):
             llm_result,
             RouteDecision(route="doc", source="rule", confidence=0.98, reason="doc rule matched"),
         )
-        protocol = self.service._normalize_request_protocol(llm_result)
+        protocol = self.service.execution_planner.normalize_request_protocol(llm_result)
 
         self.assertEqual(protocol.operation, "update")
         self.assertEqual(protocol.object, "doc")
@@ -1055,7 +1056,7 @@ class LLMTaskOperationTests(unittest.TestCase):
             self.service.presentation_artifact_service = PresentationArtifactService(root_dir=Path(tmpdir))
             message = SimpleNamespace(session_id="s1", message_id="m1", text="生成演示稿", chat_id=None)
 
-            result = self.service._prepare_slides_execution(
+            result = self.service.slides_execution.prepare_slides_execution(
                 message,
                 llm_result={
                     "slides": {
@@ -1086,7 +1087,7 @@ class LLMTaskOperationTests(unittest.TestCase):
             self.service.presentation_artifact_service = PresentationArtifactService(root_dir=Path(tmpdir))
             message = SimpleNamespace(session_id="s1", message_id="m1", text="生成演示稿", chat_id=None)
 
-            result = self.service._prepare_slides_execution(
+            result = self.service.slides_execution.prepare_slides_execution(
                 message,
                 llm_result={},
                 workspace_context="[workspace]",
@@ -1118,7 +1119,7 @@ class LLMTaskOperationTests(unittest.TestCase):
         )
 
     def test_read_risks_can_answer_from_payload_without_task_snapshot(self) -> None:
-        reply = self.service._format_status_reply("当前有什么风险", [], {"risks": ["接口联调时间紧"]})
+        reply = self.service.response_formatter.format_status_reply("当前有什么风险", [], {"risks": ["接口联调时间紧"]})
 
         self.assertIn("当前风险", reply)
         self.assertIn("接口联调时间紧", reply)
@@ -1130,8 +1131,8 @@ class LLMTaskOperationTests(unittest.TestCase):
             {"session_id": "s1", "message_id": "m1", "text": "查看任务列表", "chat_id": "c1", "chat_type": "p2p"},
         )()
         with patch.object(
-            self.service,
-            "_prepare_status_execution",
+            self.service.status_execution,
+            "prepare_status_execution",
             return_value={
                 "reply_preview": "【当前协作状态】",
                 "analysis": None,
@@ -1139,8 +1140,8 @@ class LLMTaskOperationTests(unittest.TestCase):
                 "close_title": None,
             },
         ) as prepare_status, patch.object(
-            self.service,
-            "_deliver_reply",
+            self.service.reply_sender,
+            "deliver_reply",
             return_value={
                 "session_id": "s1",
                 "episode_id": None,
@@ -1152,7 +1153,7 @@ class LLMTaskOperationTests(unittest.TestCase):
                 "artifacts": [],
             },
         ):
-            result = self.service._execute_llm_request(
+            result = self.service.execution_runner.execute_llm_request(
                 message,
                 {
                     "operation": "read",
@@ -1184,8 +1185,8 @@ class LLMTaskOperationTests(unittest.TestCase):
             {"session_id": "s1", "message_id": "m1", "text": "organize todos", "chat_id": "c1", "chat_type": "group"},
         )()
         with patch.object(
-            self.service,
-            "_prepare_analysis_execution",
+            self.service.analysis_execution,
+            "prepare_analysis_execution",
             return_value={
                 "reply_preview": "[tasks]",
                 "analysis": None,
@@ -1193,8 +1194,8 @@ class LLMTaskOperationTests(unittest.TestCase):
                 "close_title": "tasks",
             },
         ) as prepare_analysis, patch.object(
-            self.service,
-            "_prepare_status_execution",
+            self.service.status_execution,
+            "prepare_status_execution",
             return_value={
                 "reply_preview": "should not run",
                 "analysis": None,
@@ -1202,8 +1203,8 @@ class LLMTaskOperationTests(unittest.TestCase):
                 "close_title": None,
             },
         ) as prepare_status, patch.object(
-            self.service,
-            "_deliver_reply",
+            self.service.reply_sender,
+            "deliver_reply",
             return_value={
                 "session_id": "s1",
                 "episode_id": None,
@@ -1215,7 +1216,7 @@ class LLMTaskOperationTests(unittest.TestCase):
                 "artifacts": [],
             },
         ):
-            result = self.service._execute_llm_request(
+            result = self.service.execution_runner.execute_llm_request(
                 message,
                 {
                     "operation": "analyze",
@@ -1247,8 +1248,8 @@ class LLMTaskOperationTests(unittest.TestCase):
             {"session_id": "s1", "message_id": "m1", "text": "帮我整理成文档并生成PPT", "chat_id": "c1"},
         )()
         with patch.object(
-            self.service,
-            "_prepare_doc_execution",
+            self.service.doc_execution,
+            "prepare_doc_execution",
             return_value={
                 "reply_preview": "【文档同步】\n已生成文档",
                 "analysis": None,
@@ -1256,8 +1257,8 @@ class LLMTaskOperationTests(unittest.TestCase):
                 "close_title": "文档",
             },
         ) as prepare_doc, patch.object(
-            self.service,
-            "_prepare_slides_execution",
+            self.service.slides_execution,
+            "prepare_slides_execution",
             return_value={
                 "reply_preview": "【演示稿】\n已生成演示稿大纲",
                 "analysis": None,
@@ -1265,8 +1266,8 @@ class LLMTaskOperationTests(unittest.TestCase):
                 "close_title": "slides",
             },
         ) as prepare_slides, patch.object(
-            self.service,
-            "_deliver_reply",
+            self.service.reply_sender,
+            "deliver_reply",
             return_value={
                 "session_id": "s1",
                 "episode_id": 1,
@@ -1281,7 +1282,7 @@ class LLMTaskOperationTests(unittest.TestCase):
             self.service.memory_service,
             "close_active_episode",
         ):
-            result = self.service._execute_llm_request(
+            result = self.service.execution_runner.execute_llm_request(
                 message,
                 {
                     "intent": "doc",
@@ -1335,16 +1336,16 @@ class LLMTaskOperationTests(unittest.TestCase):
             }
 
         with patch.object(
-            self.service,
-            "_prepare_slides_execution",
+            self.service.slides_execution,
+            "prepare_slides_execution",
             side_effect=slides_result,
         ), patch.object(
-            self.service,
-            "_prepare_canvas_execution",
+            self.service.canvas_execution,
+            "prepare_canvas_execution",
             side_effect=canvas_result,
         ), patch.object(
-            self.service,
-            "_deliver_reply",
+            self.service.reply_sender,
+            "deliver_reply",
             return_value={
                 "session_id": "s1",
                 "episode_id": None,
@@ -1356,7 +1357,7 @@ class LLMTaskOperationTests(unittest.TestCase):
                 "artifacts": [],
             },
         ):
-            self.service._execute_llm_request(
+            self.service.execution_runner.execute_llm_request(
                 message,
                 {
                     "operation": "create",
@@ -1412,8 +1413,8 @@ class LLMTaskOperationTests(unittest.TestCase):
             "generate_presentation_package",
             return_value=package,
         ) as generate_package, patch.object(
-            self.service,
-            "_resolve_doc_stats_as_of",
+            self.service.doc_execution,
+            "resolve_doc_stats_as_of",
             return_value=None,
         ), patch.object(
             self.service.memory_service,
@@ -1427,8 +1428,8 @@ class LLMTaskOperationTests(unittest.TestCase):
             self.service.memory_service,
             "save_round",
         ), patch.object(
-            self.service,
-            "_sync_package_to_session_doc",
+            self.service.doc_execution,
+            "sync_package_to_session_doc",
             return_value=DocumentSyncResult(
                 mode="created",
                 status="ready",
@@ -1436,12 +1437,12 @@ class LLMTaskOperationTests(unittest.TestCase):
                 document_info={"document_id": "doc_1", "url": "https://example.test/doc_1"},
             ),
         ), patch.object(
-            self.service,
-            "_build_document_artifact",
+            self.service.doc_execution,
+            "build_document_artifact",
             return_value={"artifact_type": "document", "title": "Document"},
         ), patch.object(
-            self.service,
-            "_deliver_reply",
+            self.service.reply_sender,
+            "deliver_reply",
             return_value={
                 "session_id": "s1",
                 "episode_id": None,
@@ -1454,7 +1455,7 @@ class LLMTaskOperationTests(unittest.TestCase):
             },
         ):
             self.service.presentation_artifact_service = PresentationArtifactService(root_dir=Path(tmpdir))
-            self.service._execute_llm_request(
+            self.service.execution_runner.execute_llm_request(
                 message,
                 llm_result,
                 "[workspace]",
@@ -1568,8 +1569,8 @@ class LLMTaskOperationTests(unittest.TestCase):
             self.service.task_run_service,
             "update_task_run",
         ) as update_task_run, patch.object(
-            self.service,
-            "_deliver_reply",
+            self.service.reply_sender,
+            "deliver_reply",
             return_value={
                 "session_id": "s1",
                 "mode": "speech_notice",
@@ -1635,8 +1636,8 @@ class LLMTaskOperationTests(unittest.TestCase):
             "_resolve_llm_result_for_route",
             return_value={"intent": "doc", "reason": "???????"},
         ) as resolve_llm_result_for_route, patch.object(
-            self.service,
-            "_execute_llm_request",
+            self.service.execution_runner,
+            "execute_llm_request",
             return_value={
                 "session_id": "s1",
                 "episode_id": 7,
@@ -1732,8 +1733,8 @@ class LLMTaskOperationTests(unittest.TestCase):
             "_resolve_llm_result_for_route",
             return_value={"intent": "doc", "reason": "doc schema", "doc": {"title": "发布复盘", "sections": []}},
         ), patch.object(
-            self.service,
-            "_execute_llm_request",
+            self.service.execution_runner,
+            "execute_llm_request",
             return_value={
                 "session_id": "s1",
                 "episode_id": 7,
@@ -1785,16 +1786,16 @@ class LLMTaskOperationTests(unittest.TestCase):
             "is_configured",
             return_value=False,
         ), patch.object(
-            self.service,
-            "_prepare_doc_execution",
+            self.service.doc_execution,
+            "prepare_doc_execution",
             return_value={
                 "reply_preview": "【文档同步】\n已修订",
                 "analysis": None,
                 "artifacts": [{"artifact_type": "document", "title": "协作文档"}],
             },
         ) as prepare_doc, patch.object(
-            self.service,
-            "_persist_task_run_result",
+            self.service.result_persistence,
+            "persist_task_run_result",
         ) as persist_result:
             result = self.service.revise_document_from_task_run(
                 "run_source",
@@ -1867,16 +1868,16 @@ class LLMTaskOperationTests(unittest.TestCase):
             self.service.llm_service,
             "resolve_workspace_request",
         ) as resolve_workspace_request, patch.object(
-            self.service,
-            "_prepare_doc_execution",
+            self.service.doc_execution,
+            "prepare_doc_execution",
             return_value={
                 "reply_preview": "updated",
                 "analysis": None,
                 "artifacts": [],
             },
         ) as prepare_doc, patch.object(
-            self.service,
-            "_persist_task_run_result",
+            self.service.result_persistence,
+            "persist_task_run_result",
         ):
             result = self.service.revise_document_from_task_run(
                 "run_source",
@@ -1933,16 +1934,16 @@ class LLMTaskOperationTests(unittest.TestCase):
             "resolve_doc_request",
             return_value={"doc": {"title": "Target Doc", "sections": []}, "reason": "doc schema"},
         ), patch.object(
-            self.service,
-            "_prepare_doc_execution",
+            self.service.doc_execution,
+            "prepare_doc_execution",
             return_value={
                 "reply_preview": "updated",
                 "analysis": None,
                 "artifacts": [],
             },
         ) as prepare_doc, patch.object(
-            self.service,
-            "_persist_task_run_result",
+            self.service.result_persistence,
+            "persist_task_run_result",
         ):
             result = self.service.revise_document_from_task_run(
                 "run_source",
@@ -2005,8 +2006,8 @@ class LLMTaskOperationTests(unittest.TestCase):
                 "is_configured",
                 return_value=False,
             ), patch.object(
-                self.service,
-                "_persist_task_run_result",
+                self.service.result_persistence,
+                "persist_task_run_result",
             ) as persist_result:
                 result = self.service.revise_slides_from_task_run(
                     "run_source",
@@ -2090,8 +2091,8 @@ class LLMTaskOperationTests(unittest.TestCase):
                 "is_configured",
                 return_value=False,
             ), patch.object(
-                self.service,
-                "_persist_task_run_result",
+                self.service.result_persistence,
+                "persist_task_run_result",
             ) as persist_result:
                 self.service.revise_slides_from_task_run(
                     "run_source",

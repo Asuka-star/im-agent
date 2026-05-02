@@ -12,6 +12,7 @@ from app.services.memory_service import MemoryService
 from app.services.feishu_workflow import FeishuWorkflowService
 from app.services.interaction import InteractionService
 from app.services.tools.doc_tool import DocTool, DocumentSyncResult
+from app.services.tools.task_operation_tool import TaskOperationTool
 from app.services.office_artifact_service import OfficeArtifactService
 from app.services.session_document_service import SessionDocumentService
 
@@ -62,7 +63,7 @@ class DocSyncTests(unittest.TestCase):
             agent_traces=[AgentTrace(agent="planner", summary="ok")],
         )
 
-        package = self.workflow._document_from_analysis(analysis, "把这轮讨论整理成文档")
+        package = self.workflow.doc_execution.document_from_analysis(analysis, "把这轮讨论整理成文档")
         self.assertIn("title", package)
         self.assertTrue(package["sections"])
         headings = [section["heading"] for section in package["sections"]]
@@ -70,12 +71,12 @@ class DocSyncTests(unittest.TestCase):
         self.assertIn("任务清单", headings)
 
     def test_default_doc_title_includes_timestamp(self) -> None:
-        with patch.object(self.workflow, "_doc_title_timestamp", return_value="2026-04-17 11:30"):
-            title = self.workflow._default_doc_title("帮我把这轮讨论整理成文档")
+        with patch.object(self.workflow.doc_execution, "doc_title_timestamp", return_value="2026-04-17 11:30"):
+            title = self.workflow.doc_execution.default_doc_title("帮我把这轮讨论整理成文档")
         self.assertIn("统计至2026-04-17 11:30", title)
 
     def test_default_doc_title_prefers_stats_cutoff_time(self) -> None:
-        title = self.workflow._default_doc_title(
+        title = self.workflow.doc_execution.default_doc_title(
             "帮我把这轮讨论整理成文档",
             stats_as_of="2026-04-17 11:34",
         )
@@ -102,7 +103,7 @@ class DocSyncTests(unittest.TestCase):
                 notes="新任务",
             )
         ]
-        merged = self.workflow._merge_task_items(current_tasks, refreshed_tasks)
+        merged = TaskOperationTool.merge_task_items(current_tasks, refreshed_tasks)
         self.assertEqual(len(merged), 2)
         self.assertTrue(any(task.title == "后端开发" and task.owner == "张三" for task in merged))
         self.assertTrue(any(task.title == "前端开发" and task.owner == "张三" for task in merged))
@@ -126,7 +127,7 @@ class DocSyncTests(unittest.TestCase):
                 notes="李四4月29号之前搞定前端",
             ),
         ]
-        updated = self.workflow._update_current_tasks_from_discussion(
+        updated = TaskOperationTool.update_current_tasks_from_discussion(
             current_tasks,
             "张三你也去搞前端吧",
             llm_tasks=[],
@@ -202,8 +203,8 @@ class DocSyncTests(unittest.TestCase):
         }
 
         with patch.object(
-            self.workflow,
-            "_build_doc_response_package",
+            self.workflow.doc_execution,
+            "build_doc_response_package",
             return_value=(package, None),
         ), patch.object(
             self.workflow.doc_api,
@@ -221,7 +222,7 @@ class DocSyncTests(unittest.TestCase):
                 "folder_note": None,
             },
         ):
-            result = self.workflow._prepare_doc_execution(
+            result = self.workflow.doc_execution.prepare_doc_execution(
                 message,
                 llm_result={},
                 workspace_context="workspace",
@@ -261,15 +262,15 @@ class DocSyncTests(unittest.TestCase):
         }
 
         with patch.object(
-            self.workflow,
-            "_build_doc_response_package",
+            self.workflow.doc_execution,
+            "build_doc_response_package",
             return_value=(package, None),
         ), patch.object(
             self.workflow.doc_api,
             "is_configured",
             return_value=False,
         ):
-            result = self.workflow._prepare_doc_execution(
+            result = self.workflow.doc_execution.prepare_doc_execution(
                 message,
                 llm_result={},
                 workspace_context="workspace",
@@ -322,8 +323,8 @@ class DocSyncTests(unittest.TestCase):
         }
 
         with patch.object(
-            self.workflow,
-            "_build_doc_response_package",
+            self.workflow.doc_execution,
+            "build_doc_response_package",
             return_value=(package, None),
         ), patch.object(
             self.workflow.doc_api,
@@ -338,7 +339,7 @@ class DocSyncTests(unittest.TestCase):
             "create_document_from_sections",
             side_effect=RuntimeError("create down"),
         ):
-            result = self.workflow._prepare_doc_execution(
+            result = self.workflow.doc_execution.prepare_doc_execution(
                 message,
                 llm_result={},
                 workspace_context="workspace",
@@ -369,7 +370,7 @@ class DocSyncTests(unittest.TestCase):
             "get_discussion_cutoff_at",
             return_value=None,
         ):
-            package, analysis = self.workflow._build_doc_response_package(
+            package, analysis = self.workflow.doc_execution.build_doc_response_package(
                 session_id="s1",
                 instruction="把当前讨论整理成文档",
                 llm_result={
@@ -398,7 +399,7 @@ class DocSyncTests(unittest.TestCase):
         )
 
     def test_revision_context_includes_current_document_snapshot(self) -> None:
-        context = self.workflow._format_current_document_context(
+        context = DocTool.format_current_document_context(
             {
                 "document_id": "doc_1",
                 "title": "协作文档",
@@ -481,7 +482,7 @@ class DocSyncTests(unittest.TestCase):
                 "folder_note": None,
             },
         ):
-            self.workflow._sync_package_to_session_doc(
+            self.workflow.doc_execution.sync_package_to_session_doc(
                 {
                     "title": "追踪文档",
                     "sections": [{"heading": "讨论摘要", "paragraphs": ["一版内容"]}],
@@ -1486,7 +1487,7 @@ class DocSyncTests(unittest.TestCase):
         ]
 
         update_sections, changed_headings, targeted_headings = (
-            self.workflow._build_incremental_doc_sections(
+            self.workflow.doc_execution.build_incremental_doc_sections(
                 package,
                 instruction="补充一下风险部分",
                 previous_snapshot=previous_snapshot,
@@ -1499,7 +1500,7 @@ class DocSyncTests(unittest.TestCase):
         self.assertEqual(update_sections[1]["heading"], "refresh: 风险与卡点")
 
     def test_build_doc_sync_lines_include_updated_section_names(self) -> None:
-        lines = self.workflow._build_doc_sync_lines(
+        lines = self.workflow.doc_execution.build_doc_sync_lines(
             "updated",
             {"title": "协作文档", "url": "https://feishu.cn/docx/doc_1", "version": 3},
             appended_block_count=4,
@@ -1510,7 +1511,7 @@ class DocSyncTests(unittest.TestCase):
         self.assertTrue(any("Update strategy: patched matched section bodies" in line for line in lines))
 
     def test_updated_doc_sync_preview_exposes_replace_strategy(self) -> None:
-        preview = self.workflow._build_document_sync_preview(
+        preview = self.workflow.doc_execution.build_document_sync_preview(
             {"document_id": "doc_1", "title": "协作文档", "version": 3, "sync_mode": "updated"},
             url="https://feishu.cn/docx/doc_1",
             sync_lines=["- Updated document: 协作文档"],
@@ -1521,7 +1522,7 @@ class DocSyncTests(unittest.TestCase):
         self.assertIn("patching matched section bodies", preview["strategy_note"])
 
     def test_doc_reply_describes_delete_action_without_body_preview(self) -> None:
-        reply = self.workflow._format_doc_reply(
+        reply = self.workflow.doc_execution.format_doc_reply(
             {
                 "title": "项目分工文档",
                 "sections": [{"heading": "讨论摘要", "paragraphs": ["不应该在删除回执里展开"]}],
@@ -1550,7 +1551,7 @@ class DocSyncTests(unittest.TestCase):
         self.assertNotIn("内容预览：", reply)
 
     def test_doc_reply_explains_noop_result(self) -> None:
-        reply = self.workflow._format_doc_reply(
+        reply = self.workflow.doc_execution.format_doc_reply(
             {
                 "title": "项目分工文档",
                 "sections": [{"heading": "讨论摘要", "paragraphs": ["已有内容"]}],
@@ -1576,7 +1577,7 @@ class DocSyncTests(unittest.TestCase):
         self.assertNotIn("No content changes detected", reply)
 
     def test_doc_reply_describes_update_append_and_rename_actions(self) -> None:
-        reply = self.workflow._format_doc_reply(
+        reply = self.workflow.doc_execution.format_doc_reply(
             {
                 "title": "项目分工文档",
                 "sections": [
@@ -1620,7 +1621,7 @@ class DocSyncTests(unittest.TestCase):
         self.assertNotIn("内容预览：", reply)
 
     def test_doc_reply_keeps_preview_for_created_document(self) -> None:
-        reply = self.workflow._format_doc_reply(
+        reply = self.workflow.doc_execution.format_doc_reply(
             {
                 "title": "项目分工文档",
                 "sections": [
@@ -1639,7 +1640,7 @@ class DocSyncTests(unittest.TestCase):
         self.assertIn("团队明确了前后端分工。", reply)
 
     def test_doc_reply_infers_actions_from_sync_lines_without_edit_plan(self) -> None:
-        reply = self.workflow._format_doc_reply(
+        reply = self.workflow.doc_execution.format_doc_reply(
             {
                 "title": "项目分工文档",
                 "sections": [{"heading": "任务清单", "paragraphs": ["新增任务"]}],
@@ -1659,7 +1660,7 @@ class DocSyncTests(unittest.TestCase):
         self.assertIn("- 已改写正文：讨论摘要", reply)
 
     def test_doc_reply_describes_semantic_delete_range(self) -> None:
-        reply = self.workflow._format_doc_reply(
+        reply = self.workflow.doc_execution.format_doc_reply(
             {
                 "title": "项目分工文档",
                 "sections": [],
@@ -1689,7 +1690,7 @@ class DocSyncTests(unittest.TestCase):
         self.assertIn("- 已删除：后续计划 之后", reply)
 
     def test_doc_reply_explains_unmatched_delete_range(self) -> None:
-        reply = self.workflow._format_doc_reply(
+        reply = self.workflow.doc_execution.format_doc_reply(
             {
                 "title": "项目分工文档",
                 "sections": [],
@@ -1765,7 +1766,7 @@ class DocSyncTests(unittest.TestCase):
         )
 
     def test_merge_doc_section_snapshots_applies_delete_ranges(self) -> None:
-        merged = self.workflow._merge_doc_section_snapshots(
+        merged = self.workflow.doc_execution.merge_doc_section_snapshots(
             [
                 {"heading": "项目背景", "paragraphs": ["保留"]},
                 {"heading": "后续计划", "paragraphs": ["保留计划"]},
@@ -1879,7 +1880,7 @@ class DocSyncTests(unittest.TestCase):
         )()
 
         tasks = self.workflow._context_tasks_for_message(message)
-        reply = self.workflow._format_status_reply(message.text, tasks, {})
+        reply = self.workflow.response_formatter.format_status_reply(message.text, tasks, {})
 
         self.assertEqual(len(tasks), 1)
         self.assertEqual(tasks[0].title, "后端开发")
@@ -1917,7 +1918,7 @@ class DocSyncTests(unittest.TestCase):
         )()
 
         tasks = self.workflow._context_tasks_for_message(message)
-        reply = self.workflow._format_status_reply(message.text, tasks, {})
+        reply = self.workflow.response_formatter.format_status_reply(message.text, tasks, {})
 
         self.assertIn("【当前任务】", reply)
         self.assertIn("后端开发", reply)
@@ -2051,7 +2052,7 @@ class DocSyncTests(unittest.TestCase):
             },
         )()
 
-        self.workflow._prepare_status_execution(
+        self.workflow.status_execution.prepare_status_execution(
             message,
             llm_result={},
             active_episode_id=11,
@@ -2094,7 +2095,7 @@ class DocSyncTests(unittest.TestCase):
             },
         )()
 
-        result = self.workflow._prepare_status_execution(
+        result = self.workflow.status_execution.prepare_status_execution(
             message,
             llm_result={"status_answer": "There are 8 tasks."},
         )
@@ -2131,7 +2132,7 @@ class DocSyncTests(unittest.TestCase):
             },
         )()
 
-        result = self.workflow._prepare_status_execution(message, llm_result={})
+        result = self.workflow.status_execution.prepare_status_execution(message, llm_result={})
 
         self.assertIn("我建议下一步可以：", result["reply_preview"])
         self.assertIn("基于当前文档生成汇报 PPT", result["reply_preview"])
@@ -2158,7 +2159,7 @@ class DocSyncTests(unittest.TestCase):
             },
         )()
 
-        result = self.workflow._deliver_reply(
+        result = self.workflow.reply_sender.deliver_reply(
             message,
             "doc",
             "【文档同步】\n已完成",
@@ -2206,7 +2207,7 @@ class DocSyncTests(unittest.TestCase):
         )()
 
         tasks = self.workflow._context_tasks_for_message(message)
-        reply = self.workflow._format_status_reply(message.text, tasks, {})
+        reply = self.workflow.response_formatter.format_status_reply(message.text, tasks, {})
 
         self.assertEqual(len(tasks), 1)
         self.assertEqual(tasks[0].title, "帮我整理代办")
@@ -2241,7 +2242,7 @@ class DocSyncTests(unittest.TestCase):
         )()
 
         tasks = self.workflow._context_tasks_for_message(message)
-        reply = self.workflow._format_status_reply(message.text, tasks, {})
+        reply = self.workflow.response_formatter.format_status_reply(message.text, tasks, {})
 
         self.assertEqual(len(tasks), 1)
         self.assertEqual(tasks[0].owner, "王五")
@@ -2333,7 +2334,7 @@ class DocSyncTests(unittest.TestCase):
         self.assertEqual(tasks[0].title, "产品经理协调前后端开发")
 
     def test_merge_doc_section_snapshots_supports_delete_and_rename(self) -> None:
-        merged = self.workflow._merge_doc_section_snapshots(
+        merged = self.workflow.doc_execution.merge_doc_section_snapshots(
             [
                 {"heading": "Summary", "paragraphs": ["Old summary"]},
                 {"heading": "Risks", "paragraphs": ["Old risk"]},
@@ -2365,7 +2366,7 @@ class DocSyncTests(unittest.TestCase):
             {"heading": "任务清单", "paragraphs": ["1. 后端开发｜截止：2026-05-02"]},
         ]
 
-        merged = self.workflow._merge_doc_section_snapshots(previous_snapshot, updated_sections)
+        merged = self.workflow.doc_execution.merge_doc_section_snapshots(previous_snapshot, updated_sections)
 
         self.assertEqual(
             merged,
@@ -2384,7 +2385,7 @@ class DocSyncTests(unittest.TestCase):
             {"heading": "风险与卡点", "paragraphs": ["接口联调时间紧", "第三方依赖待确认"]},
         ]
 
-        normalized = self.workflow._normalize_doc_sections(sections)
+        normalized = self.workflow.doc_execution.normalize_doc_sections(sections)
 
         self.assertEqual(
             [section["heading"] for section in normalized],
