@@ -69,6 +69,46 @@ class FeishuRouteTests(unittest.TestCase):
         self.assertEqual(response["msg"], "duplicate_ignored")
         self.assertEqual(background.tasks, [])
 
+    def test_receive_events_schedules_card_action_without_message_dedup(self) -> None:
+        background = _FakeBackgroundTasks()
+        fake_handler = Mock()
+        fake_handler.parse_event.return_value = SimpleNamespace(
+            type=None,
+            challenge=None,
+            header=SimpleNamespace(event_type="card.action.trigger", event_id="evt_card"),
+            event=None,
+        )
+        fake_handler.is_url_verification.return_value = False
+        fake_handler.verify_token.return_value = True
+        fake_dedup = Mock()
+
+        class _CardRequest:
+            async def json(self) -> dict:
+                return {
+                    "header": {"event_type": "card.action.trigger", "event_id": "evt_card"},
+                    "event": {
+                        "action": {
+                            "value": {
+                                "action": "cancel_task_update",
+                                "idempotency_key": "card_1",
+                                "payload": {},
+                            }
+                        }
+                    },
+                }
+
+        with patch.object(feishu, "event_handler", fake_handler), patch.object(
+            feishu,
+            "dedup_service",
+            fake_dedup,
+        ):
+            response = asyncio.run(feishu.receive_events(_CardRequest(), background))
+
+        self.assertEqual(response["msg"], "accepted")
+        self.assertEqual(response["data"]["kind"], "card_action")
+        self.assertEqual(len(background.tasks), 1)
+        fake_dedup.accept_for_processing.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

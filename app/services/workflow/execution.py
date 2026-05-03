@@ -128,9 +128,10 @@ class WorkflowExecutionRunner:
                 message,
                 plan.primary_intent or "help",
                 fallback_reply,
-                analysis=None,
-                episode_id=active_episode_id,
-                artifacts=combined_artifacts,
+            analysis=None,
+            episode_id=active_episode_id,
+            artifacts=combined_artifacts,
+            task_run_id=task_run_id,
             )
 
         for index, step in enumerate(plan.steps, start=1):
@@ -209,6 +210,7 @@ class WorkflowExecutionRunner:
             analysis=final_analysis,
             episode_id=active_episode_id,
             artifacts=combined_artifacts,
+            task_run_id=task_run_id,
         )
         if active_episode_id is not None and workflow._should_close_episode(result, final_reply):
             workflow.memory_service.close_active_episode(

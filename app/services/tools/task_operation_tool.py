@@ -259,7 +259,7 @@ class TaskOperationTool:
                     "updated": False,
                     "tasks": tasks,
                     "status": status,
-                    "clarification": TaskOperationTool.status_update_clarification(line, candidates),
+                    "clarification": TaskOperationTool.status_update_clarification(line, candidates, status=status),
                 }
             target = tasks[target_index]
             note = f"状态更新：{line}"
@@ -305,7 +305,7 @@ class TaskOperationTool:
                 "updated": False,
                 "tasks": tasks,
                 "status": status,
-                "clarification": TaskOperationTool.status_update_clarification(source_text, []),
+                "clarification": TaskOperationTool.status_update_clarification(source_text, [], status=status),
             }
 
         actor = intent_result.get("actor") if isinstance(intent_result.get("actor"), dict) else {}
@@ -329,6 +329,7 @@ class TaskOperationTool:
                     "clarification": TaskOperationTool.status_update_clarification(
                         source_text,
                         [task for _, task in hint_matches or active_candidates[:5]],
+                        status=status,
                     ),
                 }
             scoped_candidates = sender_matches
@@ -352,6 +353,7 @@ class TaskOperationTool:
                 "clarification": TaskOperationTool.status_update_clarification(
                     source_text,
                     [task for _, task in scoped_candidates[:5]],
+                    status=status,
                 ),
             }
         candidates = title_matches or scoped_candidates
@@ -364,6 +366,7 @@ class TaskOperationTool:
                 "clarification": TaskOperationTool.status_update_clarification(
                     source_text,
                     [task for _, task in candidates[:5]],
+                    status=status,
                 ),
             }
 
@@ -417,6 +420,218 @@ class TaskOperationTool:
                 notes=str(intent_result.get("reason") or source_text or "").strip(),
             )
         ]
+
+    @staticmethod
+    def resolve_assignment_from_intent(
+        current_tasks: list[TaskItem],
+        intent_result: dict,
+        *,
+        actor_names: list[str] | None = None,
+        source_text: str = "",
+    ) -> dict:
+        tasks = [task.model_copy(deep=True) for task in current_tasks]
+        if not isinstance(intent_result, dict) or intent_result.get("intent") != "task_assignment":
+            return {"detected": False, "updated": False, "tasks": tasks}
+
+        owner = TaskOperationTool.owner_from_assignment_intent(
+            intent_result,
+            actor_names=actor_names,
+        )
+        if not owner:
+            owner = "TBD"
+
+        active_candidates = [
+            (idx, task)
+            for idx, task in enumerate(tasks)
+            if str(task.status or "").strip().lower() not in {"done", "cancelled", "canceled"}
+        ]
+        if not active_candidates:
+            return {"detected": True, "updated": False, "tasks": tasks}
+
+        candidates = TaskOperationTool.find_assignment_targets_from_intent(
+            active_candidates,
+            intent_result,
+            source_text=source_text,
+        )
+        if len(candidates) == 1:
+            target_index, target = candidates[0]
+            owner_hint = TaskOperationTool.assignment_owner_hint(intent_result, source_text)
+            target_owner = _normalized(target.owner)
+            new_owner = _normalized(owner)
+            explicit_owner_match = bool(
+                owner_hint
+                and (
+                    _text_contains_label(owner_hint, target.owner)
+                    or _text_contains_label(f"{intent_result.get('task_hint') or ''} {source_text}", target.owner)
+                )
+            )
+            if target_owner not in {"", "tbd"} and target_owner != new_owner and not explicit_owner_match:
+                return {
+                    "detected": True,
+                    "updated": False,
+                    "tasks": tasks,
+                    "clarification": TaskOperationTool.assignment_clarification(
+                        source_text,
+                        [target],
+                        owner=owner,
+                    ),
+                }
+            note = f"LLM task assignment update: {source_text or intent_result.get('task_hint') or owner}"
+            notes = target.notes or ""
+            if note not in notes:
+                notes = f"{notes}; {note}".strip("; ")
+            tasks[target_index] = target.model_copy(update={"owner": owner, "notes": notes})
+            return {
+                "detected": True,
+                "updated": True,
+                "tasks": tasks,
+                "updated_task": tasks[target_index],
+            }
+        if len(candidates) > 1:
+            return {
+                "detected": True,
+                "updated": False,
+                "tasks": tasks,
+                "clarification": TaskOperationTool.assignment_clarification(
+                    source_text,
+                    [task for _, task in candidates[:5]],
+                    owner=owner,
+                ),
+            }
+
+        hint = str(intent_result.get("task_hint") or "").strip()
+        if hint and current_tasks:
+            likely = TaskOperationTool.find_loose_assignment_candidates(
+                active_candidates,
+                intent_result,
+                source_text=source_text,
+            )
+            return {
+                "detected": True,
+                "updated": False,
+                "tasks": tasks,
+                "clarification": TaskOperationTool.assignment_clarification(
+                    source_text,
+                    [task for _, task in likely[:5]],
+                    owner=owner,
+                ),
+            }
+        return {"detected": True, "updated": False, "tasks": tasks}
+
+    @staticmethod
+    def owner_from_assignment_intent(
+        intent_result: dict,
+        *,
+        actor_names: list[str] | None = None,
+    ) -> str:
+        assignee = intent_result.get("assignee") if isinstance(intent_result.get("assignee"), dict) else {}
+        assignee_source = str(assignee.get("source") or "unknown").strip().lower()
+        assignee_text = str(assignee.get("text") or "").strip()
+        if assignee_source == "sender":
+            return next((name for name in actor_names or [] if str(name or "").strip()), "TBD")
+        if assignee_source in {"literal", "mentioned"} and assignee_text:
+            return assignee_text
+        if assignee_source == "tbd":
+            return "TBD"
+        return ""
+
+    @staticmethod
+    def find_assignment_targets_from_intent(
+        candidates: list[tuple[int, TaskItem]],
+        intent_result: dict,
+        *,
+        source_text: str,
+    ) -> list[tuple[int, TaskItem]]:
+        hint = str(intent_result.get("task_hint") or "").strip()
+        owner_hint = TaskOperationTool.assignment_owner_hint(intent_result, source_text)
+        probe = f"{hint} {source_text}".strip()
+        matched = [
+            (idx, task)
+            for idx, task in candidates
+            if (
+                TaskOperationTool.line_matches_task_title(probe, task.title)
+                or TaskOperationTool._has_compact_overlap(hint, task.title)
+            )
+            and (
+                not owner_hint
+                or _text_contains_label(owner_hint, task.owner)
+                or _text_contains_label(probe, task.owner)
+            )
+        ]
+        if matched:
+            return matched
+        return [
+            (idx, task)
+            for idx, task in candidates
+            if TaskOperationTool.line_matches_task_title(probe, task.title)
+            or TaskOperationTool._has_compact_overlap(hint, task.title)
+        ]
+
+    @staticmethod
+    def find_loose_assignment_candidates(
+        candidates: list[tuple[int, TaskItem]],
+        intent_result: dict,
+        *,
+        source_text: str,
+    ) -> list[tuple[int, TaskItem]]:
+        hint = str(intent_result.get("task_hint") or "").strip()
+        probe = f"{hint} {source_text}".strip()
+        owner_hint = TaskOperationTool.assignment_owner_hint(intent_result, source_text)
+        owner_matches = [
+            (idx, task)
+            for idx, task in candidates
+            if owner_hint
+            and (
+                _text_contains_label(owner_hint, task.owner)
+                or _text_contains_label(probe, task.owner)
+            )
+        ]
+        if owner_matches:
+            return owner_matches
+        return candidates[:5]
+
+    @staticmethod
+    def assignment_owner_hint(intent_result: dict, source_text: str) -> str:
+        target = intent_result.get("target_task") if isinstance(intent_result.get("target_task"), dict) else {}
+        for key in ("owner", "owner_hint", "current_owner", "current_owner_hint"):
+            value = str(target.get(key) or "").strip()
+            if value:
+                return value
+        actor = intent_result.get("actor") if isinstance(intent_result.get("actor"), dict) else {}
+        actor_source = str(actor.get("source") or "").strip().lower()
+        actor_text = str(actor.get("text") or "").strip()
+        if actor_source in {"literal", "mentioned"} and actor_text:
+            return actor_text
+        assignee = intent_result.get("assignee") if isinstance(intent_result.get("assignee"), dict) else {}
+        if str(assignee.get("source") or "").strip().lower() == "sender":
+            return TaskOperationTool._owner_hint_before_sender_claim(source_text)
+        return ""
+
+    @staticmethod
+    def _owner_hint_before_sender_claim(source_text: str) -> str:
+        text = str(source_text or "").strip()
+        for marker in ("由我", "交给我", "我来", "我负责", "我去", "我做", "我处理"):
+            index = text.find(marker)
+            if index > 0:
+                prefix = text[:index].strip()
+                if len(prefix) >= 2:
+                    return prefix[-4:]
+        return ""
+
+    @staticmethod
+    def assignment_clarification(line: str, candidates: list[TaskItem], *, owner: str) -> dict:
+        options = [TaskOperationTool.task_option_label(task) for task in candidates[:5]]
+        reason = "这句话像是在调整任务负责人，但我无法唯一确定要更新哪一项任务。"
+        if not options:
+            reason = "这句话像是在认领或分配任务，但当前任务列表里没有可安全匹配的任务。"
+        return {
+            "question": f"你说的“{line}”具体要把哪一项任务改为 {owner or 'TBD'} 负责？",
+            "reason": reason,
+            "options": options or ["先查看任务列表", "重新说明任务标题和原负责人"],
+            "candidates": [task.model_dump() for task in candidates[:5]],
+            "target_status": "draft",
+            "blocking": True,
+        }
 
     @staticmethod
     def _filter_tasks_by_intent_hint(
@@ -561,7 +776,7 @@ class TaskOperationTool:
         return any(token in lowered_line for token in TaskOperationTool.TITLE_HINT_TOKENS)
 
     @staticmethod
-    def status_update_clarification(line: str, candidates: list[TaskItem]) -> dict:
+    def status_update_clarification(line: str, candidates: list[TaskItem], *, status: str | None = None) -> dict:
         options = [TaskOperationTool.task_option_label(task) for task in candidates[:5]]
         reason = "这句话是在更新任务状态，但缺少足够的任务标题信息。"
         if not options:
@@ -570,6 +785,8 @@ class TaskOperationTool:
             "question": f"你说的“{line}”具体是指哪一项任务？",
             "reason": reason,
             "options": options or ["先查看任务列表", "重新说明任务标题和负责人"],
+            "candidates": [task.model_dump() for task in candidates[:5]],
+            "target_status": status or TaskOperationTool.status_from_text(line) or "done",
             "blocking": True,
         }
 

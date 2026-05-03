@@ -711,6 +711,67 @@ class LLMTaskOperationTests(unittest.TestCase):
         pause_for_clarification.assert_called_once()
         save_round.assert_not_called()
 
+    def test_llm_task_intent_assignment_uses_owner_hint_to_reassign_existing_task(self) -> None:
+        message = SimpleNamespace(
+            session_id="s1",
+            message_id="m_llm_assign_owner_hint",
+            text="统计任务李彪由我来实现",
+            chat_id="c1",
+            chat_type="group",
+            sender_id="sender_wang",
+            sender_user_id=None,
+            sender_open_id=None,
+            sender_union_id=None,
+        )
+        current_tasks = [
+            TaskItem(title="统计任务", owner="李彪", priority="medium", due_date="TBD", status="draft", notes=""),
+            TaskItem(title="接口联调", owner="李彪", priority="medium", due_date="TBD", status="draft", notes=""),
+        ]
+        with patch.object(self.service.llm_service, "is_configured", return_value=True), patch.object(
+            self.service.llm_service,
+            "resolve_task_intent",
+            return_value={
+                "intent": "task_assignment",
+                "actor": {"source": "unknown", "text": ""},
+                "task_hint": "统计任务李彪",
+                "target_task": {"title_hint": "统计任务", "owner_hint": "李彪"},
+                "status": "draft",
+                "assignee": {"source": "sender", "text": ""},
+                "confidence": 0.9,
+                "requires_existing_task": True,
+                "reason": "sender claims an existing task from named owner",
+            },
+        ), patch.object(
+            self.service,
+            "_base_status_task_sources_for_message",
+            return_value=([], current_tasks, current_tasks),
+        ), patch.object(
+            self.service.memory_service,
+            "get_alias_display_name",
+            return_value="王五",
+        ), patch.object(
+            self.service.memory_service,
+            "save_round",
+        ) as save_round, patch.object(
+            self.service.reply_sender,
+            "deliver_reply",
+            return_value={"mode": "tasks", "reply_preview": "ok", "reply_sent": False, "artifacts": []},
+        ):
+            result = self.service._handle_llm_task_intent_instruction(
+                message,
+                route_decision=RouteDecision(route="tasks", source="rule", confidence=0.88),
+                workspace_context="[tasks]",
+                active_episode_id=None,
+                task_run_id=None,
+            )
+
+        self.assertEqual(result["mode"], "tasks")
+        analysis = save_round.call_args.kwargs["analysis"]
+        by_title = {task.title: task.owner for task in analysis.tasks}
+        self.assertEqual(by_title["统计任务"], "王五")
+        self.assertEqual(by_title["接口联调"], "李彪")
+        self.assertFalse(any(task.title == "统计任务李彪" for task in analysis.tasks))
+
     def test_llm_summary_path_saves_exact_snapshot(self) -> None:
         analysis = TaskItem(
             title="前端开发",
@@ -876,6 +937,12 @@ class LLMTaskOperationTests(unittest.TestCase):
         ) as plan_workspace, patch.object(
             self.service.llm_service,
             "route_workspace_request",
+            return_value={
+                "route": "unknown",
+                "confidence": 0.3,
+                "needs_clarification": True,
+                "reason": "request is too broad",
+            },
         ) as route_workspace, patch.object(
             self.service.llm_service,
             "resolve_workspace_request",
@@ -897,8 +964,8 @@ class LLMTaskOperationTests(unittest.TestCase):
 
         self.assertTrue(result["pending_confirmation"])
         self.assertEqual(result["confirmation_id"], "confirm_route")
+        route_workspace.assert_called_once_with(message.text)
         plan_workspace.assert_called_once_with("[workspace]", message.text)
-        route_workspace.assert_not_called()
         resolve_workspace_request.assert_not_called()
         create_confirmation.assert_called_once()
         self.assertIn("doc", create_confirmation.call_args.kwargs["options"])
@@ -916,10 +983,10 @@ class LLMTaskOperationTests(unittest.TestCase):
             status="done",
             output_payload={
                 "route": "unknown",
-                "source": "rule",
-                "confidence": 0.4,
+                "source": "llm",
+                "confidence": 0.3,
                 "needs_clarification": True,
-                "reason": "请求较模糊，无法确定要总结、写文档还是生成演示稿。",
+                "reason": "request is too broad",
                 "requested_outputs": [],
             },
         )
@@ -1045,6 +1112,12 @@ class LLMTaskOperationTests(unittest.TestCase):
         ) as plan_workspace, patch.object(
             self.service.llm_service,
             "route_workspace_request",
+            return_value={
+                "route": "unknown",
+                "confidence": 0.35,
+                "needs_clarification": True,
+                "reason": "needs a DAG plan",
+            },
         ) as route_workspace, patch.object(
             self.service.llm_service,
             "resolve_workspace_request",
@@ -1074,8 +1147,8 @@ class LLMTaskOperationTests(unittest.TestCase):
             result = self.service._handle_mentioned_request(message)
 
         self.assertEqual(result["mode"], "slides")
+        route_workspace.assert_called_once_with(message.text)
         plan_workspace.assert_called_once_with("[workspace]", message.text)
-        route_workspace.assert_not_called()
         resolve_workspace.assert_not_called()
         prepare_slides.assert_called_once()
 
@@ -1128,6 +1201,12 @@ class LLMTaskOperationTests(unittest.TestCase):
         ) as plan_workspace, patch.object(
             self.service.llm_service,
             "route_workspace_request",
+            return_value={
+                "route": "unknown",
+                "confidence": 0.4,
+                "needs_clarification": True,
+                "reason": "needs a DAG plan",
+            },
         ) as route_workspace, patch.object(
             self.service.slides_execution,
             "prepare_slides_execution",
@@ -1295,8 +1374,8 @@ class LLMTaskOperationTests(unittest.TestCase):
             result = self.service._handle_mentioned_request(message)
 
         self.assertEqual(result["mode"], "slides")
+        route_workspace.assert_called_once_with(message.text)
         plan_workspace.assert_called_once_with("[workspace]", message.text)
-        route_workspace.assert_not_called()
         resolve_workspace.assert_not_called()
         prepare_slides.assert_called_once()
         prepare_canvas.assert_called_once()

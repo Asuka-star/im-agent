@@ -27,6 +27,54 @@ class RequestRouterTests(unittest.TestCase):
         self.assertEqual(decision.route, "status")
         self.assertEqual(decision.source, "rule")
 
+    def test_exact_task_list_command_skips_llm_router(self) -> None:
+        llm = FakeRouteLLM({"route": "doc", "confidence": 1.0, "reason": "wrong"})
+        decision = self.router.route("任务列表", llm_service=llm)
+
+        self.assertEqual(decision.route, "status")
+        self.assertEqual(decision.source, "rule_exact")
+        self.assertEqual(llm.requests, [])
+
+    def test_task_list_command_with_extra_text_does_not_use_exact_rule(self) -> None:
+        llm = FakeRouteLLM({"route": "status", "confidence": 0.88, "reason": "natural language task query"})
+        decision = self.router.route("任务列表吧", llm_service=llm)
+
+        self.assertEqual(decision.route, "status")
+        self.assertEqual(decision.source, "llm")
+        self.assertEqual(llm.requests, ["任务列表吧"])
+
+    def test_other_exact_task_command_skips_llm_router(self) -> None:
+        llm = FakeRouteLLM({"route": "doc", "confidence": 1.0, "reason": "wrong"})
+        decision = self.router.route("待办清单", llm_service=llm)
+
+        self.assertEqual(decision.route, "status")
+        self.assertEqual(decision.source, "rule_exact")
+        self.assertEqual(llm.requests, [])
+
+    def test_exact_risk_command_skips_llm_router(self) -> None:
+        llm = FakeRouteLLM({"route": "doc", "confidence": 1.0, "reason": "wrong"})
+        decision = self.router.route("风险清单", llm_service=llm)
+
+        self.assertEqual(decision.route, "risks")
+        self.assertEqual(decision.source, "rule_exact")
+        self.assertEqual(llm.requests, [])
+
+    def test_broad_task_query_defers_to_llm_router_when_available(self) -> None:
+        llm = FakeRouteLLM({"route": "status", "confidence": 0.91, "reason": "user asks task status"})
+        decision = self.router.route("现在都有什么任务", llm_service=llm)
+
+        self.assertEqual(decision.route, "status")
+        self.assertEqual(decision.source, "llm")
+        self.assertEqual(llm.requests, ["现在都有什么任务"])
+
+    def test_broad_task_assignment_defers_to_llm_router_when_available(self) -> None:
+        llm = FakeRouteLLM({"route": "tasks", "confidence": 0.89, "reason": "user claims an existing task"})
+        decision = self.router.route("统计任务李彪由我来实现", llm_service=llm)
+
+        self.assertEqual(decision.route, "tasks")
+        self.assertEqual(decision.source, "llm")
+        self.assertEqual(llm.requests, ["统计任务李彪由我来实现"])
+
     def test_fuzzy_task_list_query_routes_to_status(self) -> None:
         decision = self.router.route_by_rule("现在都有什么任务")
 

@@ -124,6 +124,59 @@ class WorkflowReplySenderTests(unittest.TestCase):
         action = next(item for item in message_api.card_calls[0]["card"]["elements"] if item.get("tag") == "action")
         self.assertEqual(action["actions"][0]["url"], "https://demo.example/api/artifacts/canvas/run.html")
 
+    def test_assignment_clarification_uses_resume_option_card(self) -> None:
+        message_api = _FakeMessageAPI()
+        workflow = SimpleNamespace(message_api=message_api)
+        sender = WorkflowReplySender(workflow)
+        message = SimpleNamespace(session_id="session_1", chat_id="chat_1", message_id="om_1")
+
+        sent = sender.send_clarification_card(
+            message,
+            intent="tasks",
+            clarification={
+                "question": "Which task should Bob take?",
+                "reason": "Multiple candidates",
+                "options": ["Bob - Backend development", "Bob - API integration"],
+                "candidates": [
+                    {"title": "Backend development", "owner": "Alice", "status": "draft"},
+                    {"title": "API integration", "owner": "Alice", "status": "draft"},
+                ],
+                "target_status": "draft",
+            },
+            task_run_id="run_1",
+            confirmation_id="confirm_1",
+        )
+
+        self.assertTrue(sent)
+        action = next(item for item in message_api.card_calls[0]["card"]["elements"] if item.get("tag") == "action")
+        self.assertEqual(action["actions"][0]["value"]["action"], "select_clarification_option")
+        self.assertEqual(action["actions"][0]["value"]["payload"]["confirmation_id"], "confirm_1")
+
+    def test_task_candidates_without_target_status_do_not_default_to_done_card(self) -> None:
+        message_api = _FakeMessageAPI()
+        workflow = SimpleNamespace(message_api=message_api)
+        sender = WorkflowReplySender(workflow)
+        message = SimpleNamespace(session_id="session_1", chat_id="chat_1", message_id="om_1")
+
+        sent = sender.send_clarification_card(
+            message,
+            intent="tasks",
+            clarification={
+                "question": "Which task?",
+                "reason": "Candidate list is ambiguous",
+                "options": ["Alice - Backend development"],
+                "candidates": [
+                    {"title": "Backend development", "owner": "Alice", "status": "draft"},
+                ],
+            },
+            task_run_id="run_1",
+            confirmation_id="confirm_1",
+        )
+
+        self.assertTrue(sent)
+        action = next(item for item in message_api.card_calls[0]["card"]["elements"] if item.get("tag") == "action")
+        self.assertEqual(action["actions"][0]["value"]["action"], "select_clarification_option")
+
 
 if __name__ == "__main__":
     unittest.main()

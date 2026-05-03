@@ -6,12 +6,14 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from app.feishu.event_handler import FeishuEventHandler
 from app.schemas.feishu_event import FeishuEventEnvelope, FeishuMessageContext
 from app.services.dedup import MessageDedupService
+from app.services.cards.action_handler import FeishuCardActionService
 from app.services.feishu_workflow import FeishuWorkflowService
 
 
 router = APIRouter()
 event_handler = FeishuEventHandler()
 workflow_service = FeishuWorkflowService()
+card_action_service = FeishuCardActionService(workflow_service)
 dedup_service = MessageDedupService()
 logger = logging.getLogger(__name__)
 
@@ -36,6 +38,15 @@ async def receive_events(request: Request, background_tasks: BackgroundTasks) ->
         logger.warning("Rejected Feishu callback due to invalid verification token")
         raise HTTPException(status_code=403, detail="Invalid Feishu verification token")
 
+    if _is_card_action_event(payload, envelope):
+        background_tasks.add_task(_process_card_action_background, payload)
+        logger.info(
+            "Feishu card callback accepted for background processing: event_id=%s ack_elapsed_ms=%.1f",
+            envelope.header.event_id if envelope.header else None,
+            (time.perf_counter() - started_at) * 1000,
+        )
+        return {"code": 0, "msg": "accepted", "data": {"background": True, "kind": "card_action"}}
+
     raw_message = envelope.event.message if envelope.event else None
     raw_message_id = raw_message.message_id if raw_message else None
     if not dedup_service.accept_for_processing(raw_message_id):
@@ -59,6 +70,30 @@ async def receive_events(request: Request, background_tasks: BackgroundTasks) ->
             "background": True,
         },
     }
+
+
+def _is_card_action_event(payload: dict, envelope: FeishuEventEnvelope) -> bool:
+    event_type = envelope.header.event_type if envelope.header else None
+    event_type_text = str(event_type or payload.get("type") or "").lower()
+    if "card" in event_type_text and "action" in event_type_text:
+        return True
+    event = payload.get("event") if isinstance(payload.get("event"), dict) else {}
+    action = event.get("action") if isinstance(event.get("action"), dict) else {}
+    value = action.get("value") or action.get("form_value") or event.get("value")
+    return isinstance(value, (dict, str)) and "action" in str(value)
+
+
+def _process_card_action_background(payload: dict) -> None:
+    started_at = time.perf_counter()
+    try:
+        result = card_action_service.handle_raw_event(payload)
+        logger.info(
+            "Feishu card action handled: msg=%s elapsed_ms=%.1f",
+            result.get("msg") if isinstance(result, dict) else None,
+            (time.perf_counter() - started_at) * 1000,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to process Feishu card action in background: error=%s", exc)
 
 
 def _process_event_background(envelope: FeishuEventEnvelope, raw_message_id: str | None) -> None:

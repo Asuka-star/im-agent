@@ -233,10 +233,10 @@ class WorkflowTaskIntentExecution:
         text = str(instruction or "").strip()
         if not text:
             return False
+        if route_decision.route == "tasks":
+            return True
         if TaskOperationTool.has_status_update_signal(text) or TaskOperationTool.has_direct_assignment_signal(text):
             return True
-        if route_decision.route != "unknown":
-            return False
         lowered = text.lower()
         first_person = TaskOperationTool.has_first_person_reference(text) or lowered.startswith(
             ("i ", "i'", "i've", "i am ", "i can ", "my ", "me ")
@@ -345,9 +345,51 @@ class WorkflowTaskIntentExecution:
         task_run_id: str | None,
     ) -> dict | None:
         workflow = self.workflow
+        _, _, current_tasks = workflow._base_status_task_sources_for_message(message)
+        actor_names = workflow._sender_actor_names_for_message(message)
+        assignment_update = TaskOperationTool.resolve_assignment_from_intent(
+            current_tasks,
+            intent_result,
+            actor_names=actor_names,
+            source_text=message.text,
+        )
+        clarification = assignment_update.get("clarification")
+        if isinstance(clarification, dict):
+            return workflow._pause_for_clarification(
+                message,
+                intent="tasks",
+                clarification=clarification,
+                active_episode_id=active_episode_id,
+                task_run_id=task_run_id,
+                workspace_context=None,
+                artifacts=[],
+            )
+        if assignment_update.get("updated"):
+            tasks = normalize_task_dates(normalize_tasks(assignment_update["tasks"]))
+            analysis = self._build_local_task_assignment_analysis(
+                message.session_id,
+                tasks,
+                source_text=message.text,
+            )
+            workflow.memory_service.save_round(
+                session_id=message.session_id,
+                analysis=analysis,
+                episode_id=active_episode_id,
+                async_embed=True,
+                preserve_unmatched_previous=False,
+            )
+            reply_preview = workflow.response_formatter.format_analysis_reply(analysis, "tasks")
+            return workflow.reply_sender.deliver_reply(
+                message,
+                "tasks",
+                reply_preview,
+                analysis=analysis,
+                episode_id=active_episode_id,
+            )
+
         incoming_tasks = TaskOperationTool.tasks_from_assignment_intent(
             intent_result,
-            actor_names=workflow._sender_actor_names_for_message(message),
+            actor_names=actor_names,
             source_text=message.text,
         )
         if not incoming_tasks:
@@ -364,7 +406,6 @@ class WorkflowTaskIntentExecution:
                 )
             return None
 
-        _, _, current_tasks = workflow._base_status_task_sources_for_message(message)
         clarification = TaskOperationTool.task_assignment_clarification(current_tasks, incoming_tasks)
         if isinstance(clarification, dict):
             return workflow._pause_for_clarification(

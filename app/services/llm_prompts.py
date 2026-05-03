@@ -159,7 +159,8 @@ Read the current request and workspace task context, then return only the user's
 Schema:
 {{"intent":"task_status_update|task_assignment|task_query|unknown",
 "actor":{{"text":"","source":"sender|literal|mentioned|unknown"}},
-"task_hint":"task title, domain, or work clue",
+"task_hint":"task title or work clue without person names unless the name is part of the task title",
+"target_task":{{"title_hint":"","owner_hint":"","current_owner_hint":""}},
 "status":"done|draft|cancelled|unknown",
 "assignee":{{"text":"","source":"sender|literal|mentioned|tbd|unknown"}},
 "confidence":0.0,
@@ -173,6 +174,9 @@ Rules:
 - If the user says "I/my/me", set actor.source=sender and leave actor.text empty unless a literal name is present.
 - Use task_assignment when the user claims a task, asks for someone to help, or assigns work to another person.
 - For "I will do/own X", set assignee.source=sender.
+- For Chinese patterns like "X 张三由我来做/实现/负责", treat 张三 as target_task.owner_hint or current_owner_hint, not as part of task_hint.
+- For "X 由我来做/实现/负责", set task_hint to X and assignee.source=sender.
+- Keep task_hint concise. Do not concatenate task title with owner or assignee names.
 - For "need someone to help with X", set assignee.source=tbd and assignee.text=TBD.
 - For task list/progress questions, use task_query and do not set status.
 - If task_hint is too vague to match an existing task, set clarification.needed=true.

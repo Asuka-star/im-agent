@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import logging
 import json
+import logging
 from typing import Any
 
 from app.core.config import settings
@@ -33,6 +33,7 @@ class WorkflowReplySender:
         episode_id: int | None = None,
         artifacts: list[dict] | None = None,
         append_next_actions: bool = True,
+        task_run_id: str | None = None,
     ) -> dict:
         workflow = self.workflow
         reply_sent = False
@@ -65,6 +66,7 @@ class WorkflowReplySender:
                         mode=mode,
                         reply_preview=reply_preview,
                         artifacts=artifacts,
+                        task_run_id=task_run_id,
                     )
                 except Exception as exc:  # noqa: BLE001
                     reply_card_error = str(exc)
@@ -90,15 +92,86 @@ class WorkflowReplySender:
         mode: str,
         reply_preview: str | None,
         artifacts: list[dict],
+        task_run_id: str | None = None,
     ) -> bool:
         if not message.chat_id:
             return False
+        checks: list[dict] = []
+        if hasattr(self.workflow, "status_execution"):
+            title = (
+                self.workflow._task_run_title(message.text, mode)
+                if hasattr(self.workflow, "_task_run_title")
+                else mode
+            )
+            detail = self.workflow.status_execution.synthetic_task_run_detail_for_message(message).model_copy(
+                update={
+                    "task_run_id": task_run_id or f"synthetic_{getattr(message, 'message_id', None) or message.session_id}",
+                    "intent": mode,
+                    "title": title,
+                    "latest_reply_preview": reply_preview,
+                    "artifacts": self.artifact_records_from_payloads(artifacts or []),
+                }
+            )
+            checks = [
+                item.model_dump() if hasattr(item, "model_dump") else item
+                for item in self.artifact_verifier.build_for_task_run(detail)
+            ]
         card = self.card_builder.build_artifact_card(
             title="AI 协作产物已生成",
             mode=mode,
             artifacts=artifacts,
             summary=reply_preview,
+            task_run_id=task_run_id,
+            source_message_id=getattr(message, "message_id", None),
+            session_id=message.session_id,
+            checks=checks,
         )
+        if card is None:
+            return False
+        self.workflow.message_api.send_interactive_message(
+            message.chat_id,
+            card,
+            receive_id_type="chat_id",
+        )
+        return True
+
+    def send_clarification_card(
+        self,
+        message: FeishuMessageContext,
+        *,
+        intent: str,
+        clarification: dict,
+        task_run_id: str | None = None,
+        confirmation_id: str | None = None,
+    ) -> bool:
+        if not message.chat_id:
+            return False
+        candidates = clarification.get("candidates") if isinstance(clarification.get("candidates"), list) else []
+        raw_target_status = clarification.get("target_status") or clarification.get("status")
+        target_status = str(raw_target_status or "").strip().lower()
+        status_confirmation = target_status.strip().lower() in {"done", "cancelled", "canceled"}
+        if intent == "tasks" and candidates and status_confirmation:
+            card = self.card_builder.build_task_confirmation_card(
+                session_id=message.session_id,
+                task_run_id=task_run_id,
+                source_message_id=message.message_id,
+                question=str(clarification.get("question") or "请确认任务更新"),
+                reason=str(clarification.get("reason") or ""),
+                candidates=candidates,
+                target_status=target_status,
+                confirmation_id=confirmation_id,
+            )
+        else:
+            options = clarification.get("options") if isinstance(clarification.get("options"), list) else []
+            card = self.card_builder.build_clarification_card(
+                session_id=message.session_id,
+                task_run_id=task_run_id,
+                source_message_id=message.message_id,
+                question=str(clarification.get("question") or "请确认下一步"),
+                reason=str(clarification.get("reason") or ""),
+                options=[str(item) for item in options],
+                confirmation_id=confirmation_id,
+            )
         if card is None:
             return False
         self.workflow.message_api.send_interactive_message(

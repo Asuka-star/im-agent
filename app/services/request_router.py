@@ -19,13 +19,33 @@ class RouteDecision:
     needs_clarification: bool = False
     reason: str = ""
     requested_outputs: tuple[str, ...] = ()
-    defer_to_llm: bool = False
 
 
 class RequestRouter:
     """Routes high-frequency collaboration requests before deep LLM planning."""
 
     ROUTES = {"status", "summary", "tasks", "risks", "doc", "slides", "canvas", "help", "unknown"}
+    EXACT_ROUTE_COMMANDS = {
+        "任务列表": "status",
+        "任务清单": "status",
+        "待办列表": "status",
+        "待办清单": "status",
+        "当前任务": "status",
+        "当前待办": "status",
+        "查看任务": "status",
+        "查询任务": "status",
+        "任务进度": "status",
+        "当前进度": "status",
+        "风险列表": "risks",
+        "风险清单": "risks",
+        "当前风险": "risks",
+        "风险项": "risks",
+        "帮助": "help",
+        "使用说明": "help",
+        "你能做什么": "help",
+        "能做什么": "help",
+        "help": "help",
+    }
 
     HELP_KEYWORDS = ("怎么用", "你能做什么", "能做什么", "help", "帮助", "使用说明")
     DOC_KEYWORDS = (
@@ -185,9 +205,11 @@ class RequestRouter:
     LOW_CONFIDENCE_THRESHOLD = 0.45
 
     def route(self, instruction: str, *, llm_service: Any | None = None) -> RouteDecision:
+        exact_decision = self.route_by_exact_rule(instruction)
+        if exact_decision is not None:
+            return exact_decision
+
         rule_decision = self.route_by_rule(instruction)
-        if rule_decision is not None and (not rule_decision.needs_clarification or not rule_decision.defer_to_llm):
-            return rule_decision
 
         if llm_service is not None and getattr(llm_service, "is_configured", lambda: False)():
             try:
@@ -208,6 +230,22 @@ class RequestRouter:
                 reason="请求目标不明确，需要先确认要输出的产物。",
             )
         return RouteDecision(route="unknown", source="fallback", confidence=0.0, reason="未命中规则路由。")
+
+    def route_by_exact_rule(self, instruction: str) -> RouteDecision | None:
+        text = (instruction or "").strip()
+        if not text:
+            return RouteDecision(route="help", source="rule_exact", confidence=1.0, reason="空请求，展示帮助。")
+        route = self.EXACT_ROUTE_COMMANDS.get(text)
+        if route is None:
+            route = self.EXACT_ROUTE_COMMANDS.get(text.lower())
+        if route is None:
+            return None
+        return RouteDecision(
+            route=route,
+            source="rule_exact",
+            confidence=1.0,
+            reason=f"用户发送固定短命令：{text}",
+        )
 
     def route_by_rule(self, instruction: str) -> RouteDecision | None:
         text = (instruction or "").strip()
@@ -240,7 +278,6 @@ class RequestRouter:
                 confidence=0.42,
                 needs_clarification=True,
                 reason="用户指出了产物和局部范围，但没有明确要删除、移动、改写还是补充。",
-                defer_to_llm=True,
             )
 
         requested_outputs = self._requested_outputs(

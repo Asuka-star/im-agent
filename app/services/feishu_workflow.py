@@ -182,7 +182,7 @@ class FeishuWorkflowService:
     def _route_request(self, instruction: str) -> RouteDecision:
         return self.request_router.route(
             instruction,
-            llm_service=None,
+            llm_service=self.llm_service,
         )
 
     def _should_run_dag_planner(self, route_decision: RouteDecision) -> bool:
@@ -192,7 +192,7 @@ class FeishuWorkflowService:
             return True
         if len(route_decision.requested_outputs) > 1:
             return True
-        return route_decision.source != "rule"
+        return False
 
     def _route_decision_from_dag_result(
         self,
@@ -925,7 +925,20 @@ class FeishuWorkflowService:
             episode_id=active_episode_id,
             artifacts=artifacts,
             append_next_actions=False,
+            task_run_id=task_run_id,
         )
+        if settings.feishu_reply_enabled and settings.feishu_reply_card_enabled:
+            try:
+                result["reply_card_sent"] = self.reply_sender.send_clarification_card(
+                    message,
+                    intent=intent or "help",
+                    clarification=clarification,
+                    task_run_id=task_run_id,
+                    confirmation_id=confirmation_id,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Failed to send Feishu clarification card")
+                result["reply_card_error"] = str(exc)
         result["pending_confirmation"] = True
         if confirmation_id:
             result["confirmation_id"] = confirmation_id

@@ -41,3 +41,17 @@ class FeishuMessageAPI:
                 "content": json.dumps(card, ensure_ascii=False),
             },
         )
+
+    def update_message(self, message_id: str, content: dict, *, msg_type: str = "interactive") -> dict:
+        access_token = self.auth_service.get_tenant_access_token()
+        return self.client.patch_json(
+            f"/open-apis/im/v1/messages/{message_id}",
+            headers={"Authorization": f"Bearer {access_token}"},
+            json={
+                "msg_type": msg_type,
+                "content": json.dumps(content, ensure_ascii=False),
+            },
+        )
+
+    def patch_card(self, message_id: str, card: dict) -> dict:
+        return self.update_message(message_id, card, msg_type="interactive")

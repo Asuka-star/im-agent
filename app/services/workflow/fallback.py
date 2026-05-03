@@ -118,6 +118,7 @@ class WorkflowFallbackHandler:
             analysis=None,
             episode_id=active_episode_id,
             artifacts=[artifact],
+            task_run_id=task_run_id,
         )
         if active_episode_id is not None and workflow._should_close_episode(result, reply_preview):
             workflow.memory_service.close_active_episode(message.session_id, title="slides")
@@ -153,6 +154,7 @@ class WorkflowFallbackHandler:
             analysis=None,
             episode_id=active_episode_id,
             artifacts=step_result.get("artifacts", []),
+            task_run_id=task_run_id,
         )
         if active_episode_id is not None and workflow._should_close_episode(result, str(step_result.get("reply_preview") or "")):
             workflow.memory_service.close_active_episode(message.session_id, title=str(step_result.get("close_title") or "canvas"))
@@ -203,6 +205,7 @@ class WorkflowFallbackHandler:
             analysis=analysis,
             episode_id=active_episode_id,
             artifacts=[artifact],
+            task_run_id=task_run_id,
         )
         if active_episode_id is not None and workflow._should_close_episode(result, reply_preview):
             workflow.memory_service.close_active_episode(message.session_id, title=str(package.get("title") or "doc"))
