@@ -57,6 +57,17 @@ class ResponseFormatter:
         lines.append("你可以在工作台里直接确认，或继续回复我更具体的要求。")
         return "\n".join(lines)
 
+    def format_task_status_update_reply(self, task: Any, status: str) -> str:
+        status_label = {
+            "done": "已完成",
+            "cancelled": "已取消",
+            "canceled": "已取消",
+        }.get(str(status or "").strip().lower(), str(status or "").strip() or "已更新")
+        owner = str(getattr(task, "owner", "") or "TBD").strip()
+        title = str(getattr(task, "title", "") or "未命名任务").strip()
+        lines = ["【任务状态已更新】", f"- {owner} - {title}：{status_label}"]
+        return "\n".join(lines)
+
     def format_doc_reply(self, package: dict, sync_lines: list[str]) -> str:
         sections = package.get("sections") if isinstance(package.get("sections"), list) else []
         title = str(package.get("title") or "协同文档").strip()

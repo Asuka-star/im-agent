@@ -15,6 +15,7 @@ from app.services.tools.doc_tool import DocTool, DocumentSyncResult
 from app.services.tools.task_operation_tool import TaskOperationTool
 from app.services.office_artifact_service import OfficeArtifactService
 from app.services.session_document_service import SessionDocumentService
+from app.services.text_analysis import extract_tasks, normalize_tasks
 
 
 class _MemoryStateService:
@@ -108,6 +109,22 @@ class DocSyncTests(unittest.TestCase):
         self.assertTrue(any(task.title == "后端开发" and task.owner == "张三" for task in merged))
         self.assertTrue(any(task.title == "前端开发" and task.owner == "张三" for task in merged))
 
+    def test_fresh_status_snapshot_overrides_document_task_status(self) -> None:
+        from app.services.workflow.document_tasks import merge_status_task_sources
+
+        document_tasks = [
+            TaskItem(title="后端开发", owner="张三", priority="medium", due_date="TBD", status="draft", notes="文档快照")
+        ]
+        memory_tasks = [
+            TaskItem(title="后端开发", owner="张三", priority="medium", due_date="TBD", status="done", notes="状态更新")
+        ]
+
+        merged = merge_status_task_sources(document_tasks, memory_tasks)
+
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0].status, "done")
+        self.assertEqual(merged[0].notes, "状态更新")
+
     def test_update_current_tasks_from_discussion_prefers_explicit_new_assignment(self) -> None:
         current_tasks = [
             TaskItem(
@@ -135,6 +152,169 @@ class DocSyncTests(unittest.TestCase):
         self.assertTrue(any(task.title == "后端开发" and task.owner == "张三" for task in updated))
         self.assertTrue(any(task.title == "前端开发" and task.owner == "李四" for task in updated))
         self.assertTrue(any(task.title == "前端开发" and task.owner == "张三" for task in updated))
+
+    def test_update_current_tasks_from_discussion_claims_existing_tbd_task(self) -> None:
+        current_tasks = [
+            TaskItem(title="API integration", owner="TBD", priority="medium", due_date="TBD", status="draft", notes="")
+        ]
+        llm_tasks = [
+            TaskItem(
+                title="API integration",
+                owner="Alice",
+                priority="medium",
+                due_date="TBD",
+                status="draft",
+                notes="Alice claims it",
+            )
+        ]
+
+        updated = TaskOperationTool.update_current_tasks_from_discussion(
+            current_tasks,
+            "Alice can take the API integration work",
+            llm_tasks=llm_tasks,
+        )
+
+        self.assertEqual(len(updated), 1)
+        self.assertEqual(updated[0].owner, "Alice")
+
+    def test_short_ascii_task_title_does_not_match_inside_another_word(self) -> None:
+        current_tasks = [
+            TaskItem(title="AI", owner="Alice", priority="medium", due_date="TBD", status="draft", notes="")
+        ]
+
+        plan = TaskOperationTool.resolve_status_update(
+            current_tasks,
+            "Paid feature completed",
+            actor_names=["Alice"],
+        )
+
+        self.assertTrue(plan["detected"])
+        self.assertFalse(plan["updated"])
+        self.assertEqual(plan["tasks"][0].status, "draft")
+
+    def test_short_ascii_task_title_matches_standalone_token(self) -> None:
+        current_tasks = [
+            TaskItem(title="AI", owner="Alice", priority="medium", due_date="TBD", status="draft", notes="")
+        ]
+
+        plan = TaskOperationTool.resolve_status_update(
+            current_tasks,
+            "AI completed",
+            actor_names=["Alice"],
+        )
+
+        self.assertTrue(plan["updated"])
+        self.assertEqual(plan["tasks"][0].status, "done")
+
+    def test_status_update_matches_ascii_owner_case_insensitively(self) -> None:
+        current_tasks = [
+            TaskItem(title="API integration", owner="Alice", priority="medium", due_date="TBD", status="draft", notes="")
+        ]
+
+        plan = TaskOperationTool.resolve_status_update(
+            current_tasks,
+            "alice completed the API integration",
+        )
+
+        self.assertTrue(plan["updated"])
+        self.assertEqual(plan["tasks"][0].status, "done")
+
+    def test_status_update_does_not_match_ascii_owner_inside_another_word(self) -> None:
+        current_tasks = [
+            TaskItem(title="AI review", owner="Ali", priority="medium", due_date="TBD", status="draft", notes="")
+        ]
+
+        plan = TaskOperationTool.resolve_status_update(
+            current_tasks,
+            "Alice completed the AI review",
+        )
+
+        self.assertTrue(plan["detected"])
+        self.assertFalse(plan["updated"])
+        self.assertEqual(plan["tasks"][0].status, "draft")
+
+    def test_status_update_marks_single_owner_task_done_without_dirty_task(self) -> None:
+        current_tasks = [
+            TaskItem(
+                title="后端开发",
+                owner="张三",
+                priority="high",
+                due_date="2026-04-30",
+                status="draft",
+                notes="张三4月30号之前搞定后端",
+            )
+        ]
+
+        updated = TaskOperationTool.update_current_tasks_from_discussion(
+            current_tasks,
+            "张三的任务完成了",
+            llm_tasks=[],
+        )
+
+        self.assertEqual(len(updated), 1)
+        self.assertEqual(updated[0].title, "后端开发")
+        self.assertEqual(updated[0].owner, "张三")
+        self.assertEqual(updated[0].status, "done")
+
+    def test_first_person_status_update_uses_sender_alias_to_pick_owner(self) -> None:
+        current_tasks = [
+            TaskItem(title="后端开发", owner="张三", priority="medium", due_date="TBD", status="draft", notes=""),
+            TaskItem(title="后端开发", owner="李四", priority="medium", due_date="TBD", status="draft", notes=""),
+        ]
+
+        plan = TaskOperationTool.resolve_status_update(
+            current_tasks,
+            "我已完成后端开发任务",
+            actor_names=["张三"],
+        )
+
+        self.assertTrue(plan["updated"])
+        self.assertEqual(plan["tasks"][0].status, "done")
+        self.assertEqual(plan["tasks"][1].status, "draft")
+
+    def test_first_person_status_update_does_not_update_other_owner_when_sender_has_no_matching_task(self) -> None:
+        current_tasks = [
+            TaskItem(title="前端开发", owner="张三", priority="medium", due_date="TBD", status="draft", notes=""),
+            TaskItem(title="后端开发", owner="李四", priority="medium", due_date="TBD", status="draft", notes=""),
+        ]
+
+        plan = TaskOperationTool.resolve_status_update(
+            current_tasks,
+            "我已完成后端开发任务",
+            actor_names=["张三"],
+        )
+
+        self.assertTrue(plan["detected"])
+        self.assertFalse(plan["updated"])
+        self.assertIn("clarification", plan)
+        self.assertTrue(all(task.status == "draft" for task in plan["tasks"]))
+
+    def test_unassigned_help_request_stays_draft_task_not_done(self) -> None:
+        tasks = normalize_tasks(extract_tasks("需要有人来帮我完成后端开发任务"))
+
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(tasks[0].title, "后端开发")
+        self.assertEqual(tasks[0].owner, "TBD")
+        self.assertEqual(tasks[0].status, "draft")
+        self.assertFalse(TaskOperationTool.has_status_update_signal("需要有人来帮我完成后端开发任务"))
+
+    def test_ambiguous_status_update_does_not_create_dirty_task(self) -> None:
+        current_tasks = [
+            TaskItem(title="后端开发", owner="张三", priority="medium", due_date="TBD", status="draft", notes=""),
+            TaskItem(title="接口联调", owner="张三", priority="medium", due_date="TBD", status="draft", notes=""),
+        ]
+
+        updated = TaskOperationTool.update_current_tasks_from_discussion(
+            current_tasks,
+            "张三的任务完成了",
+            llm_tasks=[],
+        )
+
+        self.assertEqual(len(updated), 2)
+        self.assertTrue(all(task.status == "draft" for task in updated))
+        plan = TaskOperationTool.resolve_status_update(current_tasks, "张三的任务完成了")
+        self.assertTrue(plan["detected"])
+        self.assertIn("clarification", plan)
 
     def test_merge_current_tasks_can_drop_removed_items_when_snapshot_is_exact(self) -> None:
         previous_tasks = [

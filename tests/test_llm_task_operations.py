@@ -96,6 +96,621 @@ class LLMTaskOperationTests(unittest.TestCase):
         self.assertEqual(len(result), 2)
         self.assertTrue(any(task.title == "前端开发" and task.owner == "李四" for task in result))
 
+    def test_pending_completion_updates_existing_task_instead_of_extracting_dirty_task(self) -> None:
+        message = SimpleNamespace(session_id="s1", message_id="m_status", chat_type="group")
+        base_tasks = [
+            TaskItem(title="后端开发", owner="张三", priority="medium", due_date="TBD", status="draft", notes="")
+        ]
+        episode = SimpleNamespace(id=10)
+        with patch.object(self.service.memory_service, "get_active_episode", return_value=episode), patch.object(
+            self.service.memory_service,
+            "get_episode_messages",
+            return_value=[SimpleNamespace(content="张三的任务完成了")],
+        ), patch.object(self.service.llm_service, "extract_collaboration") as extract_collaboration:
+            pending_tasks = self.service._pending_discussion_tasks_for_message(message, base_tasks=base_tasks)
+
+        self.assertEqual(len(pending_tasks), 1)
+        self.assertEqual(pending_tasks[0].title, "后端开发")
+        self.assertEqual(pending_tasks[0].status, "done")
+        extract_collaboration.assert_not_called()
+
+    def test_ambiguous_pending_completion_is_not_extracted_as_new_task(self) -> None:
+        message = SimpleNamespace(session_id="s1", message_id="m_status", chat_type="group")
+        base_tasks = [
+            TaskItem(title="后端开发", owner="张三", priority="medium", due_date="TBD", status="draft", notes=""),
+            TaskItem(title="接口联调", owner="张三", priority="medium", due_date="TBD", status="draft", notes=""),
+        ]
+        episode = SimpleNamespace(id=10)
+        with patch.object(self.service.memory_service, "get_active_episode", return_value=episode), patch.object(
+            self.service.memory_service,
+            "get_episode_messages",
+            return_value=[SimpleNamespace(content="张三的任务完成了")],
+        ), patch.object(self.service.llm_service, "extract_collaboration") as extract_collaboration:
+            pending_tasks = self.service._pending_discussion_tasks_for_message(message, base_tasks=base_tasks)
+
+        self.assertEqual(pending_tasks, [])
+        extract_collaboration.assert_not_called()
+
+    def test_pending_first_person_completion_uses_message_sender_alias(self) -> None:
+        message = SimpleNamespace(session_id="s1", message_id="m_status", chat_type="group")
+        base_tasks = [
+            TaskItem(title="后端开发", owner="张三", priority="medium", due_date="TBD", status="draft", notes=""),
+            TaskItem(title="后端开发", owner="李四", priority="medium", due_date="TBD", status="draft", notes=""),
+        ]
+        episode = SimpleNamespace(id=10)
+
+        def alias_lookup(_session_id: str, identifier: str | None) -> str | None:
+            return "张三" if identifier == "sender_zhang" else None
+
+        with patch.object(self.service.memory_service, "get_active_episode", return_value=episode), patch.object(
+            self.service.memory_service,
+            "get_episode_messages",
+            return_value=[SimpleNamespace(content="我已完成后端开发任务", sender_id="sender_zhang")],
+        ), patch.object(
+            self.service.memory_service,
+            "get_alias_display_name",
+            side_effect=alias_lookup,
+        ), patch.object(self.service.llm_service, "extract_collaboration") as extract_collaboration:
+            pending_tasks = self.service._pending_discussion_tasks_for_message(message, base_tasks=base_tasks)
+
+        self.assertEqual(len(pending_tasks), 2)
+        self.assertEqual(pending_tasks[0].owner, "张三")
+        self.assertEqual(pending_tasks[0].status, "done")
+        self.assertEqual(pending_tasks[1].owner, "李四")
+        self.assertEqual(pending_tasks[1].status, "draft")
+        extract_collaboration.assert_not_called()
+
+    def test_local_unassigned_help_request_creates_tbd_task_without_llm(self) -> None:
+        message = SimpleNamespace(
+            session_id="s1",
+            message_id="m_assign",
+            text="需要有人来帮我完成后端开发任务",
+            chat_id="c1",
+            chat_type="group",
+            sender_id="sender_zhang",
+            sender_user_id=None,
+            sender_open_id=None,
+            sender_union_id=None,
+        )
+        with patch.object(
+            self.service,
+            "_base_status_task_sources_for_message",
+            return_value=([], [], []),
+        ), patch.object(
+            self.service.memory_service,
+            "get_alias_display_name",
+            return_value="张三",
+        ), patch.object(
+            self.service.memory_service,
+            "save_round",
+        ) as save_round, patch.object(
+            self.service.reply_sender,
+            "deliver_reply",
+            return_value={"mode": "tasks", "reply_preview": "ok", "reply_sent": False, "artifacts": []},
+        ) as deliver_reply:
+            result = self.service._handle_local_task_assignment_instruction(
+                message,
+                route_decision=RouteDecision(route="tasks", source="rule", confidence=0.88),
+                active_episode_id=None,
+                task_run_id=None,
+            )
+
+        self.assertEqual(result["mode"], "tasks")
+        analysis = save_round.call_args.kwargs["analysis"]
+        self.assertEqual(len(analysis.tasks), 1)
+        self.assertEqual(analysis.tasks[0].title, "后端开发")
+        self.assertEqual(analysis.tasks[0].owner, "TBD")
+        self.assertEqual(analysis.tasks[0].status, "draft")
+        deliver_reply.assert_called_once()
+
+    def test_llm_task_intent_updates_sender_owned_task_with_guardrail(self) -> None:
+        message = SimpleNamespace(
+            session_id="s1",
+            message_id="m_llm_done",
+            text="I wrapped up the API side",
+            chat_id="c1",
+            chat_type="group",
+            sender_id="sender_alice",
+            sender_user_id=None,
+            sender_open_id=None,
+            sender_union_id=None,
+        )
+        current_tasks = [
+            TaskItem(title="API integration", owner="Alice", priority="medium", due_date="TBD", status="draft", notes=""),
+            TaskItem(title="API integration", owner="Bob", priority="medium", due_date="TBD", status="draft", notes=""),
+        ]
+        with patch.object(self.service.llm_service, "is_configured", return_value=True), patch.object(
+            self.service.llm_service,
+            "resolve_task_intent",
+            return_value={
+                "intent": "task_status_update",
+                "actor": {"source": "sender", "text": ""},
+                "task_hint": "API",
+                "status": "done",
+                "assignee": {"source": "unknown", "text": ""},
+                "confidence": 0.91,
+                "requires_existing_task": True,
+                "reason": "completion wording",
+            },
+        ), patch.object(
+            self.service,
+            "_base_status_task_sources_for_message",
+            return_value=([], current_tasks, current_tasks),
+        ), patch.object(
+            self.service.memory_service,
+            "get_alias_display_name",
+            return_value="Alice",
+        ), patch.object(
+            self.service.memory_service,
+            "save_round",
+        ) as save_round, patch.object(
+            self.service.reply_sender,
+            "deliver_reply",
+            return_value={"mode": "tasks", "reply_preview": "ok", "reply_sent": False, "artifacts": []},
+        ):
+            result = self.service._handle_llm_task_intent_instruction(
+                message,
+                route_decision=RouteDecision(route="unknown", source="fallback", confidence=0.0),
+                workspace_context="[tasks]",
+                active_episode_id=None,
+                task_run_id=None,
+            )
+
+        self.assertEqual(result["mode"], "tasks")
+        analysis = save_round.call_args.kwargs["analysis"]
+        by_owner = {task.owner: task.status for task in analysis.tasks}
+        self.assertEqual(by_owner["Alice"], "done")
+        self.assertEqual(by_owner["Bob"], "draft")
+
+    def test_llm_task_intent_clarifies_when_sender_has_no_matching_task(self) -> None:
+        message = SimpleNamespace(
+            session_id="s1",
+            message_id="m_llm_done_no_match",
+            text="I wrapped up the backend work",
+            chat_id="c1",
+            chat_type="group",
+            sender_id="sender_bob",
+            sender_user_id=None,
+            sender_open_id=None,
+            sender_union_id=None,
+        )
+        current_tasks = [
+            TaskItem(title="Backend development", owner="Alice", priority="medium", due_date="TBD", status="draft", notes="")
+        ]
+        with patch.object(self.service.llm_service, "is_configured", return_value=True), patch.object(
+            self.service.llm_service,
+            "resolve_task_intent",
+            return_value={
+                "intent": "task_status_update",
+                "actor": {"source": "sender", "text": ""},
+                "task_hint": "backend",
+                "status": "done",
+                "assignee": {"source": "unknown", "text": ""},
+                "confidence": 0.93,
+                "requires_existing_task": True,
+                "reason": "completion wording",
+            },
+        ), patch.object(
+            self.service,
+            "_base_status_task_sources_for_message",
+            return_value=([], current_tasks, current_tasks),
+        ), patch.object(
+            self.service.memory_service,
+            "get_alias_display_name",
+            return_value="Bob",
+        ), patch.object(
+            self.service,
+            "_pause_for_clarification",
+            return_value={"mode": "tasks", "pending_confirmation": True, "reply_preview": "clarify"},
+        ) as pause_for_clarification, patch.object(
+            self.service.memory_service,
+            "save_round",
+        ) as save_round:
+            result = self.service._handle_llm_task_intent_instruction(
+                message,
+                route_decision=RouteDecision(route="unknown", source="fallback", confidence=0.0),
+                workspace_context="[tasks]",
+                active_episode_id=None,
+                task_run_id=None,
+            )
+
+        self.assertTrue(result["pending_confirmation"])
+        pause_for_clarification.assert_called_once()
+        save_round.assert_not_called()
+
+    def test_llm_task_intent_does_not_match_backend_to_frontend_by_common_suffix(self) -> None:
+        message = SimpleNamespace(
+            session_id="s1",
+            message_id="m_llm_done_suffix",
+            text="I wrapped up the backend work",
+            chat_id="c1",
+            chat_type="group",
+            sender_id="sender_bob",
+            sender_user_id=None,
+            sender_open_id=None,
+            sender_union_id=None,
+        )
+        current_tasks = [
+            TaskItem(title="Frontend development", owner="Bob", priority="medium", due_date="TBD", status="draft", notes="")
+        ]
+        with patch.object(self.service.llm_service, "is_configured", return_value=True), patch.object(
+            self.service.llm_service,
+            "resolve_task_intent",
+            return_value={
+                "intent": "task_status_update",
+                "actor": {"source": "sender", "text": ""},
+                "task_hint": "backend",
+                "status": "done",
+                "assignee": {"source": "unknown", "text": ""},
+                "confidence": 0.93,
+                "requires_existing_task": True,
+                "reason": "completion wording",
+            },
+        ), patch.object(
+            self.service,
+            "_base_status_task_sources_for_message",
+            return_value=([], current_tasks, current_tasks),
+        ), patch.object(
+            self.service.memory_service,
+            "get_alias_display_name",
+            return_value="Bob",
+        ), patch.object(
+            self.service,
+            "_pause_for_clarification",
+            return_value={"mode": "tasks", "pending_confirmation": True, "reply_preview": "clarify"},
+        ) as pause_for_clarification, patch.object(
+            self.service.memory_service,
+            "save_round",
+        ) as save_round:
+            result = self.service._handle_llm_task_intent_instruction(
+                message,
+                route_decision=RouteDecision(route="unknown", source="fallback", confidence=0.0),
+                workspace_context="[tasks]",
+                active_episode_id=None,
+                task_run_id=None,
+            )
+
+        self.assertTrue(result["pending_confirmation"])
+        pause_for_clarification.assert_called_once()
+        save_round.assert_not_called()
+
+    def test_llm_task_intent_does_not_match_short_ai_inside_paid(self) -> None:
+        message = SimpleNamespace(
+            session_id="s1",
+            message_id="m_llm_done_ai",
+            text="I wrapped up the AI task",
+            chat_id="c1",
+            chat_type="group",
+            sender_id="sender_alice",
+            sender_user_id=None,
+            sender_open_id=None,
+            sender_union_id=None,
+        )
+        current_tasks = [
+            TaskItem(title="Paid feature rollout", owner="Alice", priority="medium", due_date="TBD", status="draft", notes="")
+        ]
+        with patch.object(self.service.llm_service, "is_configured", return_value=True), patch.object(
+            self.service.llm_service,
+            "resolve_task_intent",
+            return_value={
+                "intent": "task_status_update",
+                "actor": {"source": "sender", "text": ""},
+                "task_hint": "AI",
+                "status": "done",
+                "assignee": {"source": "unknown", "text": ""},
+                "confidence": 0.93,
+                "requires_existing_task": True,
+                "reason": "completion wording",
+            },
+        ), patch.object(
+            self.service,
+            "_base_status_task_sources_for_message",
+            return_value=([], current_tasks, current_tasks),
+        ), patch.object(
+            self.service.memory_service,
+            "get_alias_display_name",
+            return_value="Alice",
+        ), patch.object(
+            self.service,
+            "_pause_for_clarification",
+            return_value={"mode": "tasks", "pending_confirmation": True, "reply_preview": "clarify"},
+        ) as pause_for_clarification, patch.object(
+            self.service.memory_service,
+            "save_round",
+        ) as save_round:
+            result = self.service._handle_llm_task_intent_instruction(
+                message,
+                route_decision=RouteDecision(route="unknown", source="fallback", confidence=0.0),
+                workspace_context="[tasks]",
+                active_episode_id=None,
+                task_run_id=None,
+            )
+
+        self.assertTrue(result["pending_confirmation"])
+        pause_for_clarification.assert_called_once()
+        save_round.assert_not_called()
+
+    def test_llm_task_intent_allows_short_ascii_token_match(self) -> None:
+        message = SimpleNamespace(
+            session_id="s1",
+            message_id="m_llm_done_ai_token",
+            text="I wrapped up the AI task",
+            chat_id="c1",
+            chat_type="group",
+            sender_id="sender_alice",
+            sender_user_id=None,
+            sender_open_id=None,
+            sender_union_id=None,
+        )
+        current_tasks = [
+            TaskItem(title="AI model evaluation", owner="Alice", priority="medium", due_date="TBD", status="draft", notes="")
+        ]
+        with patch.object(self.service.llm_service, "is_configured", return_value=True), patch.object(
+            self.service.llm_service,
+            "resolve_task_intent",
+            return_value={
+                "intent": "task_status_update",
+                "actor": {"source": "sender", "text": ""},
+                "task_hint": "AI",
+                "status": "done",
+                "assignee": {"source": "unknown", "text": ""},
+                "confidence": 0.93,
+                "requires_existing_task": True,
+                "reason": "completion wording",
+            },
+        ), patch.object(
+            self.service,
+            "_base_status_task_sources_for_message",
+            return_value=([], current_tasks, current_tasks),
+        ), patch.object(
+            self.service.memory_service,
+            "get_alias_display_name",
+            return_value="Alice",
+        ), patch.object(
+            self.service.memory_service,
+            "save_round",
+        ) as save_round, patch.object(
+            self.service.reply_sender,
+            "deliver_reply",
+            return_value={"mode": "tasks", "reply_preview": "ok", "reply_sent": False, "artifacts": []},
+        ):
+            result = self.service._handle_llm_task_intent_instruction(
+                message,
+                route_decision=RouteDecision(route="unknown", source="fallback", confidence=0.0),
+                workspace_context="[tasks]",
+                active_episode_id=None,
+                task_run_id=None,
+            )
+
+        self.assertEqual(result["mode"], "tasks")
+        analysis = save_round.call_args.kwargs["analysis"]
+        self.assertEqual(analysis.tasks[0].status, "done")
+
+    def test_llm_task_intent_does_not_match_single_chinese_character_hint(self) -> None:
+        message = SimpleNamespace(
+            session_id="s1",
+            message_id="m_llm_done_short_cn",
+            text="图做完了",
+            chat_id="c1",
+            chat_type="group",
+            sender_id="sender_alice",
+            sender_user_id=None,
+            sender_open_id=None,
+            sender_union_id=None,
+        )
+        current_tasks = [
+            TaskItem(title="流程图绘制", owner="Alice", priority="medium", due_date="TBD", status="draft", notes="")
+        ]
+        with patch.object(self.service.llm_service, "is_configured", return_value=True), patch.object(
+            self.service.llm_service,
+            "resolve_task_intent",
+            return_value={
+                "intent": "task_status_update",
+                "actor": {"source": "sender", "text": ""},
+                "task_hint": "图",
+                "status": "done",
+                "assignee": {"source": "unknown", "text": ""},
+                "confidence": 0.93,
+                "requires_existing_task": True,
+                "reason": "completion wording",
+            },
+        ), patch.object(
+            self.service,
+            "_base_status_task_sources_for_message",
+            return_value=([], current_tasks, current_tasks),
+        ), patch.object(
+            self.service.memory_service,
+            "get_alias_display_name",
+            return_value="Alice",
+        ), patch.object(
+            self.service,
+            "_pause_for_clarification",
+            return_value={"mode": "tasks", "pending_confirmation": True, "reply_preview": "clarify"},
+        ) as pause_for_clarification, patch.object(
+            self.service.memory_service,
+            "save_round",
+        ) as save_round:
+            result = self.service._handle_llm_task_intent_instruction(
+                message,
+                route_decision=RouteDecision(route="unknown", source="fallback", confidence=0.0),
+                workspace_context="[tasks]",
+                active_episode_id=None,
+                task_run_id=None,
+            )
+
+        self.assertTrue(result["pending_confirmation"])
+        pause_for_clarification.assert_called_once()
+        save_round.assert_not_called()
+
+    def test_llm_task_intent_creates_sender_assignment_candidate(self) -> None:
+        message = SimpleNamespace(
+            session_id="s1",
+            message_id="m_llm_assign",
+            text="I can take the API integration work",
+            chat_id="c1",
+            chat_type="group",
+            sender_id="sender_alice",
+            sender_user_id=None,
+            sender_open_id=None,
+            sender_union_id=None,
+        )
+        with patch.object(self.service.llm_service, "is_configured", return_value=True), patch.object(
+            self.service.llm_service,
+            "resolve_task_intent",
+            return_value={
+                "intent": "task_assignment",
+                "actor": {"source": "sender", "text": ""},
+                "task_hint": "API integration",
+                "status": "draft",
+                "assignee": {"source": "sender", "text": ""},
+                "confidence": 0.9,
+                "requires_existing_task": False,
+                "reason": "claiming task",
+            },
+        ), patch.object(
+            self.service,
+            "_base_status_task_sources_for_message",
+            return_value=([], [], []),
+        ), patch.object(
+            self.service.memory_service,
+            "get_alias_display_name",
+            return_value="Alice",
+        ), patch.object(
+            self.service.memory_service,
+            "save_round",
+        ) as save_round, patch.object(
+            self.service.reply_sender,
+            "deliver_reply",
+            return_value={"mode": "tasks", "reply_preview": "ok", "reply_sent": False, "artifacts": []},
+        ):
+            result = self.service._handle_llm_task_intent_instruction(
+                message,
+                route_decision=RouteDecision(route="unknown", source="fallback", confidence=0.0),
+                workspace_context="[tasks]",
+                active_episode_id=None,
+                task_run_id=None,
+            )
+
+        self.assertEqual(result["mode"], "tasks")
+        analysis = save_round.call_args.kwargs["analysis"]
+        self.assertEqual(len(analysis.tasks), 1)
+        self.assertEqual(analysis.tasks[0].title, "API integration")
+        self.assertEqual(analysis.tasks[0].owner, "Alice")
+        self.assertEqual(analysis.tasks[0].status, "draft")
+
+    def test_llm_task_intent_assignment_claims_existing_tbd_task(self) -> None:
+        message = SimpleNamespace(
+            session_id="s1",
+            message_id="m_llm_assign_tbd",
+            text="I can take the API integration work",
+            chat_id="c1",
+            chat_type="group",
+            sender_id="sender_alice",
+            sender_user_id=None,
+            sender_open_id=None,
+            sender_union_id=None,
+        )
+        current_tasks = [
+            TaskItem(title="API integration", owner="TBD", priority="medium", due_date="TBD", status="draft", notes="")
+        ]
+        with patch.object(self.service.llm_service, "is_configured", return_value=True), patch.object(
+            self.service.llm_service,
+            "resolve_task_intent",
+            return_value={
+                "intent": "task_assignment",
+                "actor": {"source": "sender", "text": ""},
+                "task_hint": "API integration",
+                "status": "draft",
+                "assignee": {"source": "sender", "text": ""},
+                "confidence": 0.9,
+                "requires_existing_task": False,
+                "reason": "claiming task",
+            },
+        ), patch.object(
+            self.service,
+            "_base_status_task_sources_for_message",
+            return_value=([], current_tasks, current_tasks),
+        ), patch.object(
+            self.service.memory_service,
+            "get_alias_display_name",
+            return_value="Alice",
+        ), patch.object(
+            self.service.memory_service,
+            "save_round",
+        ) as save_round, patch.object(
+            self.service.reply_sender,
+            "deliver_reply",
+            return_value={"mode": "tasks", "reply_preview": "ok", "reply_sent": False, "artifacts": []},
+        ):
+            result = self.service._handle_llm_task_intent_instruction(
+                message,
+                route_decision=RouteDecision(route="unknown", source="fallback", confidence=0.0),
+                workspace_context="[tasks]",
+                active_episode_id=None,
+                task_run_id=None,
+            )
+
+        self.assertEqual(result["mode"], "tasks")
+        analysis = save_round.call_args.kwargs["analysis"]
+        self.assertEqual(len(analysis.tasks), 1)
+        self.assertEqual(analysis.tasks[0].owner, "Alice")
+
+    def test_llm_task_intent_assignment_conflict_asks_clarification(self) -> None:
+        message = SimpleNamespace(
+            session_id="s1",
+            message_id="m_llm_assign_conflict",
+            text="I can take the API integration work",
+            chat_id="c1",
+            chat_type="group",
+            sender_id="sender_bob",
+            sender_user_id=None,
+            sender_open_id=None,
+            sender_union_id=None,
+        )
+        current_tasks = [
+            TaskItem(title="API integration", owner="Alice", priority="medium", due_date="TBD", status="draft", notes="")
+        ]
+        with patch.object(self.service.llm_service, "is_configured", return_value=True), patch.object(
+            self.service.llm_service,
+            "resolve_task_intent",
+            return_value={
+                "intent": "task_assignment",
+                "actor": {"source": "sender", "text": ""},
+                "task_hint": "API integration",
+                "status": "draft",
+                "assignee": {"source": "sender", "text": ""},
+                "confidence": 0.9,
+                "requires_existing_task": False,
+                "reason": "claiming task",
+            },
+        ), patch.object(
+            self.service,
+            "_base_status_task_sources_for_message",
+            return_value=([], current_tasks, current_tasks),
+        ), patch.object(
+            self.service.memory_service,
+            "get_alias_display_name",
+            return_value="Bob",
+        ), patch.object(
+            self.service,
+            "_pause_for_clarification",
+            return_value={"mode": "tasks", "pending_confirmation": True, "reply_preview": "clarify"},
+        ) as pause_for_clarification, patch.object(
+            self.service.memory_service,
+            "save_round",
+        ) as save_round:
+            result = self.service._handle_llm_task_intent_instruction(
+                message,
+                route_decision=RouteDecision(route="unknown", source="fallback", confidence=0.0),
+                workspace_context="[tasks]",
+                active_episode_id=None,
+                task_run_id=None,
+            )
+
+        self.assertTrue(result["pending_confirmation"])
+        pause_for_clarification.assert_called_once()
+        save_round.assert_not_called()
+
     def test_llm_summary_path_saves_exact_snapshot(self) -> None:
         analysis = TaskItem(
             title="前端开发",

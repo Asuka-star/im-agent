@@ -7,34 +7,34 @@ from app.schemas.task import TaskItem
 
 def merge_status_task_sources(primary: list, secondary: list) -> list:
     merged: list[TaskItem] = []
-    seen: set[tuple[str, str]] = set()
+    positions: dict[tuple[str, str], int] = {}
     for task in [*(primary or []), *(secondary or [])]:
         title = str(getattr(task, "title", "") if not isinstance(task, dict) else task.get("title") or "").strip()
         owner = str(getattr(task, "owner", "") if not isinstance(task, dict) else task.get("owner") or "").strip()
         if not title:
             continue
         key = (title.lower(), owner.lower())
-        if key in seen:
-            continue
-        seen.add(key)
         if isinstance(task, TaskItem):
-            merged.append(task)
+            normalized = task
         elif isinstance(task, dict):
             try:
-                merged.append(TaskItem.model_validate(task))
+                normalized = TaskItem.model_validate(task)
             except Exception:
                 continue
         else:
-            merged.append(
-                TaskItem(
-                    title=title,
-                    owner=owner or "TBD",
-                    priority=str(getattr(task, "priority", "medium") or "medium"),
-                    due_date=str(getattr(task, "due_date", "TBD") or "TBD"),
-                    status=str(getattr(task, "status", "draft") or "draft"),
-                    notes=str(getattr(task, "notes", "") or ""),
-                )
+            normalized = TaskItem(
+                title=title,
+                owner=owner or "TBD",
+                priority=str(getattr(task, "priority", "medium") or "medium"),
+                due_date=str(getattr(task, "due_date", "TBD") or "TBD"),
+                status=str(getattr(task, "status", "draft") or "draft"),
+                notes=str(getattr(task, "notes", "") or ""),
             )
+        if key in positions:
+            merged[positions[key]] = normalized
+            continue
+        positions[key] = len(merged)
+        merged.append(normalized)
     return merged
 
 def task_items_from_llm_payload(payload: dict) -> list[TaskItem]:

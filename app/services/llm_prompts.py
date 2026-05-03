@@ -150,6 +150,36 @@ Rules:
 - Do not include content payload keys such as doc, slides, canvas, tasks, task_operations, risks, summary, next_actions, or status_answer.
 """.strip()
 
+    def task_intent(self) -> str:
+        return f"""
+You are a narrow task-intent parser for a Feishu collaboration agent.
+Read the current request and workspace task context, then return only the user's task intent candidate.
+{self._json_contract()}
+
+Schema:
+{{"intent":"task_status_update|task_assignment|task_query|unknown",
+"actor":{{"text":"","source":"sender|literal|mentioned|unknown"}},
+"task_hint":"task title, domain, or work clue",
+"status":"done|draft|cancelled|unknown",
+"assignee":{{"text":"","source":"sender|literal|mentioned|tbd|unknown"}},
+"confidence":0.0,
+"requires_existing_task":true,
+"reason":"short reason",
+"clarification":{{"needed":false,"question":"","reason":"","options":[],"blocking":true}}}}
+
+Rules:
+- Do not create or update tasks. Only describe intent candidates.
+- Use task_status_update for implicit completion/cancel expressions such as finished, wrapped up, delivered, no longer needed, or equivalent Chinese wording.
+- If the user says "I/my/me", set actor.source=sender and leave actor.text empty unless a literal name is present.
+- Use task_assignment when the user claims a task, asks for someone to help, or assigns work to another person.
+- For "I will do/own X", set assignee.source=sender.
+- For "need someone to help with X", set assignee.source=tbd and assignee.text=TBD.
+- For task list/progress questions, use task_query and do not set status.
+- If task_hint is too vague to match an existing task, set clarification.needed=true.
+- Prefer unknown over guessing when the request is not about tasks.
+- {self._date_rules()}
+""".strip()
+
     def workspace_request(self) -> str:
         return f"""
 You are the fallback planner for a Feishu collaboration agent.

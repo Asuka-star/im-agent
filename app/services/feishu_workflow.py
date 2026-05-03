@@ -48,6 +48,7 @@ from app.services.workflow.analysis_execution import WorkflowAnalysisExecution
 from app.services.workflow.canvas_execution import WorkflowCanvasExecution
 from app.services.workflow.slides_execution import WorkflowSlidesExecution
 from app.services.workflow.status_execution import WorkflowStatusExecution
+from app.services.workflow.task_intent_execution import WorkflowTaskIntentExecution
 from app.services.text_analysis import (
     apply_discussion_updates,
     build_next_actions,
@@ -97,6 +98,7 @@ class FeishuWorkflowService:
         self.canvas_execution = WorkflowCanvasExecution(self)
         self.slides_execution = WorkflowSlidesExecution(self)
         self.status_execution = WorkflowStatusExecution(self)
+        self.task_intent_execution = WorkflowTaskIntentExecution(self)
         self.entrypoint = WorkflowEntrypoint(self)
         self.doc_execution = WorkflowDocExecution(self)
         self.execution_runner = WorkflowExecutionRunner(self)
@@ -604,6 +606,84 @@ class FeishuWorkflowService:
             return RequestProtocol(operation="unknown", object="workspace", route="unknown")
         return None
 
+    def _handle_task_status_update_instruction(
+        self,
+        message: FeishuMessageContext,
+        *,
+        route_decision: RouteDecision,
+        active_episode_id: int | None,
+        task_run_id: str | None,
+    ) -> dict | None:
+        return self.task_intent_execution.handle_task_status_update_instruction(
+            message,
+            route_decision=route_decision,
+            active_episode_id=active_episode_id,
+            task_run_id=task_run_id,
+        )
+
+    def _handle_local_task_assignment_instruction(
+        self,
+        message: FeishuMessageContext,
+        *,
+        route_decision: RouteDecision,
+        active_episode_id: int | None,
+        task_run_id: str | None,
+    ) -> dict | None:
+        return self.task_intent_execution.handle_local_task_assignment_instruction(
+            message,
+            route_decision=route_decision,
+            active_episode_id=active_episode_id,
+            task_run_id=task_run_id,
+        )
+
+    def _handle_llm_task_intent_instruction(
+        self,
+        message: FeishuMessageContext,
+        *,
+        route_decision: RouteDecision,
+        workspace_context: str,
+        active_episode_id: int | None,
+        task_run_id: str | None,
+    ) -> dict | None:
+        return self.task_intent_execution.handle_llm_task_intent_instruction(
+            message,
+            route_decision=route_decision,
+            workspace_context=workspace_context,
+            active_episode_id=active_episode_id,
+            task_run_id=task_run_id,
+        )
+
+    def _sender_actor_names_for_message(self, message: FeishuMessageContext) -> list[str]:
+        values: list[str] = []
+        for identifier in (
+            getattr(message, "sender_id", None),
+            getattr(message, "sender_user_id", None),
+            getattr(message, "sender_open_id", None),
+            getattr(message, "sender_union_id", None),
+        ):
+            if not identifier:
+                continue
+            try:
+                display_name = self.memory_service.get_alias_display_name(message.session_id, identifier)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to load sender alias for task owner matching: session_id=%s error=%s", message.session_id, exc)
+                display_name = None
+            if display_name and display_name not in values:
+                values.append(display_name)
+        for identifier in (
+            getattr(message, "sender_id", None),
+            getattr(message, "sender_user_id", None),
+            getattr(message, "sender_open_id", None),
+            getattr(message, "sender_union_id", None),
+        ):
+            if identifier and identifier not in values:
+                values.append(identifier)
+        return values
+
+    def _primary_sender_actor_name(self, message: FeishuMessageContext) -> str | None:
+        names = self._sender_actor_names_for_message(message)
+        return names[0] if names else None
+
     def _team_id_for_message(self, message: FeishuMessageContext) -> str:
         return self.memory_service.normalize_team_id(getattr(message, "tenant_key", None))
 
@@ -611,9 +691,25 @@ class FeishuWorkflowService:
         return "\n\n".join(block.strip() for block in blocks if block and block.strip())
 
     def _context_tasks_for_message(self, message: FeishuMessageContext) -> list:
+        document_tasks, memory_tasks, base_tasks = self._base_status_task_sources_for_message(message)
+        pending_tasks = self._pending_discussion_tasks_for_message(message, base_tasks=base_tasks)
+        base_tasks = merge_status_task_sources(document_tasks, memory_tasks) if document_tasks else memory_tasks
+        merged = merge_status_task_sources(base_tasks, pending_tasks)
+        logger.info(
+            "Status task context resolved: session_id=%s document_tasks=%s memory_tasks=%s pending_tasks=%s final_tasks=%s source=%s",
+            message.session_id,
+            len(document_tasks),
+            len(memory_tasks),
+            len(pending_tasks),
+            len(merged),
+            "document" if document_tasks else "memory",
+        )
+        return merged
+
+    def _base_status_task_sources_for_message(self, message: FeishuMessageContext) -> tuple[list[TaskItem], list[TaskItem], list[TaskItem]]:
         document_tasks = self._document_tasks_for_session(message.session_id)
         document_updated_at = self._current_document_updated_at(message.session_id) if document_tasks else None
-        memory_tasks = []
+        memory_tasks: list[TaskItem] = []
         try:
             loaded_memory_tasks = self.memory_service.get_current_tasks(message.session_id)
             memory_tasks = self._filter_memory_tasks_for_status(
@@ -632,19 +728,8 @@ class FeishuWorkflowService:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Failed to load team task snapshot for status context: session_id=%s error=%s", message.session_id, exc)
                 memory_tasks = []
-        pending_tasks = self._pending_discussion_tasks_for_message(message)
         base_tasks = merge_status_task_sources(document_tasks, memory_tasks) if document_tasks else memory_tasks
-        merged = merge_status_task_sources(base_tasks, pending_tasks)
-        logger.info(
-            "Status task context resolved: session_id=%s document_tasks=%s memory_tasks=%s pending_tasks=%s final_tasks=%s source=%s",
-            message.session_id,
-            len(document_tasks),
-            len(memory_tasks),
-            len(pending_tasks),
-            len(merged),
-            "document" if document_tasks else "memory",
-        )
-        return merged
+        return document_tasks, memory_tasks, base_tasks
 
     def _current_document_updated_at(self, session_id: str) -> datetime | None:
         try:
@@ -681,22 +766,14 @@ class FeishuWorkflowService:
         except ValueError:
             return None
 
-    def _pending_discussion_tasks_for_message(self, message: FeishuMessageContext) -> list[TaskItem]:
-        try:
-            active_episode = self.memory_service.get_active_episode(message.session_id)
-            if active_episode is None:
-                return []
-            messages = self.memory_service.get_episode_messages(
-                message.session_id,
-                episode_id=active_episode.id,
-                exclude_message_id=message.message_id,
-                limit=20,
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Failed to load pending discussion tasks for status context: session_id=%s error=%s", message.session_id, exc)
-            return []
-        source_text = "\n".join(str(item.content or "").strip() for item in messages if str(item.content or "").strip())
+    def _pending_discussion_tasks_for_message(self, message: FeishuMessageContext, *, base_tasks: list[TaskItem] | None = None) -> list[TaskItem]:
+        source_text = self._pending_discussion_text_for_message(message)
         if not source_text:
+            return []
+        status_update = TaskOperationTool.resolve_status_update(base_tasks or [], source_text)
+        if status_update.get("updated"):
+            return status_update["tasks"]
+        if status_update.get("detected"):
             return []
         if self.llm_service.is_configured():
             try:
@@ -716,6 +793,47 @@ class FeishuWorkflowService:
                     exc,
                 )
         return normalize_tasks(extract_tasks(source_text))
+
+    def _pending_task_status_update_clarification_for_message(self, message: FeishuMessageContext) -> dict | None:
+        source_text = self._pending_discussion_text_for_message(message)
+        if not source_text:
+            return None
+        _, _, base_tasks = self._base_status_task_sources_for_message(message)
+        status_update = TaskOperationTool.resolve_status_update(base_tasks, source_text)
+        clarification = status_update.get("clarification") if isinstance(status_update, dict) else None
+        return clarification if isinstance(clarification, dict) else None
+
+    def _pending_discussion_text_for_message(self, message: FeishuMessageContext) -> str:
+        try:
+            active_episode = self.memory_service.get_active_episode(message.session_id)
+            if active_episode is None:
+                return ""
+            messages = self.memory_service.get_episode_messages(
+                message.session_id,
+                episode_id=active_episode.id,
+                exclude_message_id=message.message_id,
+                limit=20,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to load pending discussion tasks for status context: session_id=%s error=%s", message.session_id, exc)
+            return ""
+        lines: list[str] = []
+        for item in messages:
+            content = str(item.content or "").strip()
+            if not content:
+                continue
+            actor_name = self._actor_name_for_sender_id(message.session_id, getattr(item, "sender_id", None))
+            lines.append(TaskOperationTool.normalize_first_person_task_text(content, actor_name))
+        return "\n".join(lines)
+
+    def _actor_name_for_sender_id(self, session_id: str, sender_id: str | None) -> str | None:
+        if not sender_id:
+            return None
+        try:
+            return self.memory_service.get_alias_display_name(session_id, sender_id) or sender_id
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to resolve actor name for pending discussion: session_id=%s error=%s", session_id, exc)
+            return sender_id
 
     def _document_tasks_for_session(self, session_id: str) -> list[TaskItem]:
         try:

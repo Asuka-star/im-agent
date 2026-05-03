@@ -27,6 +27,34 @@ class RequestRouterTests(unittest.TestCase):
         self.assertEqual(decision.route, "status")
         self.assertEqual(decision.source, "rule")
 
+    def test_fuzzy_task_list_query_routes_to_status(self) -> None:
+        decision = self.router.route_by_rule("现在都有什么任务")
+
+        self.assertIsNotNone(decision)
+        self.assertEqual(decision.route, "status")
+        self.assertEqual(decision.source, "rule")
+
+    def test_task_completion_statement_routes_to_task_update(self) -> None:
+        decision = self.router.route_by_rule("张三的任务已经完成了")
+
+        self.assertIsNotNone(decision)
+        self.assertEqual(decision.route, "tasks")
+        self.assertEqual(decision.source, "rule")
+
+    def test_first_person_completion_statement_routes_to_task_update(self) -> None:
+        decision = self.router.route_by_rule("我已完成后端开发任务")
+
+        self.assertIsNotNone(decision)
+        self.assertEqual(decision.route, "tasks")
+        self.assertEqual(decision.source, "rule")
+
+    def test_unassigned_help_request_routes_to_tasks(self) -> None:
+        decision = self.router.route_by_rule("需要有人来帮我完成后端开发任务")
+
+        self.assertIsNotNone(decision)
+        self.assertEqual(decision.route, "tasks")
+        self.assertEqual(decision.source, "rule")
+
     def test_doc_artifact_request_routes_to_doc(self) -> None:
         decision = self.router.route_by_rule("你再来总结成文档")
 

@@ -82,6 +82,8 @@ class RequestRouter:
         "当前还有哪些",
         "还有哪些任务",
         "有哪些任务",
+        "有什么任务",
+        "都有什么任务",
         "查看任务",
         "查询任务",
         "任务列表",
@@ -89,6 +91,36 @@ class RequestRouter:
         "待办清单",
     )
     TASK_ANALYSIS_KEYWORDS = ("整理任务", "提取任务", "提取待办", "生成任务", "更新任务", "同步任务")
+    TASK_ASSIGNMENT_KEYWORDS = (
+        "需要有人",
+        "找个人",
+        "找人",
+        "谁来",
+        "谁能",
+        "帮我完成",
+        "我来",
+        "我负责",
+        "我去",
+        "我做",
+        "我处理",
+        "我推进",
+    )
+    TASK_STATUS_UPDATE_KEYWORDS = (
+        "已经完成",
+        "已完成",
+        "完成了",
+        "做完了",
+        "搞定了",
+        "弄完了",
+        "不用做了",
+        "先不做",
+        "不做了",
+        "取消",
+        "done",
+        "completed",
+        "cancelled",
+        "canceled",
+    )
     SUMMARY_KEYWORDS = ("总结", "纪要", "梳理", "回顾", "归纳", "结论")
     RISK_KEYWORDS = ("风险", "阻塞", "卡点", "问题点", "风险项")
     ARTIFACT_OUTPUT_ACTIONS = (
@@ -257,6 +289,9 @@ class RequestRouter:
                 requested_outputs=requested_outputs,
             )
 
+        if self._is_task_status_update_request(text, lowered):
+            return RouteDecision(route="tasks", source="rule", confidence=0.92, reason="用户在更新已有任务状态。")
+
         if self._is_status_request(text, lowered):
             return RouteDecision(route="status", source="rule", confidence=0.95, reason="用户在查询当前协作状态。")
 
@@ -265,6 +300,9 @@ class RequestRouter:
 
         if self._contains_any(text, lowered, self.TASK_ANALYSIS_KEYWORDS):
             return RouteDecision(route="tasks", source="rule", confidence=0.9, reason="用户要求整理或更新任务。")
+
+        if self._is_task_assignment_request(text, lowered):
+            return RouteDecision(route="tasks", source="rule", confidence=0.88, reason="用户在新增或认领协作任务。")
 
         if self._contains_any(text, lowered, self.SUMMARY_KEYWORDS):
             return RouteDecision(route="summary", source="rule", confidence=0.82, reason="用户要求总结讨论。")
@@ -359,6 +397,22 @@ class RequestRouter:
         if self._contains_any(text, lowered, self.STATUS_KEYWORDS):
             return not self._contains_any(text, lowered, self.TASK_ANALYSIS_KEYWORDS)
         return False
+
+    def _is_task_status_update_request(self, text: str, lowered: str) -> bool:
+        if not self._contains_any(text, lowered, self.TASK_STATUS_UPDATE_KEYWORDS):
+            return False
+        return self._contains_any(text, lowered, ("任务", "待办", "负责", "owner", "todo")) or bool(
+            re.search(r"[\u4e00-\u9fa5A-Za-z0-9]{1,12}.+(完成|搞定|做完|done|cancel)", text, flags=re.IGNORECASE)
+        )
+
+    def _is_task_assignment_request(self, text: str, lowered: str) -> bool:
+        if not self._contains_any(text, lowered, self.TASK_ASSIGNMENT_KEYWORDS):
+            return False
+        return self._contains_any(
+            text,
+            lowered,
+            ("任务", "待办", "后端", "前端", "开发", "联调", "接口", "文档", "材料", "demo", "ppt"),
+        )
 
     def _is_artifact_output_request(
         self,

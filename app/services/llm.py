@@ -152,6 +152,33 @@ class LLMService:
         )
         return result
 
+    def resolve_task_intent(self, workspace_context: str, instruction: str) -> dict[str, Any]:
+        self._ensure_configured()
+        payload = self._json_payload(
+            system_prompt=self._task_intent_prompt(),
+            user_content=self._context_request_content(
+                self._compact_planning_context(workspace_context, max_chars=2400),
+                instruction,
+                context_label="task context",
+            ),
+            temperature=0.0,
+        )
+        result = self._chat_json(
+            payload,
+            request_name="resolve_task_intent",
+            timeout_seconds=settings.llm_memory_gate_timeout_seconds,
+        )
+        result = self._sanitize_task_intent_result(result)
+        logger.info(
+            "LLM task intent resolved: intent=%s status=%s confidence=%s hint=%s clarification=%s",
+            result.get("intent"),
+            result.get("status"),
+            result.get("confidence"),
+            result.get("task_hint"),
+            result.get("clarification", {}).get("needed") if isinstance(result.get("clarification"), dict) else None,
+        )
+        return result
+
     def resolve_doc_edit_intent(self, workspace_context: str, instruction: str) -> dict[str, Any]:
         self._ensure_configured()
         payload = self._json_payload(
@@ -364,6 +391,9 @@ class LLMService:
     def _route_prompt(self) -> str:
         return self.prompts.route()
 
+    def _task_intent_prompt(self) -> str:
+        return self.prompts.task_intent()
+
     def _doc_request_prompt(self) -> str:
         return self.prompts.doc_request()
 
@@ -445,6 +475,86 @@ class LLMService:
         if "clarification" in sanitized:
             sanitized["clarification"] = cls._sanitize_clarification(sanitized["clarification"])
         return sanitized
+
+    @classmethod
+    def _sanitize_task_intent_result(cls, result: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(result, dict):
+            return {"intent": "unknown", "confidence": 0.0}
+        intent = cls._normalize_task_intent(result.get("intent") or result.get("action"))
+        status = cls._normalize_task_status(result.get("status"))
+        actor = cls._sanitize_task_party(result.get("actor"), allowed_sources={"sender", "literal", "mentioned", "unknown"})
+        assignee = cls._sanitize_task_party(
+            result.get("assignee"),
+            allowed_sources={"sender", "literal", "mentioned", "tbd", "unknown"},
+        )
+        sanitized = {
+            "intent": intent,
+            "actor": actor,
+            "task_hint": str(result.get("task_hint") or result.get("title") or "").strip()[:120],
+            "status": status,
+            "assignee": assignee,
+            "confidence": cls._normalize_confidence(result.get("confidence")),
+            "requires_existing_task": True if result.get("requires_existing_task") is None else bool(result.get("requires_existing_task")),
+            "reason": str(result.get("reason") or "").strip()[:240],
+        }
+        if "clarification" in result:
+            sanitized["clarification"] = cls._sanitize_clarification(result.get("clarification"))
+        return sanitized
+
+    @staticmethod
+    def _normalize_task_intent(value: Any) -> str:
+        normalized = str(value or "").strip().lower().replace("-", "_")
+        aliases = {
+            "status_update": "task_status_update",
+            "complete_task": "task_status_update",
+            "completion": "task_status_update",
+            "cancel_task": "task_status_update",
+            "assign_task": "task_assignment",
+            "create_task": "task_assignment",
+            "claim_task": "task_assignment",
+            "tasks": "task_query",
+            "status": "task_query",
+            "query": "task_query",
+        }
+        normalized = aliases.get(normalized, normalized)
+        if normalized in {"task_status_update", "task_assignment", "task_query", "unknown"}:
+            return normalized
+        return "unknown"
+
+    @staticmethod
+    def _normalize_task_status(value: Any) -> str:
+        normalized = str(value or "").strip().lower().replace("-", "_")
+        aliases = {
+            "completed": "done",
+            "complete": "done",
+            "finished": "done",
+            "finish": "done",
+            "cancel": "cancelled",
+            "canceled": "cancelled",
+        }
+        normalized = aliases.get(normalized, normalized)
+        if normalized in {"done", "draft", "cancelled", "unknown"}:
+            return normalized
+        return "unknown"
+
+    @staticmethod
+    def _sanitize_task_party(value: Any, *, allowed_sources: set[str]) -> dict[str, str]:
+        payload = value if isinstance(value, dict) else {}
+        source = str(payload.get("source") or "unknown").strip().lower().replace("-", "_")
+        if source not in allowed_sources:
+            source = "unknown"
+        return {
+            "text": str(payload.get("text") or "").strip()[:80],
+            "source": source,
+        }
+
+    @staticmethod
+    def _normalize_confidence(value: Any) -> float:
+        try:
+            confidence = float(value)
+        except (TypeError, ValueError):
+            return 0.0
+        return max(0.0, min(confidence, 1.0))
 
     @staticmethod
     def _sanitize_requested_outputs(value: Any) -> list[str]:

@@ -252,6 +252,34 @@ class WorkflowEntrypoint:
             route_decision.confidence,
             route_decision.needs_clarification,
         )
+        task_status_update_result = workflow.task_intent_execution.handle_task_status_update_instruction(
+            message,
+            route_decision=route_decision,
+            active_episode_id=active_episode_id,
+            task_run_id=task_run_id,
+        )
+        if task_status_update_result is not None:
+            return task_status_update_result
+
+        local_task_assignment_result = workflow.task_intent_execution.handle_local_task_assignment_instruction(
+            message,
+            route_decision=route_decision,
+            active_episode_id=active_episode_id,
+            task_run_id=task_run_id,
+        )
+        if local_task_assignment_result is not None:
+            return local_task_assignment_result
+
+        llm_task_intent_result = workflow.task_intent_execution.handle_llm_task_intent_instruction(
+            message,
+            route_decision=route_decision,
+            workspace_context=base_workspace_context,
+            active_episode_id=active_episode_id,
+            task_run_id=task_run_id,
+        )
+        if llm_task_intent_result is not None:
+            return llm_task_intent_result
+
         preplanned_llm_result: dict | None = None
         if workflow.llm_service.is_configured() and workflow._should_run_dag_planner(route_decision):
             try:

@@ -35,6 +35,17 @@ class WorkflowStatusExecution:
                 "artifacts": [],
                 "close_title": None,
             }
+        clarification = workflow._pending_task_status_update_clarification_for_message(message)
+        if clarification:
+            return {
+                "reply_preview": workflow.response_formatter.format_clarification_reply(
+                    intent="tasks",
+                    clarification=clarification,
+                ),
+                "analysis": None,
+                "artifacts": [],
+                "close_title": None,
+            }
         tasks = workflow._context_tasks_for_message(message)
         payload = workflow._context_payload_for_message(message)
         status_answer = workflow.response_formatter.format_status_reply(message.text, tasks, payload)
