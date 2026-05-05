@@ -7,7 +7,8 @@ from app.schemas.analyze import AgentTrace, AnalyzeResponse
 from app.schemas.feishu_event import FeishuMessageContext
 from app.schemas.task import TaskItem
 from app.schemas.task_run import TaskRunDetail
-from app.services.text_analysis import build_next_actions, infer_risks
+from app.services.text_analysis import build_next_actions, extract_tasks, infer_risks, normalize_tasks
+from app.services.workflow.document_tasks import task_items_from_llm_payload
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,7 @@ class WorkflowStatusExecution:
                 message.session_id,
                 tasks,
                 episode_id=active_episode_id,
+                source_message_id=message.message_id,
             )
         return {
             "reply_preview": status_answer,
@@ -66,10 +68,98 @@ class WorkflowStatusExecution:
         if not self.is_next_action_query(message.text):
             return None
         detail = workflow.task_run_service.get_task_run(task_run_id) if task_run_id else None
+        recent_context = workflow._pending_discussion_text_for_message(message)
+        if recent_context:
+            reply = self.next_action_reply_for_pending_discussion(message, recent_context)
+            if reply:
+                return reply
         if detail is None:
             detail = self.synthetic_task_run_detail_for_message(message)
-        bundle = workflow.next_action_service.build_for_task_run(detail)
-        return workflow.response_formatter.format_next_action_block(bundle) or None
+        bundle = workflow.next_action_service.build_for_task_run(detail, recent_context=recent_context or None)
+        reply = workflow.response_formatter.format_next_action_block(bundle)
+        if reply:
+            return reply
+        tasks = workflow._context_tasks_for_message(message)
+        if not tasks:
+            return None
+        risks = infer_risks(tasks)
+        next_actions = build_next_actions(tasks, risks)
+        return self.format_task_snapshot_next_action_reply(tasks, risks, next_actions)
+
+    def next_action_reply_for_pending_discussion(self, message: FeishuMessageContext, source_text: str) -> str | None:
+        workflow = self.workflow
+        tasks: list[TaskItem] = []
+        risks: list[str] = []
+        next_actions: list[str] = []
+        if workflow.llm_service.is_configured():
+            try:
+                llm_result = workflow.llm_service.extract_collaboration(source_text)
+                tasks = normalize_tasks(task_items_from_llm_payload(llm_result))
+                risks = [str(item).strip() for item in llm_result.get("risks", []) if str(item).strip()]
+                next_actions = [str(item).strip() for item in llm_result.get("next_actions", []) if str(item).strip()]
+                logger.info(
+                    "Next-action query inferred from pending discussion by LLM: session_id=%s tasks=%s risks=%s next_actions=%s",
+                    message.session_id,
+                    len(tasks),
+                    len(risks),
+                    len(next_actions),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "LLM next-action inference failed, falling back to local parser: session_id=%s error=%s",
+                    message.session_id,
+                    exc,
+                )
+        if not tasks:
+            tasks = normalize_tasks(extract_tasks(source_text))
+        if not risks:
+            risks = infer_risks(tasks)
+        if not next_actions:
+            next_actions = build_next_actions(tasks, risks)
+        return self.format_pending_next_action_reply(tasks, risks, next_actions)
+
+    @staticmethod
+    def format_pending_next_action_reply(tasks: list[TaskItem], risks: list[str], next_actions: list[str]) -> str | None:
+        cleaned_actions = [str(item).strip() for item in next_actions if str(item).strip()]
+        cleaned_risks = [str(item).strip() for item in risks if str(item).strip()]
+        if not cleaned_actions and not cleaned_risks and not tasks:
+            return None
+        lines = ["【基于当前讨论的下一步】"]
+        if cleaned_actions:
+            lines.append("建议优先做：")
+            for index, action in enumerate(cleaned_actions[:4], start=1):
+                lines.append(f"{index}. {action}")
+        if cleaned_risks:
+            lines.append("需要留意：")
+            for risk in cleaned_risks[:3]:
+                lines.append(f"- {risk}")
+        if tasks:
+            lines.append("关联任务：")
+            for task in tasks[:5]:
+                lines.append(f"- {task.title} | 负责人：{task.owner} | 截止：{task.due_date} | 状态：{task.status}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def format_task_snapshot_next_action_reply(tasks: list[TaskItem], risks: list[str], next_actions: list[str]) -> str | None:
+        cleaned_actions = [str(item).strip() for item in next_actions if str(item).strip()]
+        cleaned_risks = [str(item).strip() for item in risks if str(item).strip()]
+        if not cleaned_actions and not cleaned_risks:
+            return None
+        lines = ["【基于当前任务的下一步】"]
+        if cleaned_actions:
+            lines.append("建议优先做：")
+            for index, action in enumerate(cleaned_actions[:4], start=1):
+                lines.append(f"{index}. {action}")
+        if cleaned_risks:
+            lines.append("需要留意：")
+            for risk in cleaned_risks[:3]:
+                lines.append(f"- {risk}")
+        if tasks:
+            lines.append("参考任务：")
+            for task in tasks[:5]:
+                lines.append(f"- {task.title} | 负责人：{task.owner} | 截止：{task.due_date} | 状态：{task.status}")
+        return "\n".join(lines)
+
     @staticmethod
     def is_next_action_query(text: str) -> bool:
         query = str(text or "").strip().lower()
@@ -115,6 +205,7 @@ class WorkflowStatusExecution:
         tasks: list,
         *,
         episode_id: int | None,
+        source_message_id: str | None = None,
     ) -> None:
         workflow = self.workflow
         normalized_tasks: list[TaskItem] = []
@@ -142,6 +233,7 @@ class WorkflowStatusExecution:
                 session_id=session_id,
                 analysis=analysis,
                 episode_id=episode_id,
+                source_message_id=source_message_id,
                 embed=False,
                 async_embed=False,
                 preserve_unmatched_previous=False,

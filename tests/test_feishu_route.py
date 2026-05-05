@@ -34,6 +34,7 @@ class FeishuRouteTests(unittest.TestCase):
         fake_handler.parse_event.return_value = self._envelope("om_fast")
         fake_handler.is_url_verification.return_value = False
         fake_handler.verify_token.return_value = True
+        fake_handler.is_message_lifecycle_event.return_value = False
         fake_dedup = Mock()
         fake_dedup.accept_for_processing.return_value = True
 
@@ -56,6 +57,7 @@ class FeishuRouteTests(unittest.TestCase):
         fake_handler.parse_event.return_value = self._envelope("om_duplicate")
         fake_handler.is_url_verification.return_value = False
         fake_handler.verify_token.return_value = True
+        fake_handler.is_message_lifecycle_event.return_value = False
         fake_dedup = Mock()
         fake_dedup.accept_for_processing.return_value = False
 
@@ -104,8 +106,41 @@ class FeishuRouteTests(unittest.TestCase):
         ):
             response = asyncio.run(feishu.receive_events(_CardRequest(), background))
 
+        self.assertEqual(response["toast"]["type"], "info")
+        self.assertIn("background", response["toast"]["i18n"]["en_us"])
+        self.assertEqual(len(background.tasks), 1)
+        fake_dedup.accept_for_processing.assert_not_called()
+
+    def test_receive_events_schedules_message_lifecycle_without_message_dedup(self) -> None:
+        background = _FakeBackgroundTasks()
+        fake_handler = Mock()
+        fake_handler.parse_event.return_value = SimpleNamespace(
+            type=None,
+            challenge=None,
+            header=SimpleNamespace(event_type="im.message.recalled_v1", event_id="evt_recall"),
+            event=None,
+        )
+        fake_handler.is_url_verification.return_value = False
+        fake_handler.verify_token.return_value = True
+        fake_handler.is_message_lifecycle_event.return_value = True
+        fake_dedup = Mock()
+
+        class _RecallRequest:
+            async def json(self) -> dict:
+                return {
+                    "header": {"event_type": "im.message.recalled_v1", "event_id": "evt_recall"},
+                    "event": {"message_id": "om_recalled", "chat_id": "oc_demo"},
+                }
+
+        with patch.object(feishu, "event_handler", fake_handler), patch.object(
+            feishu,
+            "dedup_service",
+            fake_dedup,
+        ):
+            response = asyncio.run(feishu.receive_events(_RecallRequest(), background))
+
         self.assertEqual(response["msg"], "accepted")
-        self.assertEqual(response["data"]["kind"], "card_action")
+        self.assertEqual(response["data"]["kind"], "message_lifecycle")
         self.assertEqual(len(background.tasks), 1)
         fake_dedup.accept_for_processing.assert_not_called()
 

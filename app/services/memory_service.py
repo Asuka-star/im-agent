@@ -20,6 +20,7 @@ class MemoryService:
     """Stores discussion history, active episodes, task snapshots, and memory context."""
 
     TEAM_GROUP_SESSIONS_KEY_PREFIX = "team_group_sessions"
+    SOURCE_DIRTY_KEY_PREFIX = "source_dirty"
 
     def __init__(self) -> None:
         self.embedding_service = EmbeddingService()
@@ -340,10 +341,48 @@ class MemoryService:
             self._upsert_user_aliases(session_id, mentioned_users)
         with SessionLocal() as session:
             if message_id:
-                existing = session.execute(
-                    select(Message.id).where(Message.message_id == message_id)
-                ).scalar_one_or_none()
+                existing = session.execute(select(Message).where(Message.message_id == message_id)).scalar_one_or_none()
                 if existing is not None:
+                    if session_id and (not existing.session_id or existing.session_id == existing.message_id):
+                        existing.session_id = session_id
+                    if existing.status == "recalled":
+                        if existing.sender_id is None:
+                            existing.sender_id = sender_id
+                        if existing.episode_id is None:
+                            existing.episode_id = episode_id
+                        session.commit()
+                        return
+                    if existing.sender_id is None:
+                        existing.sender_id = sender_id
+                    if existing.episode_id is None:
+                        existing.episode_id = episode_id
+                    cleaned_content = self._strip_known_mention_keys(existing.content, mentioned_users or [])
+                    if cleaned_content != existing.content:
+                        existing.content = cleaned_content
+                    if not existing.original_content and existing.content != content:
+                        existing.original_content = content
+                    if mentioned_users and not existing.mentions_json:
+                        existing.mentions_json = json.dumps(mentioned_users, ensure_ascii=False)
+                    chunks = session.execute(
+                        select(MemoryChunk).where(
+                            MemoryChunk.source_type == "message",
+                            MemoryChunk.source_id == message_id,
+                        )
+                    ).scalars().all()
+                    for chunk in chunks:
+                        metadata = self._parse_json_dict(chunk.metadata_json)
+                        metadata.update(
+                            {
+                                "sender_id": existing.sender_id or metadata.get("sender_id") or "",
+                                "role": "user",
+                                "episode_id": existing.episode_id,
+                                "mentioned_users": mentioned_users or metadata.get("mentioned_users") or [],
+                            }
+                        )
+                        chunk.session_id = existing.session_id
+                        chunk.content = existing.content
+                        chunk.metadata_json = json.dumps(metadata, ensure_ascii=False)
+                    session.commit()
                     return
 
             session.add(
@@ -373,12 +412,288 @@ class MemoryService:
             embed=embed,
         )
 
+    def mark_message_recalled(
+        self,
+        *,
+        message_id: str,
+        chat_id: str | None = None,
+        recall_time: str | None = None,
+        recall_type: str | None = None,
+    ) -> bool:
+        if not message_id:
+            return False
+
+        lifecycle_payload = {
+            "event": "recalled",
+            "chat_id": chat_id or "",
+            "recall_time": recall_time or "",
+            "recall_type": recall_type or "",
+        }
+        updated = False
+        with SessionLocal() as session:
+            message = session.execute(select(Message).where(Message.message_id == message_id)).scalar_one_or_none()
+            if message is not None:
+                if chat_id and (not message.session_id or message.session_id == message.message_id):
+                    message.session_id = chat_id
+                message.status = "recalled"
+                message.recalled_at = self._parse_lifecycle_time(recall_time) or datetime.now(timezone.utc)
+                message.lifecycle_json = json.dumps(lifecycle_payload, ensure_ascii=False)
+                updated = True
+            else:
+                session.add(
+                    Message(
+                        message_id=message_id,
+                        session_id=chat_id or message_id,
+                        role="user",
+                        sender_id=None,
+                        content="[消息已撤回]",
+                        status="recalled",
+                        recalled_at=self._parse_lifecycle_time(recall_time) or datetime.now(timezone.utc),
+                        lifecycle_json=json.dumps(lifecycle_payload, ensure_ascii=False),
+                    )
+                )
+            session.execute(
+                delete(MemoryChunk).where(
+                    MemoryChunk.source_type == "message",
+                    MemoryChunk.source_id == message_id,
+                )
+            )
+            session.commit()
+        return updated
+
+    def update_user_message_content(
+        self,
+        *,
+        message_id: str,
+        content: str,
+        chat_id: str | None = None,
+    ) -> bool:
+        normalized_content = (content or "").strip()
+        if not message_id or not normalized_content:
+            return False
+
+        session_id: str | None = None
+        sender_id: str | None = None
+        episode_id: int | None = None
+        mentioned_users: list[dict] = []
+        created_placeholder = False
+        with SessionLocal() as session:
+            message = session.execute(select(Message).where(Message.message_id == message_id)).scalar_one_or_none()
+            if message is None:
+                session_id = chat_id or message_id
+                session.add(
+                    Message(
+                        message_id=message_id,
+                        session_id=session_id,
+                        role="user",
+                        sender_id=None,
+                        content=normalized_content,
+                        status="active",
+                        updated_at=datetime.now(timezone.utc),
+                        lifecycle_json=json.dumps({"event": "updated", "chat_id": chat_id or ""}, ensure_ascii=False),
+                    )
+                )
+                created_placeholder = True
+            else:
+                if message.status == "recalled":
+                    session.commit()
+                    return False
+                if chat_id and (not message.session_id or message.session_id == message.message_id):
+                    message.session_id = chat_id
+                session_id = message.session_id
+                sender_id = message.sender_id
+                episode_id = message.episode_id
+                if not message.original_content and message.content != normalized_content:
+                    message.original_content = message.content
+                message.content = normalized_content
+                message.status = "active"
+                message.updated_at = datetime.now(timezone.utc)
+                message.lifecycle_json = json.dumps({"event": "updated", "chat_id": chat_id or ""}, ensure_ascii=False)
+                if message.mentions_json:
+                    try:
+                        parsed_mentions = json.loads(message.mentions_json)
+                        if isinstance(parsed_mentions, list):
+                            mentioned_users = [item for item in parsed_mentions if isinstance(item, dict)]
+                    except json.JSONDecodeError:
+                        mentioned_users = []
+
+            session.execute(
+                delete(MemoryChunk).where(
+                    MemoryChunk.source_type == "message",
+                    MemoryChunk.source_id == message_id,
+                )
+            )
+            session.commit()
+
+        self.save_memory_chunk(
+            session_id=session_id,
+            source_type="message",
+            source_id=message_id,
+            content=normalized_content,
+            metadata={
+                "sender_id": sender_id or "",
+                "role": "user",
+                "episode_id": episode_id,
+                "mentioned_users": mentioned_users,
+                "edited": True,
+                "placeholder": created_placeholder,
+            },
+            embed=False,
+        )
+        return True
+
+    def get_message_lifecycle_info(self, message_id: str | None) -> dict:
+        normalized_message_id = (message_id or "").strip()
+        if not normalized_message_id:
+            return {}
+        with SessionLocal() as session:
+            message = session.execute(
+                select(Message).where(Message.message_id == normalized_message_id)
+            ).scalar_one_or_none()
+            if message is None:
+                return {}
+            return {
+                "message_id": message.message_id,
+                "session_id": message.session_id,
+                "episode_id": message.episode_id,
+                "status": message.status,
+                "content": message.content,
+                "original_content": message.original_content,
+                "updated_at": message.updated_at.isoformat() if message.updated_at else None,
+                "recalled_at": message.recalled_at.isoformat() if message.recalled_at else None,
+            }
+
+    def get_user_message_content(self, message_id: str | None) -> str | None:
+        normalized_message_id = (message_id or "").strip()
+        if not normalized_message_id:
+            return None
+        with SessionLocal() as session:
+            message = session.execute(
+                select(Message).where(
+                    Message.message_id == normalized_message_id,
+                    Message.role == "user",
+                )
+            ).scalar_one_or_none()
+            if message is None or message.status == "recalled":
+                return None
+            return message.content
+
+    def mark_episode_outputs_source_dirty(
+        self,
+        *,
+        session_id: str,
+        episode_id: int | None,
+        message_id: str,
+        event_type: str,
+        reason: str,
+    ) -> dict:
+        normalized_session_id = (session_id or "").strip()
+        normalized_message_id = (message_id or "").strip()
+        if not normalized_session_id or not normalized_message_id:
+            return {"memory_count": 0, "chunk_count": 0, "dirty_records": []}
+
+        dirty_at = datetime.now(timezone.utc).isoformat()
+        records = self.get_source_dirty_records(normalized_session_id)
+        record = {
+            "message_id": normalized_message_id,
+            "episode_id": episode_id,
+            "event_type": event_type,
+            "reason": reason,
+            "dirty_at": dirty_at,
+        }
+        records = [
+            item
+            for item in records
+            if not (
+                item.get("message_id") == normalized_message_id
+                and item.get("episode_id") == episode_id
+                and item.get("event_type") == event_type
+            )
+        ]
+        records.append(record)
+        records = records[-20:]
+        self.app_state.set_value(
+            self._source_dirty_key(normalized_session_id),
+            json.dumps(records, ensure_ascii=False),
+        )
+
+        dirty_memory_count = 0
+        deleted_chunk_count = 0
+        with SessionLocal() as session:
+            memories = session.execute(select(Memory).where(Memory.session_id == normalized_session_id)).scalars().all()
+            for memory in memories:
+                payload = self._parse_json_dict(memory.payload)
+                if not self._payload_matches_source(payload, episode_id=episode_id, source_message_id=normalized_message_id):
+                    continue
+                payload.update(
+                    {
+                        "source_dirty": True,
+                        "source_dirty_message_id": normalized_message_id,
+                        "source_dirty_event_type": event_type,
+                        "source_dirty_reason": reason,
+                        "source_dirty_at": dirty_at,
+                    }
+                )
+                memory.payload = json.dumps(payload, ensure_ascii=False)
+                dirty_memory_count += 1
+
+            chunks = session.execute(
+                select(MemoryChunk).where(
+                    MemoryChunk.session_id == normalized_session_id,
+                    MemoryChunk.source_type.in_(("summary", "assistant_reply")),
+                )
+            ).scalars().all()
+            for chunk in chunks:
+                metadata = self._parse_json_dict(chunk.metadata_json)
+                if self._payload_matches_source(metadata, episode_id=episode_id, source_message_id=normalized_message_id):
+                    session.delete(chunk)
+                    deleted_chunk_count += 1
+
+            task_changes = session.execute(
+                select(TaskChangeLog).where(TaskChangeLog.session_id == normalized_session_id)
+            ).scalars().all()
+            for change in task_changes:
+                details = self._parse_json_dict(change.details_json)
+                change_source_message_id = str(details.get("source_message_id") or "").strip()
+                matches_episode = episode_id is not None and not change_source_message_id and change.episode_id == episode_id
+                matches_source = self._payload_matches_source(
+                    details,
+                    episode_id=episode_id,
+                    source_message_id=normalized_message_id,
+                )
+                if not matches_episode and not matches_source:
+                    continue
+                details.update(
+                    {
+                        "source_dirty": True,
+                        "source_dirty_message_id": normalized_message_id,
+                        "source_dirty_event_type": event_type,
+                        "source_dirty_reason": reason,
+                        "source_dirty_at": dirty_at,
+                    }
+                )
+                change.details_json = json.dumps(details, ensure_ascii=False)
+
+            session.commit()
+        return {"memory_count": dirty_memory_count, "chunk_count": deleted_chunk_count, "dirty_records": records}
+
+    def get_source_dirty_records(self, session_id: str) -> list[dict]:
+        raw = self.app_state.get_value(self._source_dirty_key(session_id))
+        if not raw:
+            return []
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            return []
+        return [item for item in payload if isinstance(item, dict)] if isinstance(payload, list) else []
+
     def save_assistant_message(
         self,
         *,
         session_id: str,
         content: str,
         episode_id: int | None = None,
+        source_message_id: str | None = None,
         embed: bool = True,
     ) -> None:
         self.ensure_session(session_id)
@@ -399,7 +714,7 @@ class MemoryService:
             source_type="assistant_reply",
             source_id=None,
             content=content,
-            metadata={"role": "assistant", "episode_id": episode_id},
+            metadata={"role": "assistant", "episode_id": episode_id, "source_message_id": source_message_id},
             embed=embed,
         )
 
@@ -409,6 +724,7 @@ class MemoryService:
         session_id: str,
         analysis: AnalyzeResponse,
         episode_id: int | None = None,
+        source_message_id: str | None = None,
         embed: bool = True,
         async_embed: bool = False,
         preserve_unmatched_previous: bool = True,
@@ -425,6 +741,7 @@ class MemoryService:
             "risks": analysis.risks,
             "next_actions": analysis.next_actions,
             "episode_id": episode_id,
+            "source_message_id": source_message_id,
         }
 
         with SessionLocal() as session:
@@ -459,6 +776,7 @@ class MemoryService:
             current_tasks=merged_tasks,
             reason=analysis.summary,
             preserve_unmatched_previous=preserve_unmatched_previous,
+            source_message_id=source_message_id,
         )
 
         chunk_kwargs = {
@@ -471,6 +789,7 @@ class MemoryService:
                 "next_actions": analysis.next_actions,
                 "task_count": len(analysis.tasks),
                 "episode_id": episode_id,
+                "source_message_id": source_message_id,
             },
             "embed": embed,
         }
@@ -520,7 +839,7 @@ class MemoryService:
             return (
                 session.execute(
                     select(Message)
-                    .where(Message.session_id == session_id)
+                    .where(Message.session_id == session_id, self._active_message_filter())
                     .order_by(desc(Message.id))
                     .limit(limit)
                 )
@@ -541,30 +860,53 @@ class MemoryService:
             )
 
     def get_recent_memories(self, session_id: str, limit: int = 3) -> list[Memory]:
+        dirty_episode_ids = self._dirty_episode_ids(session_id)
+        dirty_message_ids = self._dirty_source_message_ids(session_id)
         with SessionLocal() as session:
-            return (
+            rows = (
                 session.execute(
                     select(Memory)
                     .where(Memory.session_id == session_id)
                     .order_by(desc(Memory.id))
-                    .limit(limit)
+                    .limit(max(limit * 4, limit))
                 )
                 .scalars()
                 .all()
             )
+        filtered = [
+            memory
+            for memory in rows
+            if not self._memory_payload_is_dirty(
+                memory.payload,
+                dirty_episode_ids=dirty_episode_ids,
+                dirty_message_ids=dirty_message_ids,
+            )
+        ]
+        return filtered[:limit]
 
     def get_recent_task_changes(self, session_id: str, limit: int = 8) -> list[TaskChangeLog]:
+        dirty_episode_ids = self._dirty_episode_ids(session_id)
+        dirty_message_ids = self._dirty_source_message_ids(session_id)
         with SessionLocal() as session:
-            return (
+            rows = (
                 session.execute(
                     select(TaskChangeLog)
                     .where(TaskChangeLog.session_id == session_id)
                     .order_by(desc(TaskChangeLog.id))
-                    .limit(limit)
+                    .limit(max(limit * 4, limit))
                 )
                 .scalars()
                 .all()
             )
+        return [
+            row
+            for row in rows
+            if not self._task_change_is_dirty(
+                row,
+                dirty_episode_ids=dirty_episode_ids,
+                dirty_message_ids=dirty_message_ids,
+            )
+        ][:limit]
 
     def search_relevant_memories(
         self,
@@ -582,6 +924,8 @@ class MemoryService:
             logger.warning("Embedding retrieval skipped due to embedding error: %s", exc)
             return []
 
+        dirty_episode_ids = self._dirty_episode_ids(session_id)
+        dirty_message_ids = self._dirty_source_message_ids(session_id)
         with SessionLocal() as session:
             statement = (
                 select(MemoryChunk)
@@ -590,9 +934,18 @@ class MemoryService:
                     MemoryChunk.embedding.is_not(None),
                 )
                 .order_by(MemoryChunk.embedding.cosine_distance(query_embedding))
-                .limit(limit)
+                .limit(max(limit * 4, limit))
             )
-            return session.execute(statement).scalars().all()
+            rows = session.execute(statement).scalars().all()
+        return [
+            chunk
+            for chunk in rows
+            if not self._memory_chunk_is_dirty(
+                chunk,
+                dirty_episode_ids=dirty_episode_ids,
+                dirty_message_ids=dirty_message_ids,
+            )
+        ][:limit]
 
     def get_episode_messages(
         self,
@@ -612,6 +965,7 @@ class MemoryService:
                     Message.session_id == session_id,
                     Message.role == "user",
                     Message.episode_id == episode_id,
+                    self._active_message_filter(),
                 )
                 .order_by(Message.id.asc())
             )
@@ -674,6 +1028,7 @@ class MemoryService:
                     Message.session_id == session_id,
                     Message.role == "user",
                     Message.episode_id == target_episode_id,
+                    self._active_message_filter(),
                 )
                 .order_by(desc(Message.created_at), desc(Message.id))
                 .limit(1)
@@ -695,6 +1050,7 @@ class MemoryService:
         tasks = self.get_current_tasks(session_id)
         memories = self.get_recent_memories(session_id)
         task_changes = self.get_recent_task_changes(session_id)
+        source_dirty_records = self.get_source_dirty_records(session_id)
         retrieved_chunks = (
             self.search_relevant_memories(session_id, query_text or "", limit=5)
             if include_semantic_search
@@ -710,10 +1066,17 @@ class MemoryService:
             else ""
         )
 
-        if not tasks and not memories and not task_changes and not pending_block and not retrieved_chunks:
+        if not tasks and not memories and not task_changes and not pending_block and not retrieved_chunks and not source_dirty_records:
             return ""
 
         lines: list[str] = ["[协作上下文]"]
+
+        if source_dirty_records:
+            lines.append("[源消息变更提醒]")
+            for record in source_dirty_records[-3:]:
+                reason = str(record.get("reason") or "源消息发生变更，相关任务快照和产物需要复核。")
+                message_id = str(record.get("message_id") or "")
+                lines.append(f"- message_id={message_id} | {reason}")
 
         if pending_block:
             lines.append(pending_block)
@@ -768,6 +1131,7 @@ class MemoryService:
         current_tasks: list[TaskItem],
         reason: str,
         preserve_unmatched_previous: bool,
+        source_message_id: str | None,
     ) -> None:
         matched_pairs, unmatched_previous, unmatched_current = self._match_task_pairs(previous_tasks, current_tasks)
         rows: list[TaskChangeLog] = []
@@ -794,6 +1158,7 @@ class MemoryService:
                                 "before": before_snapshot,
                                 "after": after_snapshot,
                                 "changed_fields": changed_fields,
+                                "source_message_id": source_message_id,
                             },
                             ensure_ascii=False,
                         ),
@@ -813,7 +1178,10 @@ class MemoryService:
                     status=after.status,
                     notes=after.notes,
                     reason=reason,
-                    details_json=json.dumps({"before": None, "after": after.model_dump()}, ensure_ascii=False),
+                    details_json=json.dumps(
+                        {"before": None, "after": after.model_dump(), "source_message_id": source_message_id},
+                        ensure_ascii=False,
+                    ),
                 )
             )
 
@@ -839,7 +1207,10 @@ class MemoryService:
                         status=before.status,
                         notes=before.notes,
                         reason=reason,
-                        details_json=json.dumps({"before": self._task_snapshot(before), "after": None}, ensure_ascii=False),
+                        details_json=json.dumps(
+                            {"before": self._task_snapshot(before), "after": None, "source_message_id": source_message_id},
+                            ensure_ascii=False,
+                        ),
                     )
                 )
 
@@ -989,6 +1360,156 @@ class MemoryService:
         if mentioned_users:
             return f"- 发言人: {speaker} | 提及: {', '.join(mentioned_users)} | 内容: {message.content}"
         return f"- 发言人: {speaker} | 内容: {message.content}"
+
+    @staticmethod
+    def _active_message_filter():
+        return or_(Message.status.is_(None), Message.status != "recalled")
+
+    @staticmethod
+    def _parse_lifecycle_time(value: str | None) -> datetime | None:
+        text = (value or "").strip()
+        if not text:
+            return None
+        try:
+            timestamp: float = int(text)
+        except ValueError:
+            try:
+                parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+        if timestamp > 10_000_000_000:
+            timestamp = timestamp / 1000
+        return datetime.fromtimestamp(timestamp, tz=timezone.utc)
+
+    def _source_dirty_key(self, session_id: str) -> str:
+        return f"{self.SOURCE_DIRTY_KEY_PREFIX}:{session_id.strip()}"
+
+    @staticmethod
+    def _strip_known_mention_keys(content: str, mentioned_users: list[dict]) -> str:
+        text = str(content or "")
+        for user in mentioned_users or []:
+            if not isinstance(user, dict):
+                continue
+            key = str(user.get("key") or "").strip()
+            if key:
+                text = text.replace(key, "")
+        return " ".join(text.split())
+
+    def _dirty_episode_ids(self, session_id: str) -> set[int]:
+        result: set[int] = set()
+        for record in self.get_source_dirty_records(session_id):
+            value = record.get("episode_id")
+            try:
+                if value is not None:
+                    result.add(int(value))
+            except (TypeError, ValueError):
+                continue
+        return result
+
+    @staticmethod
+    def _parse_json_dict(value: str | None) -> dict:
+        if not value:
+            return {}
+        try:
+            payload = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    @classmethod
+    def _memory_payload_is_dirty(
+        cls,
+        payload_json: str | None,
+        *,
+        dirty_episode_ids: set[int],
+        dirty_message_ids: set[str] | None = None,
+    ) -> bool:
+        payload = cls._parse_json_dict(payload_json)
+        if payload.get("source_dirty"):
+            return True
+        source_message_id = str(payload.get("source_message_id") or "").strip()
+        if source_message_id and source_message_id in (dirty_message_ids or set()):
+            return True
+        if source_message_id:
+            return False
+        return cls._payload_matches_episode(payload, None, dirty_episode_ids=dirty_episode_ids)
+
+    def _dirty_source_message_ids(self, session_id: str) -> set[str]:
+        result: set[str] = set()
+        for record in self.get_source_dirty_records(session_id):
+            value = str(record.get("message_id") or "").strip()
+            if value:
+                result.add(value)
+        return result
+
+    @classmethod
+    def _payload_matches_source(
+        cls,
+        payload: dict,
+        *,
+        episode_id: int | None,
+        source_message_id: str | None,
+    ) -> bool:
+        normalized_message_id = str(source_message_id or "").strip()
+        payload_message_id = str(payload.get("source_message_id") or "").strip()
+        if normalized_message_id and payload_message_id == normalized_message_id:
+            return True
+        if payload_message_id:
+            return False
+        if episode_id is not None:
+            return cls._payload_matches_episode(payload, episode_id)
+        return False
+
+    def _task_change_is_dirty(
+        self,
+        change: TaskChangeLog,
+        *,
+        dirty_episode_ids: set[int],
+        dirty_message_ids: set[str],
+    ) -> bool:
+        payload = self._parse_json_dict(change.details_json)
+        if payload.get("source_dirty"):
+            return True
+        source_message_id = str(payload.get("source_message_id") or "").strip()
+        if source_message_id:
+            return source_message_id in dirty_message_ids
+        return change.episode_id in dirty_episode_ids
+
+    def _memory_chunk_is_dirty(
+        self,
+        chunk: MemoryChunk,
+        *,
+        dirty_episode_ids: set[int],
+        dirty_message_ids: set[str],
+    ) -> bool:
+        if chunk.source_type == "message" and chunk.source_id in dirty_message_ids:
+            return True
+        metadata = self._parse_json_dict(chunk.metadata_json)
+        source_message_id = str(metadata.get("source_message_id") or "").strip()
+        if source_message_id and source_message_id in dirty_message_ids:
+            return True
+        if source_message_id:
+            return False
+        return self._payload_matches_episode(metadata, None, dirty_episode_ids=dirty_episode_ids)
+
+    @staticmethod
+    def _payload_matches_episode(
+        payload: dict,
+        episode_id: int | None,
+        *,
+        dirty_episode_ids: set[int] | None = None,
+    ) -> bool:
+        value = payload.get("episode_id")
+        if value is None:
+            return False
+        try:
+            normalized = int(value)
+        except (TypeError, ValueError):
+            return False
+        if episode_id is not None:
+            return normalized == episode_id
+        return normalized in (dirty_episode_ids or set())
 
     def _extract_message_mentions(self, message: Message) -> list[str]:
         if not message.mentions_json:

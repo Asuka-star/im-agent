@@ -15,13 +15,22 @@ class WorkflowResultPersistence:
     def __init__(self, workflow: Any) -> None:
         self.workflow = workflow
 
-    def persist_task_run_result(self, task_run_id: str, *, message_text: str, result: dict, session_id: str) -> None:
+    def persist_task_run_result(
+        self,
+        task_run_id: str,
+        *,
+        message_text: str,
+        result: dict,
+        session_id: str,
+        source_message_id: str | None = None,
+    ) -> None:
         workflow = self.workflow
         if result["reply_preview"]:
             workflow.memory_service.save_assistant_message(
                 session_id=session_id,
                 content=result["reply_preview"],
                 episode_id=result.get("episode_id"),
+                source_message_id=source_message_id,
                 embed=False,
             )
         self.persist_artifacts(task_run_id, result.get("artifacts", []))

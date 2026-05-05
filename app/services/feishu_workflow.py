@@ -9,7 +9,7 @@ from app.feishu.doc_api import FeishuDocAPI
 from app.feishu.message_api import FeishuMessageAPI
 from app.feishu.user_api import FeishuUserAPI
 from app.schemas.analyze import AgentTrace, AnalyzeResponse
-from app.schemas.feishu_event import FeishuMessageContext
+from app.schemas.feishu_event import FeishuMessageContext, FeishuMessageLifecycleContext
 from app.schemas.task import TaskItem
 from app.services.due_date import normalize_task_dates
 from app.services.interaction import InteractionService
@@ -115,6 +115,224 @@ class FeishuWorkflowService:
 
     def handle_message(self, message: FeishuMessageContext) -> dict:
         return self.entrypoint.handle_message(message)
+
+    def handle_message_lifecycle(self, event: FeishuMessageLifecycleContext) -> dict:
+        if event.event_type == "im.message.recalled_v1":
+            updated = self.memory_service.mark_message_recalled(
+                message_id=event.message_id,
+                chat_id=event.chat_id,
+                recall_time=event.recall_time,
+                recall_type=event.recall_type,
+            )
+            logger.info(
+                "Handled Feishu recalled message event: message_id=%s updated=%s recall_type=%s",
+                event.message_id,
+                updated,
+                event.recall_type,
+            )
+            impact = self._mark_message_lifecycle_impacts(event, action="recalled")
+            return {"mode": "message_recalled", "message_id": event.message_id, "updated": updated, "impact": impact}
+
+        updated = False
+        if event.raw_text:
+            updated = self.memory_service.update_user_message_content(
+                message_id=event.message_id,
+                content=event.raw_text,
+                chat_id=event.chat_id,
+            )
+        logger.info(
+            "Handled Feishu updated message event: message_id=%s updated=%s has_text=%s",
+            event.message_id,
+            updated,
+            bool(event.raw_text),
+        )
+        impact = self._mark_message_lifecycle_impacts(event, action="updated") if updated else {}
+        return {"mode": "message_updated", "message_id": event.message_id, "updated": updated, "impact": impact}
+
+    def _mark_message_lifecycle_impacts(self, event: FeishuMessageLifecycleContext, *, action: str) -> dict:
+        message_info = self.memory_service.get_message_lifecycle_info(event.message_id)
+        session_id = str(message_info.get("session_id") or event.chat_id or "").strip()
+        if not session_id:
+            return {"task_run_ids": [], "document_ids": [], "reason": "message_session_unknown"}
+
+        episode_id = message_info.get("episode_id")
+        task_run_ids: list[str] = []
+        for task_run in self.task_run_service.list_task_runs(session_id=session_id, limit=100):
+            if task_run.trigger_message_id == event.message_id:
+                task_run_ids.append(task_run.task_run_id)
+
+        reason = f"源消息已{('撤回' if action == 'recalled' else '编辑')}，相关产物需要复核。"
+        memory_impact = self.memory_service.mark_episode_outputs_source_dirty(
+            session_id=session_id,
+            episode_id=episode_id if isinstance(episode_id, int) else None,
+            message_id=event.message_id,
+            event_type=event.event_type,
+            reason=reason,
+        )
+        dirty_documents = self.session_document_service.mark_documents_source_dirty(
+            session_id,
+            message_id=event.message_id,
+            episode_id=episode_id if isinstance(episode_id, int) else None,
+            task_run_ids=list(task_run_ids),
+            event_type=event.event_type,
+            reason=reason,
+        )
+        for document in dirty_documents:
+            task_run_id = str(document.get("task_run_id") or "").strip()
+            if task_run_id and task_run_id not in task_run_ids:
+                task_run_ids.append(task_run_id)
+
+        task_cleanup_count = 0
+        if action == "recalled":
+            task_cleanup_count = self._remove_lifecycle_source_tasks_from_current_snapshot(
+                session_id=session_id,
+                source_text=str(message_info.get("original_content") or message_info.get("content") or ""),
+                episode_id=episode_id if isinstance(episode_id, int) else None,
+                message_id=event.message_id,
+            )
+
+        for task_run_id in task_run_ids:
+            self.task_run_service.merge_task_run_metadata(
+                task_run_id,
+                {
+                    "source_dirty": True,
+                    "source_dirty_message_id": event.message_id,
+                    "source_dirty_event_type": event.event_type,
+                    "source_dirty_reason": reason,
+                },
+            )
+            self.task_run_service.upsert_step(
+                task_run_id,
+                step_key="source_lifecycle_notice",
+                title="源消息发生变更",
+                step_type="source_lifecycle",
+                status="needs_review",
+                output_payload={
+                    "message_id": event.message_id,
+                    "event_type": event.event_type,
+                    "action": action,
+                    "reason": reason,
+                },
+            )
+
+        return {
+            "task_run_ids": task_run_ids,
+            "document_ids": [str(document.get("document_id") or "") for document in dirty_documents],
+            "memory_count": memory_impact.get("memory_count", 0),
+            "chunk_count": memory_impact.get("chunk_count", 0),
+            "task_cleanup_count": task_cleanup_count,
+            "reason": reason,
+        }
+
+    def _remove_lifecycle_source_tasks_from_current_snapshot(
+        self,
+        *,
+        session_id: str,
+        source_text: str,
+        episode_id: int | None,
+        message_id: str,
+    ) -> int:
+        source_tasks = normalize_tasks(extract_tasks(source_text))
+        if not source_tasks:
+            return 0
+        try:
+            current_tasks = [self._task_item_from_any(task) for task in self.memory_service.get_current_tasks(session_id)]
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to load current tasks for lifecycle cleanup: session_id=%s error=%s", session_id, exc)
+            return 0
+        remaining_tasks = [task for task in current_tasks if task is not None]
+        removed: list[TaskItem] = []
+        for source_task in source_tasks:
+            target_index = self._find_lifecycle_task_match(remaining_tasks, source_task)
+            if target_index is None:
+                continue
+            removed.append(remaining_tasks.pop(target_index))
+        if not removed:
+            return 0
+        risks = infer_risks(remaining_tasks)
+        analysis = AnalyzeResponse(
+            session_id=session_id,
+            summary="源消息已撤回，已从当前任务快照移除对应任务。",
+            tasks=remaining_tasks,
+            risks=risks,
+            next_actions=build_next_actions(remaining_tasks, risks),
+            agent_traces=[AgentTrace(agent="memory", summary="removed tasks from recalled source message")],
+        )
+        try:
+            self.memory_service.save_round(
+                session_id=session_id,
+                analysis=analysis,
+                episode_id=episode_id,
+                source_message_id=message_id,
+                embed=False,
+                async_embed=False,
+                preserve_unmatched_previous=False,
+            )
+            logger.info(
+                "Removed source-dirty current task(s) after message recall: session_id=%s message_id=%s removed=%s",
+                session_id,
+                message_id,
+                len(removed),
+            )
+            return len(removed)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to persist lifecycle task cleanup: session_id=%s message_id=%s error=%s", session_id, message_id, exc)
+            return 0
+
+    def _find_lifecycle_task_match(self, current_tasks: list[TaskItem], source_task: TaskItem) -> int | None:
+        title_matches = [
+            index
+            for index, task in enumerate(current_tasks)
+            if self._lifecycle_task_title_matches(task, source_task)
+        ]
+        if not title_matches:
+            return None
+        owner_matches = [
+            index
+            for index in title_matches
+            if self._lifecycle_task_owner_matches(current_tasks[index], source_task)
+        ]
+        if len(owner_matches) == 1:
+            return owner_matches[0]
+        if len(title_matches) == 1:
+            return title_matches[0]
+        return None
+
+    @staticmethod
+    def _task_item_from_any(task: Any) -> TaskItem | None:
+        if isinstance(task, TaskItem):
+            return task
+        title = str(getattr(task, "title", "") or "").strip()
+        if not title:
+            return None
+        return TaskItem(
+            title=title,
+            owner=str(getattr(task, "owner", "") or "TBD"),
+            priority=str(getattr(task, "priority", "") or "medium"),
+            due_date=str(getattr(task, "due_date", "") or "TBD"),
+            status=str(getattr(task, "status", "") or "draft"),
+            notes=str(getattr(task, "notes", "") or ""),
+        )
+
+    @staticmethod
+    def _lifecycle_task_title_matches(current_task: TaskItem, source_task: TaskItem) -> bool:
+        source_probe = " ".join([source_task.title, source_task.notes or ""]).strip()
+        return (
+            TaskOperationTool.line_matches_task_title(source_probe, current_task.title)
+            or TaskOperationTool.line_matches_task_title(current_task.title, source_task.title)
+        )
+
+    @staticmethod
+    def _lifecycle_task_owner_matches(current_task: TaskItem, source_task: TaskItem) -> bool:
+        current_owner = FeishuWorkflowService._compact_task_label(current_task.owner)
+        source_owner = FeishuWorkflowService._compact_task_label(source_task.owner)
+        if not current_owner or current_owner == "tbd" or not source_owner or source_owner == "tbd":
+            return False
+        return current_owner == source_owner or current_owner in source_owner or source_owner in current_owner
+
+    @staticmethod
+    def _compact_task_label(value: str | None) -> str:
+        return re.sub(r"\s+", "", str(value or "").strip().lower())
 
     def _ensure_sender_alias(self, message: FeishuMessageContext) -> None:
         if self.memory_service.get_alias_display_name(message.session_id, message.sender_id):
@@ -728,6 +946,7 @@ class FeishuWorkflowService:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Failed to load team task snapshot for status context: session_id=%s error=%s", message.session_id, exc)
                 memory_tasks = []
+        memory_tasks = merge_status_task_sources([], memory_tasks)
         base_tasks = merge_status_task_sources(document_tasks, memory_tasks) if document_tasks else memory_tasks
         return document_tasks, memory_tasks, base_tasks
 
@@ -738,6 +957,8 @@ class FeishuWorkflowService:
             logger.warning("Failed to load current document timestamp for status context: session_id=%s error=%s", session_id, exc)
             return None
         if not isinstance(current_doc, dict):
+            return None
+        if self._document_snapshot_is_source_dirty(current_doc):
             return None
         return self._parse_datetime(current_doc.get("updated_at"))
 
@@ -843,10 +1064,22 @@ class FeishuWorkflowService:
             return []
         if not isinstance(current_doc, dict):
             return []
+        if self._document_snapshot_is_source_dirty(current_doc):
+            logger.info(
+                "Ignoring source-dirty document snapshot for status context: session_id=%s document_id=%s dirty_message_id=%s",
+                session_id,
+                current_doc.get("document_id"),
+                current_doc.get("source_dirty_message_id"),
+            )
+            return []
         snapshot = current_doc.get("section_snapshot")
         if not isinstance(snapshot, list):
             return []
         return tasks_from_document_snapshot(snapshot)
+
+    @staticmethod
+    def _document_snapshot_is_source_dirty(current_doc: dict) -> bool:
+        return bool(current_doc.get("source_dirty"))
 
     def _context_payload_for_message(self, message: FeishuMessageContext) -> dict:
         payload = self.memory_service.load_memory_payload(message.session_id)

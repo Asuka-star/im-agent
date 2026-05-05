@@ -46,6 +46,7 @@ class TaskOperationTool:
         "路演",
         "demo",
     )
+    ALL_SCOPE_MARKERS = ("全部", "所有", "全都", "都已经", "都已", "all")
     DIRECT_ASSIGNMENT_MARKERS = (
         "需要有人",
         "找个人",
@@ -63,6 +64,7 @@ class TaskOperationTool:
 
     @staticmethod
     def apply_llm_operations(current_tasks: list[TaskItem], operations: list[dict]) -> list[TaskItem]:
+        current_tasks = _coerce_task_items(current_tasks)
         refreshed = [task.model_copy(deep=True) for task in current_tasks]
         for operation in operations:
             if not isinstance(operation, dict):
@@ -92,6 +94,8 @@ class TaskOperationTool:
 
     @staticmethod
     def merge_task_items(current_tasks: list[TaskItem], refreshed_tasks: list[TaskItem]) -> list[TaskItem]:
+        current_tasks = _coerce_task_items(current_tasks)
+        refreshed_tasks = _coerce_task_items(refreshed_tasks)
         if not current_tasks:
             return [task.model_copy(deep=True) for task in refreshed_tasks]
 
@@ -106,15 +110,17 @@ class TaskOperationTool:
 
     @staticmethod
     def merge_assignment_items(current_tasks: list[TaskItem], incoming_tasks: list[TaskItem]) -> list[TaskItem]:
+        current_tasks = _coerce_task_items(current_tasks)
+        incoming_tasks = _coerce_task_items(incoming_tasks)
         merged = [task.model_copy(deep=True) for task in current_tasks]
         for incoming in incoming_tasks:
             incoming_owner = _normalized(incoming.owner)
-            incoming_title = _normalized(incoming.title)
+            incoming_title = _task_title_key(incoming.title)
             if incoming_title and incoming_owner not in {"", "tbd"}:
                 tbd_matches = [
                     idx
                     for idx, task in enumerate(merged)
-                    if _normalized(task.title) == incoming_title
+                    if _task_title_key(task.title) == incoming_title
                     and _normalized(task.owner) in {"", "tbd"}
                     and _normalized(task.status) not in {"done", "cancelled", "canceled"}
                 ]
@@ -137,6 +143,8 @@ class TaskOperationTool:
         *,
         actor_names: list[str] | None = None,
     ) -> list[TaskItem]:
+        current_tasks = _coerce_task_items(current_tasks)
+        llm_tasks = _coerce_task_items(llm_tasks)
         status_update = TaskOperationTool.resolve_status_update(current_tasks, source_text, actor_names=actor_names)
         if status_update.get("updated"):
             return status_update["tasks"]
@@ -153,13 +161,13 @@ class TaskOperationTool:
 
     @staticmethod
     def find_merge_target(tasks: list[TaskItem], incoming_task: TaskItem) -> int | None:
-        incoming_title = _normalized(incoming_task.title)
+        incoming_title = _task_title_key(incoming_task.title)
         incoming_owner = _normalized(incoming_task.owner)
 
         exact_matches = [
             idx
             for idx, task in enumerate(tasks)
-            if _normalized(task.title) == incoming_title
+            if _task_title_key(task.title) == incoming_title
             and _normalized(task.owner) == incoming_owner
         ]
         if len(exact_matches) == 1:
@@ -170,7 +178,7 @@ class TaskOperationTool:
             title_matches = [
                 idx
                 for idx, task in enumerate(tasks)
-                if _normalized(task.title) == incoming_title
+                if _task_title_key(task.title) == incoming_title
             ]
             if len(title_matches) == 1:
                 return title_matches[0]
@@ -198,7 +206,7 @@ class TaskOperationTool:
             exact_matches = [
                 idx
                 for idx, task in enumerate(tasks)
-                if (not title or _normalized(task.title) == _normalized(title))
+                if (not title or _task_title_key(task.title) == _task_title_key(title))
                 and (not owner or _normalized(task.owner) == _normalized(owner))
             ]
             if len(exact_matches) == 1:
@@ -207,7 +215,7 @@ class TaskOperationTool:
         for title, _ in candidates:
             if not title:
                 continue
-            title_matches = [idx for idx, task in enumerate(tasks) if _normalized(task.title) == _normalized(title)]
+            title_matches = [idx for idx, task in enumerate(tasks) if _task_title_key(task.title) == _task_title_key(title)]
             if len(title_matches) == 1:
                 return title_matches[0]
 
@@ -235,6 +243,7 @@ class TaskOperationTool:
         *,
         actor_names: list[str] | None = None,
     ) -> dict:
+        current_tasks = _coerce_task_items(current_tasks)
         tasks = [task.model_copy(deep=True) for task in current_tasks]
         update_lines = [
             line.strip()
@@ -244,9 +253,27 @@ class TaskOperationTool:
         if not update_lines:
             return {"detected": False, "updated": False, "tasks": tasks}
 
+        updated_task: TaskItem | None = None
+        updated_tasks: list[TaskItem] = []
         for line in update_lines:
             status = TaskOperationTool.status_from_text(line)
             if not status:
+                continue
+            bulk_target_indices = TaskOperationTool.find_bulk_status_update_targets(
+                tasks,
+                line,
+                actor_names=actor_names,
+            )
+            if bulk_target_indices:
+                for target_index in bulk_target_indices:
+                    target = tasks[target_index]
+                    note = f"状态更新：{line}"
+                    notes = target.notes or ""
+                    if note not in notes:
+                        notes = f"{notes}；{note}".strip("；")
+                    tasks[target_index] = target.model_copy(update={"status": status, "notes": notes})
+                    updated_task = tasks[target_index]
+                    updated_tasks.append(tasks[target_index])
                 continue
             target_index, candidates = TaskOperationTool.find_status_update_target(
                 tasks,
@@ -267,13 +294,16 @@ class TaskOperationTool:
             if note not in notes:
                 notes = f"{notes}；{note}".strip("；")
             tasks[target_index] = target.model_copy(update={"status": status, "notes": notes})
+            updated_task = tasks[target_index]
+            updated_tasks.append(tasks[target_index])
 
         return {
             "detected": True,
             "updated": True,
             "tasks": tasks,
             "status": status,
-            "updated_task": tasks[target_index] if update_lines else None,
+            "updated_task": updated_task,
+            "updated_tasks": updated_tasks,
         }
 
     @staticmethod
@@ -284,6 +314,7 @@ class TaskOperationTool:
         actor_names: list[str] | None = None,
         source_text: str = "",
     ) -> dict:
+        current_tasks = _coerce_task_items(current_tasks)
         tasks = [task.model_copy(deep=True) for task in current_tasks]
         if not isinstance(intent_result, dict):
             return {"detected": False, "updated": False, "tasks": tasks}
@@ -429,6 +460,7 @@ class TaskOperationTool:
         actor_names: list[str] | None = None,
         source_text: str = "",
     ) -> dict:
+        current_tasks = _coerce_task_items(current_tasks)
         tasks = [task.model_copy(deep=True) for task in current_tasks]
         if not isinstance(intent_result, dict) or intent_result.get("intent") != "task_assignment":
             return {"detected": False, "updated": False, "tasks": tasks}
@@ -652,6 +684,10 @@ class TaskOperationTool:
 
     @staticmethod
     def _has_compact_overlap(left: str, right: str) -> bool:
+        left_key = _task_title_key(left)
+        right_key = _task_title_key(right)
+        if left_key and left_key == right_key:
+            return True
         left_compact = _normalized(left).replace(" ", "")
         right_compact = _normalized(right).replace(" ", "")
         if not left_compact or not right_compact:
@@ -755,7 +791,50 @@ class TaskOperationTool:
         return None, [task for _, task in scoped_candidates[:5]]
 
     @staticmethod
+    def find_bulk_status_update_targets(
+        tasks: list[TaskItem],
+        line: str,
+        *,
+        actor_names: list[str] | None = None,
+    ) -> list[int] | None:
+        if not TaskOperationTool.has_all_scope_marker(line):
+            return None
+        active_candidates = [
+            (idx, task)
+            for idx, task in enumerate(tasks)
+            if str(task.status or "").strip().lower() not in {"done", "cancelled", "canceled"}
+        ]
+        if not active_candidates:
+            return []
+
+        owner_matches = [
+            (idx, task)
+            for idx, task in active_candidates
+            if task.owner and _normalized(task.owner) != "tbd" and _text_contains_label(line, task.owner)
+        ]
+        if owner_matches:
+            return [idx for idx, _ in owner_matches]
+
+        if TaskOperationTool.has_first_person_reference(line):
+            actor_values = {_normalized(name) for name in actor_names or [] if _normalized(name)}
+            actor_matches = [
+                (idx, task)
+                for idx, task in active_candidates
+                if _normalized(task.owner) in actor_values
+            ]
+            if actor_matches:
+                return [idx for idx, _ in actor_matches]
+
+        if TaskOperationTool.has_global_task_scope(line):
+            return [idx for idx, _ in active_candidates]
+        return None
+
+    @staticmethod
     def line_matches_task_title(line: str, title: str) -> bool:
+        line_title_key = _task_title_key(line)
+        title_key = _task_title_key(title)
+        if title_key and line_title_key == title_key:
+            return True
         normalized_line = _normalized(line).replace(" ", "")
         normalized_title = _normalized(title).replace(" ", "")
         if normalized_title:
@@ -769,6 +848,16 @@ class TaskOperationTool:
         lowered_line = str(line or "").lower()
         lowered_title = str(title or "").lower()
         return any(token in lowered_title and token in lowered_line for token in TaskOperationTool.TITLE_HINT_TOKENS)
+
+    @staticmethod
+    def has_all_scope_marker(text: str) -> bool:
+        lowered = str(text or "").strip().lower()
+        return any(marker in lowered for marker in TaskOperationTool.ALL_SCOPE_MARKERS)
+
+    @staticmethod
+    def has_global_task_scope(text: str) -> bool:
+        lowered = str(text or "").strip().lower()
+        return TaskOperationTool.has_all_scope_marker(lowered) and any(token in lowered for token in ("任务", "task", "tasks"))
 
     @staticmethod
     def line_has_title_hint(line: str) -> bool:
@@ -838,15 +927,17 @@ class TaskOperationTool:
 
     @staticmethod
     def task_assignment_clarification(current_tasks: list[TaskItem], incoming_tasks: list[TaskItem]) -> dict | None:
+        current_tasks = _coerce_task_items(current_tasks)
+        incoming_tasks = _coerce_task_items(incoming_tasks)
         for incoming in incoming_tasks:
             incoming_owner = _normalized(incoming.owner)
-            incoming_title = _normalized(incoming.title)
+            incoming_title = _task_title_key(incoming.title)
             if not incoming_title:
                 continue
             title_matches = [
                 task
                 for task in current_tasks
-                if _normalized(task.title) == incoming_title
+                if _task_title_key(task.title) == incoming_title
                 and _normalized(task.status) not in {"done", "cancelled", "canceled"}
             ]
             assigned_matches = [task for task in title_matches if _normalized(task.owner) not in {"", "tbd"}]
@@ -878,6 +969,94 @@ class TaskOperationTool:
                     "blocking": True,
                 }
         return None
+
+
+def _coerce_task_items(tasks: list[TaskItem] | None) -> list[TaskItem]:
+    normalized: list[TaskItem] = []
+    for task in tasks or []:
+        item = _coerce_task_item(task)
+        if item is not None:
+            normalized.append(item)
+    return normalized
+
+
+def _coerce_task_item(task: object) -> TaskItem | None:
+    if isinstance(task, TaskItem):
+        return task
+    if isinstance(task, dict):
+        try:
+            return TaskItem.model_validate(task)
+        except Exception:
+            return None
+
+    title = str(getattr(task, "title", "") or "").strip()
+    if not title:
+        return None
+    return TaskItem(
+        title=title,
+        owner=str(getattr(task, "owner", "") or "TBD"),
+        priority=str(getattr(task, "priority", "") or "medium"),
+        due_date=str(getattr(task, "due_date", "") or "TBD"),
+        status=str(getattr(task, "status", "") or "draft"),
+        notes=str(getattr(task, "notes", "") or ""),
+    )
+
+
+def _task_title_key(value: str | None) -> str:
+    normalized = _normalized(value)
+    compact = normalized.replace(" ", "")
+    if not compact:
+        return ""
+    generic_ppt = _generic_artifact_title_key(
+        compact,
+        artifact_tokens=("ppt", "powerpoint"),
+        generic_tokens=(
+            "制作",
+            "生成",
+            "做",
+            "准备",
+            "整理",
+            "输出",
+            "产出",
+            "创建",
+            "汇报",
+            "演示",
+            "大纲",
+            "材料",
+            "幻灯片",
+            "演示稿",
+            "generation",
+            "generate",
+            "create",
+            "make",
+            "build",
+            "outline",
+            "slides",
+            "slide",
+            "deck",
+            "presentation",
+        ),
+    )
+    if generic_ppt:
+        return generic_ppt
+    generic_canvas = _generic_artifact_title_key(
+        compact,
+        artifact_tokens=("canvas", "画布"),
+        generic_tokens=("制作", "生成", "做", "准备", "整理", "输出", "产出", "创建", "绘制", "画", "流程图"),
+    )
+    if generic_canvas:
+        return generic_canvas
+    return compact
+
+
+def _generic_artifact_title_key(compact: str, *, artifact_tokens: tuple[str, ...], generic_tokens: tuple[str, ...]) -> str:
+    matched_token = next((token for token in artifact_tokens if token in compact), "")
+    if not matched_token:
+        return ""
+    remaining = compact
+    for token in (*artifact_tokens, *generic_tokens):
+        remaining = remaining.replace(token, "")
+    return matched_token if not remaining else ""
 
 
 def _normalized(value: str | None) -> str:

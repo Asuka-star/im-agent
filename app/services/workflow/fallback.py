@@ -50,6 +50,7 @@ class WorkflowFallbackHandler:
                     message.session_id,
                     tasks,
                     episode_id=active_episode_id,
+                    source_message_id=message.message_id,
                 )
             reply_preview = workflow.response_formatter.format_status_reply(message.text, tasks, payload)
             return workflow.reply_sender.deliver_reply(message, "status", reply_preview, analysis=None, episode_id=active_episode_id)
@@ -71,6 +72,7 @@ class WorkflowFallbackHandler:
             session_id=message.session_id,
             analysis=analysis,
             episode_id=active_episode_id,
+            source_message_id=message.message_id,
             async_embed=True,
         )
         result = workflow.reply_sender.deliver_reply(message, decision.mode, reply_preview, analysis=analysis, episode_id=active_episode_id)

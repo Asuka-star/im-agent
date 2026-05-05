@@ -131,6 +131,24 @@ class LLMTaskOperationTests(unittest.TestCase):
         self.assertEqual(pending_tasks, [])
         extract_collaboration.assert_not_called()
 
+    def test_all_scope_pending_completion_updates_all_owner_tasks(self) -> None:
+        message = SimpleNamespace(session_id="s1", message_id="m_status", chat_type="group")
+        base_tasks = [
+            TaskItem(title="后端开发", owner="张三", priority="medium", due_date="TBD", status="draft", notes=""),
+            TaskItem(title="接口联调", owner="张三", priority="medium", due_date="TBD", status="draft", notes=""),
+            TaskItem(title="前端开发", owner="李四", priority="medium", due_date="TBD", status="draft", notes=""),
+        ]
+        episode = SimpleNamespace(id=10)
+        with patch.object(self.service.memory_service, "get_active_episode", return_value=episode), patch.object(
+            self.service.memory_service,
+            "get_episode_messages",
+            return_value=[SimpleNamespace(content="张三的任务全部完成了")],
+        ), patch.object(self.service.llm_service, "extract_collaboration") as extract_collaboration:
+            pending_tasks = self.service._pending_discussion_tasks_for_message(message, base_tasks=base_tasks)
+
+        self.assertEqual([task.status for task in pending_tasks], ["done", "done", "draft"])
+        extract_collaboration.assert_not_called()
+
     def test_pending_first_person_completion_uses_message_sender_alias(self) -> None:
         message = SimpleNamespace(session_id="s1", message_id="m_status", chat_type="group")
         base_tasks = [
@@ -316,6 +334,56 @@ class LLMTaskOperationTests(unittest.TestCase):
 
         self.assertTrue(result["pending_confirmation"])
         pause_for_clarification.assert_called_once()
+        save_round.assert_not_called()
+
+    def test_local_status_update_clarification_uses_pending_discussion_tasks(self) -> None:
+        message = SimpleNamespace(
+            session_id="s1",
+            message_id="m_done_with_pending",
+            text="\u5f20\u4e09\u7684\u4efb\u52a1\u5b8c\u6210\u4e86",
+            chat_id="c1",
+            chat_type="group",
+            sender_id="sender",
+            sender_user_id=None,
+            sender_open_id=None,
+            sender_union_id=None,
+        )
+        context_tasks = [
+            TaskItem(title="\u539f\u6709\u4efb\u52a1", owner="\u5f20\u4e09", priority="medium", due_date="TBD", status="draft", notes=""),
+            TaskItem(title="\u505a ppt", owner="\u5f20\u4e09", priority="medium", due_date="TBD", status="draft", notes="pending"),
+            TaskItem(title="\u505a canvas", owner="\u5f20\u4e09", priority="medium", due_date="TBD", status="draft", notes="pending"),
+        ]
+
+        with patch.object(
+            self.service,
+            "_context_tasks_for_message",
+            return_value=context_tasks,
+        ) as context_tasks_for_message, patch.object(
+            self.service,
+            "_sender_actor_names_for_message",
+            return_value=["sender"],
+        ), patch.object(
+            self.service,
+            "_pause_for_clarification",
+            return_value={"mode": "tasks", "pending_confirmation": True, "reply_preview": "clarify"},
+        ) as pause_for_clarification, patch.object(
+            self.service.memory_service,
+            "save_round",
+        ) as save_round:
+            result = self.service._handle_task_status_update_instruction(
+                message,
+                route_decision=RouteDecision(route="tasks", source="rule", confidence=0.92),
+                active_episode_id=27,
+                task_run_id="run_1",
+            )
+
+        self.assertTrue(result["pending_confirmation"])
+        context_tasks_for_message.assert_called_once_with(message)
+        pause_for_clarification.assert_called_once()
+        clarification = pause_for_clarification.call_args.kwargs["clarification"]
+        self.assertEqual(len(clarification["candidates"]), 3)
+        self.assertIn("\u505a ppt", [item["title"] for item in clarification["candidates"]])
+        self.assertIn("\u505a canvas", [item["title"] for item in clarification["candidates"]])
         save_round.assert_not_called()
 
     def test_llm_task_intent_does_not_match_backend_to_frontend_by_common_suffix(self) -> None:

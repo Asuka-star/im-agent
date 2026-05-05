@@ -7,35 +7,125 @@ from app.schemas.task import TaskItem
 
 def merge_status_task_sources(primary: list, secondary: list) -> list:
     merged: list[TaskItem] = []
-    positions: dict[tuple[str, str], int] = {}
     for task in [*(primary or []), *(secondary or [])]:
-        title = str(getattr(task, "title", "") if not isinstance(task, dict) else task.get("title") or "").strip()
-        owner = str(getattr(task, "owner", "") if not isinstance(task, dict) else task.get("owner") or "").strip()
+        title = _task_value(task, "title").strip()
+        owner = _task_value(task, "owner").strip()
         if not title:
             continue
-        key = (title.lower(), owner.lower())
-        if isinstance(task, TaskItem):
-            normalized = task
-        elif isinstance(task, dict):
-            try:
-                normalized = TaskItem.model_validate(task)
-            except Exception:
-                continue
-        else:
-            normalized = TaskItem(
-                title=title,
-                owner=owner or "TBD",
-                priority=str(getattr(task, "priority", "medium") or "medium"),
-                due_date=str(getattr(task, "due_date", "TBD") or "TBD"),
-                status=str(getattr(task, "status", "draft") or "draft"),
-                notes=str(getattr(task, "notes", "") or ""),
-            )
-        if key in positions:
-            merged[positions[key]] = normalized
+        normalized = _normalize_task_item(task, title=title, owner=owner)
+        if normalized is None:
             continue
-        positions[key] = len(merged)
+        target_index = _find_status_merge_target(merged, normalized)
+        if target_index is not None:
+            merged[target_index] = normalized
+            continue
         merged.append(normalized)
     return merged
+
+def _normalize_task_item(task: object, *, title: str, owner: str) -> TaskItem | None:
+    if isinstance(task, TaskItem):
+        return task
+    if isinstance(task, dict):
+        try:
+            return TaskItem.model_validate(task)
+        except Exception:
+            return None
+    return TaskItem(
+        title=title,
+        owner=owner or "TBD",
+        priority=_task_value(task, "priority", default="medium") or "medium",
+        due_date=_task_value(task, "due_date", default="TBD") or "TBD",
+        status=_task_value(task, "status", default="draft") or "draft",
+        notes=_task_value(task, "notes"),
+    )
+
+def _find_status_merge_target(tasks: list[TaskItem], incoming: TaskItem) -> int | None:
+    incoming_title = _task_title_key(incoming.title)
+    incoming_owner = _normalized(incoming.owner)
+    exact_matches = [
+        index
+        for index, task in enumerate(tasks)
+        if _task_title_key(task.title) == incoming_title and _normalized(task.owner) == incoming_owner
+    ]
+    if len(exact_matches) == 1:
+        return exact_matches[0]
+
+    title_matches = [
+        index
+        for index, task in enumerate(tasks)
+        if _task_title_key(task.title) == incoming_title
+    ]
+    if len(title_matches) == 1:
+        existing_owner = _normalized(tasks[title_matches[0]].owner)
+        if _is_placeholder_owner(existing_owner) or _is_placeholder_owner(incoming_owner):
+            return title_matches[0]
+    return None
+
+def _task_value(task: object, field: str, *, default: str = "") -> str:
+    if isinstance(task, dict):
+        return str(task.get(field) or default)
+    return str(getattr(task, field, default) or default)
+
+def _normalized(value: str | None) -> str:
+    return " ".join(str(value or "").lower().split())
+
+def _task_title_key(value: str | None) -> str:
+    normalized = _normalized(value)
+    compact = normalized.replace(" ", "")
+    if not compact:
+        return ""
+    generic_ppt = _generic_artifact_title_key(
+        compact,
+        artifact_tokens=("ppt", "powerpoint"),
+        generic_tokens=(
+            "制作",
+            "生成",
+            "做",
+            "准备",
+            "整理",
+            "输出",
+            "产出",
+            "创建",
+            "汇报",
+            "演示",
+            "大纲",
+            "材料",
+            "幻灯片",
+            "演示稿",
+            "generation",
+            "generate",
+            "create",
+            "make",
+            "build",
+            "outline",
+            "slides",
+            "slide",
+            "deck",
+            "presentation",
+        ),
+    )
+    if generic_ppt:
+        return generic_ppt
+    generic_canvas = _generic_artifact_title_key(
+        compact,
+        artifact_tokens=("canvas", "画布"),
+        generic_tokens=("制作", "生成", "做", "准备", "整理", "输出", "产出", "创建", "绘制", "画", "流程图"),
+    )
+    if generic_canvas:
+        return generic_canvas
+    return compact
+
+def _generic_artifact_title_key(compact: str, *, artifact_tokens: tuple[str, ...], generic_tokens: tuple[str, ...]) -> str:
+    matched_token = next((token for token in artifact_tokens if token in compact), "")
+    if not matched_token:
+        return ""
+    remaining = compact
+    for token in (*artifact_tokens, *generic_tokens):
+        remaining = remaining.replace(token, "")
+    return matched_token if not remaining else ""
+
+def _is_placeholder_owner(value: str) -> bool:
+    return value in {"", "tbd", "待定", "未定", "待确认", "待確認", "unassigned"}
 
 def task_items_from_llm_payload(payload: dict) -> list[TaskItem]:
     raw_tasks = payload.get("tasks") if isinstance(payload, dict) else []

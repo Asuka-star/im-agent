@@ -210,6 +210,14 @@ class RequestRouter:
             return exact_decision
 
         rule_decision = self.route_by_rule(instruction)
+        text = (instruction or "").strip()
+        lowered = text.lower()
+        if (
+            rule_decision is not None
+            and rule_decision.route == "tasks"
+            and self._is_task_status_update_request(text, lowered)
+        ):
+            return rule_decision
 
         if llm_service is not None and getattr(llm_service, "is_configured", lambda: False)():
             try:

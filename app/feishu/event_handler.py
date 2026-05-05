@@ -11,6 +11,7 @@ from app.schemas.feishu_event import (
     FeishuMentionedUser,
     FeishuMessage,
     FeishuMessageContext,
+    FeishuMessageLifecycleContext,
 )
 from app.services.speech_to_text import SpeechToTextService
 
@@ -22,6 +23,8 @@ class FeishuEventHandler:
     """Parses incoming Feishu event payloads into an internal message context."""
 
     BOT_NAME_HINTS = ("机器人", "智能助手", "assistant", "bot")
+    MESSAGE_RECALLED_EVENT = "im.message.recalled_v1"
+    MESSAGE_UPDATED_EVENTS = {"im.message.updated_v1", "im.message.message_updated_v1"}
 
     def __init__(
         self,
@@ -71,8 +74,13 @@ class FeishuEventHandler:
         parsed_mentions = self._parse_mentions(message.mentions or [])
         text = self._strip_mentions(raw_text, message.mentions or [])
         voice_mention = False
+        text_prefix_mention = False
         if (message.message_type or "").strip().lower() == "audio":
             text, voice_mention = self._strip_voice_bot_prefix(text)
+        else:
+            stripped_text, text_prefix_mention = self._strip_voice_bot_prefix(raw_text)
+            if text_prefix_mention:
+                text = self._strip_mentions(stripped_text, message.mentions or [])
 
         session_id = (
             message.chat_id
@@ -108,8 +116,44 @@ class FeishuEventHandler:
             raw_text=raw_text,
             file_key=file_key,
             transcription_notice=transcription_notice,
-            is_mentioned=any(user.is_bot for user in parsed_mentions) or voice_mention,
+            is_mentioned=any(user.is_bot for user in parsed_mentions) or voice_mention or text_prefix_mention,
             mentioned_users=parsed_mentions,
+        )
+
+    def is_message_lifecycle_event(self, envelope: FeishuEventEnvelope) -> bool:
+        event_type = (envelope.header.event_type if envelope.header else "") or ""
+        return event_type in {self.MESSAGE_RECALLED_EVENT, *self.MESSAGE_UPDATED_EVENTS}
+
+    def extract_message_lifecycle_context(self, payload: dict) -> FeishuMessageLifecycleContext | None:
+        header = payload.get("header") if isinstance(payload.get("header"), dict) else {}
+        event = payload.get("event") if isinstance(payload.get("event"), dict) else {}
+        event_type = str(header.get("event_type") or payload.get("type") or "").strip()
+        if event_type not in {self.MESSAGE_RECALLED_EVENT, *self.MESSAGE_UPDATED_EVENTS}:
+            return None
+
+        message_payload = event.get("message") if isinstance(event.get("message"), dict) else event
+        message_id = str(message_payload.get("message_id") or event.get("message_id") or "").strip()
+        if not message_id:
+            return None
+
+        chat_id = str(message_payload.get("chat_id") or event.get("chat_id") or "").strip() or None
+        parsed_content = self._parse_message_content(
+            message_payload.get("content") if isinstance(message_payload, dict) else None
+        )
+        raw_text = str(parsed_content.get("text") or "").strip()
+
+        return FeishuMessageLifecycleContext(
+            event_id=header.get("event_id"),
+            event_type=event_type,
+            tenant_key=header.get("tenant_key"),
+            message_id=message_id,
+            chat_id=chat_id,
+            session_id=chat_id or message_id,
+            message_type=message_payload.get("message_type") if isinstance(message_payload, dict) else None,
+            text=raw_text or None,
+            raw_text=raw_text or None,
+            recall_time=str(event.get("recall_time") or "").strip() or None,
+            recall_type=str(event.get("recall_type") or "").strip() or None,
         )
 
     def _parse_message_content(self, content: str | None) -> dict:
@@ -262,7 +306,7 @@ class FeishuEventHandler:
         prefixes.extend(self.BOT_NAME_HINTS)
 
         for prefix in prefixes:
-            pattern = rf"^\s*{re.escape(prefix)}[\uFF0C,\uFF1A:\s]*"
+            pattern = rf"^\s*@?{re.escape(prefix)}[\uFF0C,\uFF1A:\s]*"
             if re.match(pattern, normalized, flags=re.IGNORECASE):
                 stripped = re.sub(
                     pattern, "", normalized, count=1, flags=re.IGNORECASE

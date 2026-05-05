@@ -89,6 +89,18 @@ class RequestRouterTests(unittest.TestCase):
         self.assertEqual(decision.route, "tasks")
         self.assertEqual(decision.source, "rule")
 
+    def test_task_completion_rule_overrides_llm_status_route(self) -> None:
+        llm = FakeRouteLLM({"route": "status", "confidence": 0.95, "reason": "misread as task query"})
+
+        decision = self.router.route(
+            "\u5f20\u4e09\u7684\u4efb\u52a1\u5b8c\u6210\u4e86",
+            llm_service=llm,
+        )
+
+        self.assertEqual(decision.route, "tasks")
+        self.assertEqual(decision.source, "rule")
+        self.assertEqual(llm.requests, [])
+
     def test_first_person_completion_statement_routes_to_task_update(self) -> None:
         decision = self.router.route_by_rule("我已完成后端开发任务")
 

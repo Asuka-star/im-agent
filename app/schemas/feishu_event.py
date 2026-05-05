@@ -100,3 +100,17 @@ class FeishuMessageContext(BaseModel):
     @property
     def mentioned_user_names(self) -> list[str]:
         return [user.name for user in self.mentioned_users if user.name and not user.is_bot]
+
+
+class FeishuMessageLifecycleContext(BaseModel):
+    event_id: str | None = None
+    event_type: str
+    tenant_key: str | None = None
+    message_id: str
+    chat_id: str | None = None
+    session_id: str
+    message_type: str | None = None
+    text: str | None = None
+    raw_text: str | None = None
+    recall_time: str | None = None
+    recall_type: str | None = None

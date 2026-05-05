@@ -39,7 +39,7 @@ class WorkflowTaskIntentExecution:
             return None
         if route_decision.route not in {"tasks", "unknown"}:
             return None
-        _, _, current_tasks = workflow._base_status_task_sources_for_message(message)
+        current_tasks = workflow._context_tasks_for_message(message)
         actor_names = workflow._sender_actor_names_for_message(message)
         status_update = TaskOperationTool.resolve_status_update(
             current_tasks,
@@ -78,6 +78,7 @@ class WorkflowTaskIntentExecution:
             session_id=message.session_id,
             analysis=analysis,
             episode_id=active_episode_id,
+            source_message_id=message.message_id,
             async_embed=True,
             preserve_unmatched_previous=False,
         )
@@ -141,6 +142,7 @@ class WorkflowTaskIntentExecution:
             session_id=message.session_id,
             analysis=analysis,
             episode_id=active_episode_id,
+            source_message_id=message.message_id,
             async_embed=True,
             preserve_unmatched_previous=False,
         )
@@ -321,6 +323,7 @@ class WorkflowTaskIntentExecution:
             session_id=message.session_id,
             analysis=analysis,
             episode_id=active_episode_id,
+            source_message_id=message.message_id,
             async_embed=True,
             preserve_unmatched_previous=False,
         )
@@ -375,6 +378,7 @@ class WorkflowTaskIntentExecution:
                 session_id=message.session_id,
                 analysis=analysis,
                 episode_id=active_episode_id,
+                source_message_id=message.message_id,
                 async_embed=True,
                 preserve_unmatched_previous=False,
             )
@@ -429,6 +433,7 @@ class WorkflowTaskIntentExecution:
             session_id=message.session_id,
             analysis=analysis,
             episode_id=active_episode_id,
+            source_message_id=message.message_id,
             async_embed=True,
             preserve_unmatched_previous=False,
         )

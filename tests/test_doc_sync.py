@@ -109,6 +109,66 @@ class DocSyncTests(unittest.TestCase):
         self.assertTrue(any(task.title == "后端开发" and task.owner == "张三" for task in merged))
         self.assertTrue(any(task.title == "前端开发" and task.owner == "张三" for task in merged))
 
+    def test_task_operation_tool_accepts_orm_and_dict_task_inputs(self) -> None:
+        orm_task = Task(
+            session_id="s_task_tool_orm",
+            title="API integration",
+            owner="Alice",
+            priority="medium",
+            due_date="TBD",
+            status="draft",
+            notes="from db",
+        )
+
+        status_plan = TaskOperationTool.resolve_status_update(
+            [orm_task],
+            "Alice completed API integration",
+        )
+        self.assertTrue(status_plan["updated"])
+        self.assertIsInstance(status_plan["tasks"][0], TaskItem)
+        self.assertEqual(status_plan["tasks"][0].status, "done")
+
+        operation_tasks = TaskOperationTool.apply_llm_operations(
+            [orm_task],
+            [
+                {
+                    "action": "update",
+                    "match_hint": {"title": "API integration", "owner": "Alice"},
+                    "task": {
+                        "title": "API integration",
+                        "owner": "Alice",
+                        "priority": "high",
+                        "due_date": "TBD",
+                        "status": "draft",
+                        "notes": "reprioritized",
+                    },
+                }
+            ],
+        )
+        self.assertEqual(operation_tasks[0].priority, "high")
+
+        merged = TaskOperationTool.merge_assignment_items(
+            [orm_task],
+            [
+                {
+                    "title": "QA review",
+                    "owner": "Bob",
+                    "priority": "medium",
+                    "due_date": "TBD",
+                    "status": "draft",
+                    "notes": "",
+                }
+            ],
+        )
+        self.assertEqual(len(merged), 2)
+        self.assertTrue(all(isinstance(task, TaskItem) for task in merged))
+
+        clarification = TaskOperationTool.task_assignment_clarification(
+            [orm_task],
+            [{"title": "API integration", "owner": "TBD"}],
+        )
+        self.assertIsInstance(clarification, dict)
+
     def test_fresh_status_snapshot_overrides_document_task_status(self) -> None:
         from app.services.workflow.document_tasks import merge_status_task_sources
 
@@ -124,6 +184,37 @@ class DocSyncTests(unittest.TestCase):
         self.assertEqual(len(merged), 1)
         self.assertEqual(merged[0].status, "done")
         self.assertEqual(merged[0].notes, "状态更新")
+
+    def test_status_snapshot_merges_placeholder_owner_by_unique_title(self) -> None:
+        from app.services.workflow.document_tasks import merge_status_task_sources
+
+        document_tasks = [
+            TaskItem(title="API联调", owner="TBD", priority="medium", due_date="TBD", status="draft", notes="文档快照")
+        ]
+        memory_tasks = [
+            TaskItem(title="API联调", owner="Zeleous", priority="high", due_date="2026-05-06", status="draft", notes="负责人已确认")
+        ]
+
+        merged = merge_status_task_sources(document_tasks, memory_tasks)
+
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0].owner, "Zeleous")
+        self.assertEqual(merged[0].priority, "high")
+
+    def test_status_snapshot_keeps_same_title_with_distinct_explicit_owners(self) -> None:
+        from app.services.workflow.document_tasks import merge_status_task_sources
+
+        document_tasks = [
+            TaskItem(title="素材整理", owner="张三", priority="medium", due_date="TBD", status="draft")
+        ]
+        memory_tasks = [
+            TaskItem(title="素材整理", owner="李四", priority="medium", due_date="TBD", status="draft")
+        ]
+
+        merged = merge_status_task_sources(document_tasks, memory_tasks)
+
+        self.assertEqual(len(merged), 2)
+        self.assertEqual([task.owner for task in merged], ["张三", "李四"])
 
     def test_update_current_tasks_from_discussion_prefers_explicit_new_assignment(self) -> None:
         current_tasks = [
@@ -315,6 +406,48 @@ class DocSyncTests(unittest.TestCase):
         plan = TaskOperationTool.resolve_status_update(current_tasks, "张三的任务完成了")
         self.assertTrue(plan["detected"])
         self.assertIn("clarification", plan)
+
+    def test_all_scope_status_update_marks_all_owner_tasks_done(self) -> None:
+        current_tasks = [
+            TaskItem(title="后端开发", owner="张三", priority="medium", due_date="TBD", status="draft", notes=""),
+            TaskItem(title="接口联调", owner="张三", priority="medium", due_date="TBD", status="draft", notes=""),
+            TaskItem(title="前端开发", owner="李四", priority="medium", due_date="TBD", status="draft", notes=""),
+        ]
+
+        plan = TaskOperationTool.resolve_status_update(current_tasks, "张三的任务全部完成了")
+
+        self.assertTrue(plan["updated"])
+        self.assertEqual([task.status for task in plan["tasks"]], ["done", "done", "draft"])
+        self.assertEqual(len(plan["updated_tasks"]), 2)
+        self.assertNotIn("clarification", plan)
+
+    def test_generic_ppt_titles_merge_across_case_and_action_words(self) -> None:
+        current_tasks = [
+            TaskItem(title="PPT generation", owner="张三", priority="medium", due_date="TBD", status="draft", notes="")
+        ]
+        incoming_tasks = [
+            TaskItem(title="制作ppt", owner="张三", priority="high", due_date="TBD", status="draft", notes="pending")
+        ]
+
+        merged = TaskOperationTool.merge_assignment_items(current_tasks, incoming_tasks)
+
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0].priority, "high")
+
+    def test_status_source_merges_generic_ppt_titles(self) -> None:
+        from app.services.workflow.document_tasks import merge_status_task_sources
+
+        document_tasks = [
+            TaskItem(title="PPT generation", owner="张三", priority="medium", due_date="TBD", status="draft", notes="")
+        ]
+        memory_tasks = [
+            TaskItem(title="制作ppt", owner="张三", priority="high", due_date="TBD", status="draft", notes="pending")
+        ]
+
+        merged = merge_status_task_sources(document_tasks, memory_tasks)
+
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0].priority, "high")
 
     def test_merge_current_tasks_can_drop_removed_items_when_snapshot_is_exact(self) -> None:
         previous_tasks = [
@@ -2152,6 +2285,96 @@ class DocSyncTests(unittest.TestCase):
         self.assertEqual([task.title for task in tasks], ["Backend development"])
         memory_service.get_current_tasks.assert_called_once()
 
+    def test_status_ignores_source_dirty_document_snapshot(self) -> None:
+        session_id = "doc_status_dirty_document_session"
+        self.workflow.session_document_service.save_current_document(
+            session_id,
+            document_id="doc_status_dirty_document",
+            url="https://feishu.cn/docx/doc_status_dirty_document",
+            title="Project Tasks",
+            version=3,
+            sync_mode="updated",
+            section_snapshot=[
+                {
+                    "heading": "Task list",
+                    "paragraphs": [
+                        "Canvas design | owner: Zhang San | due: TBD | priority: medium | status: draft",
+                    ],
+                }
+            ],
+        )
+        current_doc = self.workflow.session_document_service.get_current_document(session_id)
+        current_doc["source_dirty"] = True
+        current_doc["source_dirty_message_id"] = "om_recalled_canvas"
+        current_doc["updated_at"] = "2026-01-02T00:00:00+00:00"
+        self.workflow.session_document_service.state_service.set_value(
+            f"session_doc:{session_id}",
+            json.dumps(current_doc, ensure_ascii=False),
+        )
+        memory_service = MagicMock()
+        memory_service.get_current_tasks.return_value = [
+            Task(
+                session_id=session_id,
+                title="PPT generation",
+                owner="Zhang San",
+                due_date="TBD",
+                priority="medium",
+                status="draft",
+                created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            )
+        ]
+        memory_service.get_active_episode.return_value = None
+        self.workflow.memory_service = memory_service
+        message = type(
+            "FakeMessage",
+            (),
+            {
+                "session_id": session_id,
+                "message_id": "m_doc_status_dirty_document",
+                "text": "show current tasks",
+                "chat_id": "c1",
+                "chat_type": "group",
+            },
+        )()
+
+        tasks = self.workflow._context_tasks_for_message(message)
+
+        self.assertEqual([task.title for task in tasks], ["PPT generation"])
+
+    def test_recall_lifecycle_removes_matching_current_task_snapshot(self) -> None:
+        memory_service = MagicMock()
+        memory_service.get_current_tasks.return_value = [
+            Task(
+                session_id="recall_cleanup_session",
+                title="canvas",
+                owner="\u5f20\u4e09",
+                due_date="TBD",
+                priority="medium",
+                status="draft",
+            ),
+            Task(
+                session_id="recall_cleanup_session",
+                title="ppt",
+                owner="\u5f20\u4e09",
+                due_date="TBD",
+                priority="medium",
+                status="draft",
+            ),
+        ]
+        self.workflow.memory_service = memory_service
+
+        removed = self.workflow._remove_lifecycle_source_tasks_from_current_snapshot(
+            session_id="recall_cleanup_session",
+            source_text="\u5f20\u4e09\u505acanvas",
+            episode_id=7,
+            message_id="om_recalled_canvas",
+        )
+
+        self.assertEqual(removed, 1)
+        saved_analysis = memory_service.save_round.call_args.kwargs["analysis"]
+        self.assertEqual([task.title for task in saved_analysis.tasks], ["ppt"])
+        self.assertEqual(memory_service.save_round.call_args.kwargs["source_message_id"], "om_recalled_canvas")
+
     def test_status_merges_memory_tasks_newer_than_document_snapshot(self) -> None:
         self.workflow.session_document_service.save_current_document(
             "doc_status_fresh_memory_session",
@@ -2318,6 +2541,87 @@ class DocSyncTests(unittest.TestCase):
         self.assertIn("基于当前文档生成汇报 PPT", result["reply_preview"])
         self.assertNotIn("任务明细", result["reply_preview"])
 
+    def test_next_action_status_query_uses_memory_tasks_when_no_artifact_recommendation(self) -> None:
+        memory_service = MagicMock()
+        memory_service.get_current_tasks.return_value = [
+            Task(
+                session_id="memory_next_action_session",
+                title="API integration",
+                owner="Alice",
+                priority="medium",
+                due_date="TBD",
+                status="draft",
+                notes="from memory",
+            )
+        ]
+        memory_service.get_active_episode.return_value = None
+        self.workflow.memory_service = memory_service
+        message = type(
+            "FakeMessage",
+            (),
+            {
+                "session_id": "memory_next_action_session",
+                "message_id": "m_memory_next_action",
+                "text": "\u4e0b\u4e00\u6b65\u884c\u52a8\u662f\u4ec0\u4e48",
+                "chat_id": "c1",
+                "chat_type": "group",
+            },
+        )()
+
+        result = self.workflow.status_execution.prepare_status_execution(message, llm_result={})
+
+        self.assertIn("基于当前任务的下一步", result["reply_preview"])
+        self.assertIn("请 Alice 补充《API integration》的明确截止时间", result["reply_preview"])
+        self.assertIn("API integration", result["reply_preview"])
+        self.assertNotIn("任务明细", result["reply_preview"])
+
+    def test_next_action_status_query_uses_pending_discussion_context_first(self) -> None:
+        memory_service = MagicMock()
+        memory_service.get_active_episode.return_value = type("Episode", (), {"id": 21})()
+        memory_service.get_alias_display_name.return_value = None
+        memory_service.get_episode_messages.return_value = [
+            type("Message", (), {"content": "风险是 PPT 生成可能较慢，飞书文档权限可能失败。", "sender_id": "u1"})(),
+            type("Message", (), {"content": "验收标准：能看到任务状态，能生成文档，也能继续推荐下一步。", "sender_id": "u1"})(),
+        ]
+        llm_service = MagicMock()
+        llm_service.is_configured.return_value = True
+        llm_service.extract_collaboration.return_value = {
+            "summary": "讨论了风险和验收标准",
+            "tasks": [
+                {
+                    "title": "确认飞书文档权限与 PPT 生成耗时",
+                    "owner": "TBD",
+                    "priority": "high",
+                    "due_date": "TBD",
+                    "status": "draft",
+                    "notes": "来自当前群聊上下文",
+                }
+            ],
+            "risks": ["PPT 生成可能较慢", "飞书文档权限可能失败"],
+            "next_actions": ["先验证飞书文档权限", "再跑一次 PPT 生成链路并记录耗时"],
+        }
+        self.workflow.memory_service = memory_service
+        self.workflow.llm_service = llm_service
+        message = type(
+            "FakeMessage",
+            (),
+            {
+                "session_id": "pending_next_action_session",
+                "message_id": "m_pending_next_action",
+                "text": "下一步行动是什么",
+                "chat_id": "c1",
+                "chat_type": "group",
+            },
+        )()
+
+        result = self.workflow.status_execution.prepare_status_execution(message, llm_result={})
+
+        llm_service.extract_collaboration.assert_called_once()
+        self.assertIn("【基于当前讨论的下一步】", result["reply_preview"])
+        self.assertIn("先验证飞书文档权限", result["reply_preview"])
+        self.assertIn("PPT 生成可能较慢", result["reply_preview"])
+        self.assertNotIn("任务明细", result["reply_preview"])
+
     def test_doc_reply_appends_contextual_next_actions(self) -> None:
         self.workflow.session_document_service.save_current_document(
             "doc_next_action_append_session",
@@ -2429,6 +2733,45 @@ class DocSyncTests(unittest.TestCase):
         self.assertEqual(tasks[0].title, "产品经理协调前后端开发")
         self.assertIn("产品经理协调前后端开发", reply)
         self.assertIn("王五", reply)
+
+    def test_status_pending_discussion_accepts_orm_memory_tasks(self) -> None:
+        memory_service = MagicMock()
+        memory_service.get_current_tasks.return_value = [
+            Task(
+                session_id="pending_status_orm_session",
+                title="已有任务",
+                owner="Zeleous",
+                priority="medium",
+                due_date="TBD",
+                status="draft",
+                notes="from db",
+            )
+        ]
+        memory_service.get_active_episode.return_value = type("Episode", (), {"id": 12})()
+        memory_service.get_episode_messages.return_value = [
+            type("Message", (), {"content": "风险是 PPT 生成可能较慢。", "sender_id": "u1"})()
+        ]
+        memory_service.get_alias_display_name.return_value = None
+        self.workflow.memory_service = memory_service
+        self.workflow.llm_service = MagicMock()
+        self.workflow.llm_service.is_configured.return_value = False
+        message = type(
+            "FakeMessage",
+            (),
+            {
+                "session_id": "pending_status_orm_session",
+                "message_id": "m_pending_status_orm",
+                "text": "任务列表",
+                "chat_id": "c1",
+                "chat_type": "group",
+            },
+        )()
+
+        tasks = self.workflow._context_tasks_for_message(message)
+
+        self.assertEqual(len(tasks), 1)
+        self.assertIsInstance(tasks[0], TaskItem)
+        self.assertEqual(tasks[0].title, "已有任务")
 
     def test_status_prefers_llm_for_pending_discussion_task_extraction(self) -> None:
         memory_service = MagicMock()

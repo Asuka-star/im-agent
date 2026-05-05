@@ -217,6 +217,69 @@ class FeishuCardActionTests(unittest.TestCase):
         self.assertIn("Bob", workflow.resume_request["answer_value"])
         self.assertEqual(workflow.message_api.patched_cards[0]["message_id"], "card_msg_2")
 
+    def test_create_delivery_bundle_patches_card_before_bundling(self) -> None:
+        workflow = _FakeWorkflow([])
+
+        def bundle_delivery_from_task_run(task_run_id: str, *, requested_by: str):
+            self.assertTrue(workflow.message_api.patched_cards)
+            workflow.bundle_request = {"task_run_id": task_run_id, "requested_by": requested_by}
+            return SimpleNamespace(task_run_id=task_run_id)
+
+        workflow.bundle_delivery_from_task_run = bundle_delivery_from_task_run
+        service = FeishuCardActionService(workflow)
+        value = build_card_action_payload(
+            "create_delivery_bundle",
+            session_id="oc_1",
+            task_run_id="run_delivery",
+            payload={"mode": "slides"},
+        )
+
+        result = service.handle_raw_event(
+            {
+                "header": {"event_type": "card.action.trigger", "event_id": "evt_delivery"},
+                "event": {
+                    "message": {"message_id": "card_msg_delivery", "chat_id": "oc_1"},
+                    "operator": {"user_id": "ou_1"},
+                    "action": {"value": value},
+                },
+            }
+        )
+
+        self.assertEqual(result["msg"], "handled")
+        self.assertEqual(workflow.bundle_request["task_run_id"], "run_delivery")
+        self.assertEqual(workflow.message_api.patched_cards[0]["message_id"], "card_msg_delivery")
+
+    def test_failed_delivery_bundle_patches_card_error(self) -> None:
+        workflow = _FakeWorkflow([])
+
+        def bundle_delivery_from_task_run(task_run_id: str, *, requested_by: str):
+            raise RuntimeError("bundle failed")
+
+        workflow.bundle_delivery_from_task_run = bundle_delivery_from_task_run
+        service = FeishuCardActionService(workflow)
+        value = build_card_action_payload(
+            "create_delivery_bundle",
+            session_id="oc_1",
+            task_run_id="run_delivery",
+            payload={"mode": "slides"},
+        )
+
+        result = service.handle_raw_event(
+            {
+                "header": {"event_type": "card.action.trigger", "event_id": "evt_delivery_failed"},
+                "event": {
+                    "message": {"message_id": "card_msg_delivery", "chat_id": "oc_1"},
+                    "operator": {"user_id": "ou_1"},
+                    "action": {"value": value},
+                },
+            }
+        )
+
+        self.assertEqual(result["msg"], "handled")
+        self.assertFalse(result["data"]["ok"])
+        self.assertEqual(workflow.message_api.patched_cards[-1]["message_id"], "card_msg_delivery")
+        self.assertEqual(workflow.message_api.patched_cards[-1]["card"]["header"]["template"], "red")
+
     def test_answered_confirmation_is_not_reprocessed_after_restart(self) -> None:
         workflow = _FakeWorkflow([TaskItem(title="Backend development", owner="Alice", status="draft")])
         workflow.task_run_service.detail = SimpleNamespace(

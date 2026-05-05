@@ -148,6 +148,7 @@ class WorkflowDocExecution:
             session_id=session_id,
             analysis=analysis,
             episode_id=episode_id,
+            source_message_id=source_message_id,
             async_embed=True,
             preserve_unmatched_previous=False,
         )

@@ -57,7 +57,12 @@ class Message(Base):
     sender_id = Column(String(128), nullable=True)
     mentions_json = Column(Text, nullable=True)
     content = Column(Text, nullable=False)
+    original_content = Column(Text, nullable=True)
+    status = Column(String(32), nullable=False, default="active", index=True)
+    lifecycle_json = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), nullable=True)
+    recalled_at = Column(DateTime(timezone=True), nullable=True)
 
 
 class Task(Base):

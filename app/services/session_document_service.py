@@ -97,6 +97,70 @@ class SessionDocumentService:
         self._upsert_document_list(session_id, payload)
         return payload
 
+    def mark_documents_source_dirty(
+        self,
+        session_id: str,
+        *,
+        message_id: str,
+        episode_id: int | None = None,
+        task_run_ids: list[str] | None = None,
+        event_type: str,
+        reason: str,
+    ) -> list[dict[str, Any]]:
+        target_task_run_ids = {str(item).strip() for item in (task_run_ids or []) if str(item).strip()}
+        now = datetime.now(timezone.utc).isoformat()
+        patch = {
+            "source_dirty": True,
+            "source_dirty_message_id": message_id,
+            "source_dirty_event_type": event_type,
+            "source_dirty_reason": reason,
+            "source_dirty_at": now,
+        }
+
+        current = self.get_current_document(session_id)
+        list_items = self.list_documents(session_id)
+        dirty_documents: list[dict[str, Any]] = []
+        updated_list: list[dict[str, Any]] = []
+        current_id = str(current.get("document_id") or "").strip() if isinstance(current, dict) else ""
+        updated_current: dict[str, Any] | None = None
+
+        for item in list_items:
+            document = dict(item)
+            document.pop("is_current", None)
+            matches_episode = self._matches_episode_id(document.get("episode_id"), episode_id)
+            matches_task_run = bool(target_task_run_ids and str(document.get("task_run_id") or "") in target_task_run_ids)
+            if matches_episode or matches_task_run:
+                document.update(patch)
+                dirty_documents.append(dict(document))
+            if current_id and str(document.get("document_id") or "").strip() == current_id:
+                updated_current = dict(document)
+            updated_list.append(document)
+
+        if isinstance(current, dict) and current_id and updated_current is None:
+            document = dict(current)
+            matches_episode = self._matches_episode_id(document.get("episode_id"), episode_id)
+            matches_task_run = bool(target_task_run_ids and str(document.get("task_run_id") or "") in target_task_run_ids)
+            if matches_episode or matches_task_run:
+                document.update(patch)
+                dirty_documents.append(dict(document))
+                updated_current = dict(document)
+
+        if updated_current is not None:
+            self.state_service.set_value(self._key(session_id), json.dumps(updated_current, ensure_ascii=False))
+        if updated_list:
+            updated_list.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+            self.state_service.set_value(self._list_key(session_id), json.dumps(updated_list, ensure_ascii=False))
+        return dirty_documents
+
+    @staticmethod
+    def _matches_episode_id(value: object, episode_id: int | None) -> bool:
+        if episode_id is None or value is None:
+            return False
+        try:
+            return int(value) == episode_id
+        except (TypeError, ValueError):
+            return False
+
     def clear_current_document(self, session_id: str) -> None:
         self.state_service.set_value(self._key(session_id), "")
 

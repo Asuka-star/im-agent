@@ -45,7 +45,26 @@ async def receive_events(request: Request, background_tasks: BackgroundTasks) ->
             envelope.header.event_id if envelope.header else None,
             (time.perf_counter() - started_at) * 1000,
         )
-        return {"code": 0, "msg": "accepted", "data": {"background": True, "kind": "card_action"}}
+        return {
+            "toast": {
+                "type": "info",
+                "content": "已收到操作，正在后台处理。",
+                "i18n": {
+                    "zh_cn": "已收到操作，正在后台处理。",
+                    "en_us": "Action received. Processing in the background.",
+                },
+            }
+        }
+
+    if event_handler.is_message_lifecycle_event(envelope):
+        background_tasks.add_task(_process_message_lifecycle_background, payload)
+        logger.info(
+            "Feishu message lifecycle callback accepted for background processing: event_id=%s event_type=%s ack_elapsed_ms=%.1f",
+            envelope.header.event_id if envelope.header else None,
+            envelope.header.event_type if envelope.header else None,
+            (time.perf_counter() - started_at) * 1000,
+        )
+        return {"code": 0, "msg": "accepted", "data": {"background": True, "kind": "message_lifecycle"}}
 
     raw_message = envelope.event.message if envelope.event else None
     raw_message_id = raw_message.message_id if raw_message else None
@@ -94,6 +113,25 @@ def _process_card_action_background(payload: dict) -> None:
         )
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to process Feishu card action in background: error=%s", exc)
+
+
+def _process_message_lifecycle_background(payload: dict) -> None:
+    started_at = time.perf_counter()
+    try:
+        lifecycle_context = event_handler.extract_message_lifecycle_context(payload)
+        if lifecycle_context is None:
+            logger.info("Ignored lifecycle callback because no supported message lifecycle context was extracted")
+            return
+        result = workflow_service.handle_message_lifecycle(lifecycle_context)
+        logger.info(
+            "Feishu message lifecycle handled: message_id=%s mode=%s updated=%s elapsed_ms=%.1f",
+            result.get("message_id"),
+            result.get("mode"),
+            result.get("updated"),
+            (time.perf_counter() - started_at) * 1000,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to process Feishu message lifecycle in background: error=%s", exc)
 
 
 def _process_event_background(envelope: FeishuEventEnvelope, raw_message_id: str | None) -> None:

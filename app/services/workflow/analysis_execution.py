@@ -38,6 +38,7 @@ class WorkflowAnalysisExecution:
             session_id=message.session_id,
             analysis=analysis,
             episode_id=active_episode_id,
+            source_message_id=message.message_id,
             async_embed=True,
             preserve_unmatched_previous=False,
         )

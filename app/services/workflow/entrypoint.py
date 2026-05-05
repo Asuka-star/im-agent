@@ -58,6 +58,29 @@ class WorkflowEntrypoint:
             mentioned_users=[user.model_dump() for user in message.mentioned_users],
             embed=False,
         )
+        lifecycle_info = {}
+        try:
+            lifecycle_info = workflow.memory_service.get_message_lifecycle_info(message.message_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to load message lifecycle state after save: message_id=%s error=%s", message.message_id, exc)
+        if lifecycle_info.get("status") == "recalled":
+            logger.info(
+                "Skipping recalled message event that arrived after lifecycle callback: message_id=%s",
+                message.message_id,
+            )
+            return self._empty_result(message.session_id, "recalled_message_skipped")
+
+        try:
+            stored_content = workflow.memory_service.get_user_message_content(message.message_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to load persisted message content after save: message_id=%s error=%s", message.message_id, exc)
+            stored_content = None
+        if stored_content and stored_content != saved_content:
+            if hasattr(message, "model_copy"):
+                message = message.model_copy(update={"text": stored_content, "raw_text": stored_content})
+            else:
+                message.text = stored_content
+                message.raw_text = stored_content
         logger.info(
             "Workflow stage completed: message_id=%s stage=save_user_message elapsed_ms=%.1f",
             message.message_id,
@@ -156,6 +179,7 @@ class WorkflowEntrypoint:
                 session_id=message.session_id,
                 content=result["reply_preview"],
                 episode_id=result.get("episode_id"),
+                source_message_id=message.message_id,
                 embed=False,
             )
         workflow.result_persistence.persist_artifacts(task_run.task_run_id, result.get("artifacts", []))

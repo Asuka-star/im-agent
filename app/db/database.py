@@ -76,6 +76,22 @@ def _run_lightweight_migrations() -> None:
         with engine.begin() as connection:
             connection.execute(text("ALTER TABLE messages ADD COLUMN episode_id INTEGER"))
             connection.execute(text("CREATE INDEX IF NOT EXISTS ix_messages_episode_id ON messages (episode_id)"))
+    if "original_content" not in columns:
+        with engine.begin() as connection:
+            connection.execute(text("ALTER TABLE messages ADD COLUMN original_content TEXT"))
+    if "status" not in columns:
+        with engine.begin() as connection:
+            connection.execute(text("ALTER TABLE messages ADD COLUMN status VARCHAR(32) NOT NULL DEFAULT 'active'"))
+            connection.execute(text("CREATE INDEX IF NOT EXISTS ix_messages_status ON messages (status)"))
+    if "lifecycle_json" not in columns:
+        with engine.begin() as connection:
+            connection.execute(text("ALTER TABLE messages ADD COLUMN lifecycle_json TEXT"))
+    if "updated_at" not in columns:
+        with engine.begin() as connection:
+            connection.execute(text("ALTER TABLE messages ADD COLUMN updated_at TIMESTAMPTZ"))
+    if "recalled_at" not in columns:
+        with engine.begin() as connection:
+            connection.execute(text("ALTER TABLE messages ADD COLUMN recalled_at TIMESTAMPTZ"))
 
     if "memories" in tables:
         memory_columns = {column["name"] for column in inspector.get_columns("memories")}

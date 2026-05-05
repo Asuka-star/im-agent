@@ -59,6 +59,12 @@ class FeishuCardActionService:
         except Exception as exc:  # noqa: BLE001
             logger.exception("Feishu card action failed: action=%s", event.action.action)
             result = {"ok": False, "error": str(exc), "action": event.action.action}
+            self._patch_card_status(
+                event,
+                title="卡片操作失败",
+                content=f"这次卡片操作没有执行成功：{exc}",
+                template="red",
+            )
             self._reply(event, f"这次卡片操作没有执行成功：{exc}")
         self.dedup_service.finish(key, result)
         return {"code": 0, "msg": "handled", "data": result}
@@ -156,6 +162,7 @@ class FeishuCardActionService:
             session_id=session_id,
             analysis=analysis,
             episode_id=None,
+            source_message_id=action.source_message_id or action.idempotency_key,
             async_embed=True,
             preserve_unmatched_previous=False,
         )
@@ -216,11 +223,14 @@ class FeishuCardActionService:
         task_run_id = event.action.task_run_id
         if not task_run_id:
             raise ValueError("缺少 task_run_id，无法生成交付包")
+        self._patch_card_status(event, title="交付包生成中", content="已开始整理交付包，完成后会在任务详情和 IM 中展示。")
         detail = self.workflow.bundle_delivery_from_task_run(
             task_run_id,
             requested_by=event.operator_id or "feishu_card",
         )
-        self._patch_card_status(event, title="交付包生成中", content="已开始整理交付包，完成后会在任务详情中展示。")
+        if detail is None:
+            raise ValueError("没有找到对应 task run，无法生成交付包")
+        self._patch_card_status(event, title="交付包已生成", content="交付包已整理完成，新的交付包卡片会回发到 IM。")
         self._reply(event, "已开始整理交付包，完成后会在任务详情和 IM 中展示。")
         return {
             "ok": True,
