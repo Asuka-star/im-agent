@@ -251,6 +251,18 @@ class WorkflowEntrypoint:
                 output_payload={"context_length": len(base_workspace_context)},
             )
 
+        graph_primary_result = None
+        if workflow._should_run_graph_primary():
+            graph_primary_result = workflow._run_graph_task_command(
+                message,
+                task_run_id=task_run_id,
+                workspace_context=base_workspace_context,
+                active_episode_id=active_episode_id,
+                route_decision=None,
+            )
+        if graph_primary_result is not None:
+            return graph_primary_result
+
         route_decision = workflow._route_request(message.text)
         if task_run_id:
             workflow.task_run_service.upsert_step(
@@ -276,6 +288,23 @@ class WorkflowEntrypoint:
             route_decision.confidence,
             route_decision.needs_clarification,
         )
+        workflow._run_graph_shadow(
+            message,
+            task_run_id=task_run_id,
+            workspace_context=base_workspace_context,
+            route_decision=route_decision,
+        )
+        if not workflow._should_run_graph_primary():
+            graph_task_result = workflow._run_graph_task_command(
+                message,
+                task_run_id=task_run_id,
+                workspace_context=base_workspace_context,
+                active_episode_id=active_episode_id,
+                route_decision=route_decision,
+            )
+            if graph_task_result is not None:
+                return graph_task_result
+
         llm_task_intent_result = workflow.task_intent_execution.handle_llm_task_intent_instruction(
             message,
             route_decision=route_decision,

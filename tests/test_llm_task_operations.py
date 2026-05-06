@@ -21,6 +21,9 @@ class LLMTaskOperationTests(unittest.TestCase):
         self.reply_enabled_patcher = patch.object(settings, "feishu_reply_enabled", False)
         self.reply_enabled_patcher.start()
         self.addCleanup(self.reply_enabled_patcher.stop)
+        self.workflow_engine_patcher = patch.object(settings, "workflow_engine", "legacy")
+        self.workflow_engine_patcher.start()
+        self.addCleanup(self.workflow_engine_patcher.stop)
 
     def test_update_operation_replaces_existing_task(self) -> None:
         current_tasks = [
@@ -947,6 +950,61 @@ class LLMTaskOperationTests(unittest.TestCase):
             prompt="这份文档是用于报名材料，还是用于组内评审？",
             options=["报名材料版", "组内评审版"],
         )
+
+    def test_langgraph_primary_runs_before_legacy_route_resolution(self) -> None:
+        message = SimpleNamespace(
+            session_id="s1",
+            message_id="m_graph_first",
+            chat_id="c1",
+            chat_type="group",
+            sender_id="ou_1",
+            text="帮我总结项目进展",
+            raw_text="帮我总结项目进展",
+            is_mentioned=True,
+        )
+        graph_result = {
+            "session_id": "s1",
+            "episode_id": None,
+            "mode": "summary",
+            "analysis": None,
+            "reply_preview": "graph done",
+            "reply_sent": False,
+            "reply_error": None,
+            "artifacts": [],
+        }
+        with patch.object(
+            settings,
+            "workflow_engine",
+            "langgraph",
+        ), patch.object(
+            self.service.memory_service,
+            "get_active_episode",
+            return_value=None,
+        ), patch.object(
+            self.service,
+            "_build_workspace_context_for_message",
+            return_value="[workspace]",
+        ), patch.object(
+            self.service.task_run_service,
+            "upsert_step",
+        ), patch.object(
+            self.service.llm_service,
+            "is_configured",
+            return_value=True,
+        ), patch.object(
+            self.service,
+            "_route_request",
+        ) as route_request, patch.object(
+            self.service.graph_runner,
+            "run_task_graph",
+            return_value=graph_result,
+        ) as run_task_graph:
+            result = self.service._handle_mentioned_request(message, task_run_id="run_graph_first")
+
+        self.assertEqual(result["reply_preview"], "graph done")
+        route_request.assert_not_called()
+        run_task_graph.assert_called_once()
+        self.assertIsNone(run_task_graph.call_args.kwargs["legacy_route"])
 
     def test_ambiguous_route_uses_lightweight_dag_clarification_before_deep_resolution(self) -> None:
         message = type(

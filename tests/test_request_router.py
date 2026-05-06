@@ -16,6 +16,18 @@ class FakeRouteLLM:
         return self.result
 
 
+class FakeFailingRouteLLM:
+    def __init__(self) -> None:
+        self.requests: list[str] = []
+
+    def is_configured(self) -> bool:
+        return True
+
+    def route_workspace_request(self, instruction: str) -> dict:
+        self.requests.append(instruction)
+        raise RuntimeError("llm unavailable")
+
+
 class RequestRouterTests(unittest.TestCase):
     def setUp(self) -> None:
         self.router = RequestRouter()
@@ -27,13 +39,13 @@ class RequestRouterTests(unittest.TestCase):
         self.assertEqual(decision.route, "status")
         self.assertEqual(decision.source, "rule")
 
-    def test_exact_task_list_command_skips_llm_router(self) -> None:
+    def test_exact_task_list_command_uses_llm_when_available(self) -> None:
         llm = FakeRouteLLM({"route": "doc", "confidence": 1.0, "reason": "wrong"})
         decision = self.router.route("任务列表", llm_service=llm)
 
-        self.assertEqual(decision.route, "status")
-        self.assertEqual(decision.source, "rule_exact")
-        self.assertEqual(llm.requests, [])
+        self.assertEqual(decision.route, "doc")
+        self.assertEqual(decision.source, "llm")
+        self.assertEqual(llm.requests, ["任务列表"])
 
     def test_task_list_command_with_extra_text_does_not_use_exact_rule(self) -> None:
         llm = FakeRouteLLM({"route": "status", "confidence": 0.88, "reason": "natural language task query"})
@@ -43,21 +55,30 @@ class RequestRouterTests(unittest.TestCase):
         self.assertEqual(decision.source, "llm")
         self.assertEqual(llm.requests, ["任务列表吧"])
 
-    def test_other_exact_task_command_skips_llm_router(self) -> None:
+    def test_other_exact_task_command_uses_llm_when_available(self) -> None:
         llm = FakeRouteLLM({"route": "doc", "confidence": 1.0, "reason": "wrong"})
         decision = self.router.route("待办清单", llm_service=llm)
 
-        self.assertEqual(decision.route, "status")
-        self.assertEqual(decision.source, "rule_exact")
-        self.assertEqual(llm.requests, [])
+        self.assertEqual(decision.route, "doc")
+        self.assertEqual(decision.source, "llm")
+        self.assertEqual(llm.requests, ["待办清单"])
 
-    def test_exact_risk_command_skips_llm_router(self) -> None:
+    def test_exact_risk_command_uses_llm_when_available(self) -> None:
         llm = FakeRouteLLM({"route": "doc", "confidence": 1.0, "reason": "wrong"})
         decision = self.router.route("风险清单", llm_service=llm)
 
-        self.assertEqual(decision.route, "risks")
-        self.assertEqual(decision.source, "rule_exact")
-        self.assertEqual(llm.requests, [])
+        self.assertEqual(decision.route, "doc")
+        self.assertEqual(decision.source, "llm")
+        self.assertEqual(llm.requests, ["风险清单"])
+
+    def test_exact_greeting_uses_llm_when_available(self) -> None:
+        llm = FakeRouteLLM({"route": "unknown", "confidence": 0.0, "needs_clarification": True})
+        decision = self.router.route("你好", llm_service=llm)
+
+        self.assertEqual(decision.route, "unknown")
+        self.assertEqual(decision.source, "llm")
+        self.assertTrue(decision.needs_clarification)
+        self.assertEqual(llm.requests, ["你好"])
 
     def test_broad_task_query_defers_to_llm_router_when_available(self) -> None:
         llm = FakeRouteLLM({"route": "status", "confidence": 0.91, "reason": "user asks task status"})
@@ -89,7 +110,7 @@ class RequestRouterTests(unittest.TestCase):
         self.assertEqual(decision.route, "tasks")
         self.assertEqual(decision.source, "rule")
 
-    def test_task_completion_rule_overrides_llm_status_route(self) -> None:
+    def test_task_completion_statement_uses_llm_when_available(self) -> None:
         llm = FakeRouteLLM({"route": "status", "confidence": 0.95, "reason": "misread as task query"})
 
         decision = self.router.route(
@@ -97,9 +118,18 @@ class RequestRouterTests(unittest.TestCase):
             llm_service=llm,
         )
 
-        self.assertEqual(decision.route, "tasks")
-        self.assertEqual(decision.source, "rule")
-        self.assertEqual(llm.requests, [])
+        self.assertEqual(decision.route, "status")
+        self.assertEqual(decision.source, "llm")
+        self.assertEqual(llm.requests, ["张三的任务完成了"])
+
+    def test_local_rules_are_used_when_llm_router_fails(self) -> None:
+        llm = FakeFailingRouteLLM()
+
+        decision = self.router.route("任务列表", llm_service=llm)
+
+        self.assertEqual(decision.route, "status")
+        self.assertEqual(decision.source, "rule_exact")
+        self.assertEqual(llm.requests, ["任务列表"])
 
     def test_first_person_completion_statement_routes_to_task_update(self) -> None:
         decision = self.router.route_by_rule("我已完成后端开发任务")
@@ -185,6 +215,29 @@ class RequestRouterTests(unittest.TestCase):
         self.assertIsNotNone(decision)
         self.assertEqual(decision.route, "doc")
         self.assertEqual(decision.requested_outputs, ("doc", "slides", "canvas"))
+
+    def test_artifact_keywords_without_output_action_do_not_force_artifact_route(self) -> None:
+        decision = self.router.route_by_rule("我们先讨论一下 PPT 和文档结构")
+
+        self.assertIsNone(decision)
+
+    def test_llm_route_is_not_overridden_by_keyword_only_artifact_mentions(self) -> None:
+        llm = FakeRouteLLM({"route": "summary", "confidence": 0.9, "reason": "discussion summary"})
+
+        decision = self.router.route("我们先讨论一下 PPT 和文档结构", llm_service=llm)
+
+        self.assertEqual(decision.route, "summary")
+        self.assertEqual(decision.source, "llm")
+        self.assertEqual(decision.requested_outputs, ())
+
+    def test_llm_route_is_not_augmented_by_rule_detected_compound_outputs(self) -> None:
+        llm = FakeRouteLLM({"route": "summary", "confidence": 0.9, "reason": "summarize progress"})
+
+        decision = self.router.route("帮我总结一下当前项目进展，同时生产文档，ppt和流程图", llm_service=llm)
+
+        self.assertEqual(decision.route, "summary")
+        self.assertEqual(decision.source, "llm")
+        self.assertEqual(decision.requested_outputs, ())
 
     def test_compound_outputs_follow_user_mentioned_order(self) -> None:
         decision = self.router.route_by_rule("先生成PPT，再整理成文档")

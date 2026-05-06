@@ -32,6 +32,7 @@ from app.services.session_document_service import SessionDocumentService
 from app.services.tools.task_operation_tool import TaskOperationTool
 from app.services.task_run_service import TaskRunService
 from app.services.tools.workbench_revision_tool import WorkbenchRevisionTool
+from app.services.graph.runner import GraphRunner
 from app.services.workflow.document_tasks import (
     merge_status_task_sources,
     task_items_from_llm_payload,
@@ -94,6 +95,7 @@ class FeishuWorkflowService:
         self.execution_planner = ExecutionPlanner()
         self.request_router = RequestRouter()
         self.response_formatter = ResponseFormatter()
+        self.graph_runner = GraphRunner(self)
         self.analysis_execution = WorkflowAnalysisExecution(self)
         self.canvas_execution = WorkflowCanvasExecution(self)
         self.slides_execution = WorkflowSlidesExecution(self)
@@ -402,6 +404,149 @@ class FeishuWorkflowService:
             instruction,
             llm_service=self.llm_service,
         )
+
+    def _should_run_graph_shadow(self) -> bool:
+        return bool(settings.langgraph_enabled and settings.langgraph_shadow_mode)
+
+    def _should_run_graph_primary(self) -> bool:
+        return bool(
+            settings.langgraph_enabled
+            and not settings.langgraph_shadow_mode
+            and str(settings.workflow_engine or "").strip().lower() == "langgraph"
+        )
+
+    def _run_graph_shadow(
+        self,
+        message: FeishuMessageContext,
+        *,
+        task_run_id: str | None,
+        workspace_context: str,
+        route_decision: RouteDecision,
+    ) -> None:
+        if not self._should_run_graph_shadow():
+            return
+        try:
+            self.graph_runner.run_shadow(
+                message,
+                task_run_id=task_run_id,
+                workspace_context=workspace_context,
+                legacy_route={
+                    "route": route_decision.route,
+                    "source": route_decision.source,
+                    "confidence": route_decision.confidence,
+                    "needs_clarification": route_decision.needs_clarification,
+                    "reason": route_decision.reason,
+                    "requested_outputs": list(route_decision.requested_outputs),
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "LangGraph shadow mode failed without interrupting legacy workflow: message_id=%s error=%s",
+                message.message_id,
+                exc,
+            )
+
+    def graph_context_artifacts_loader(self, session_id: str, task_run_id: str | None = None) -> list[dict[str, Any]]:
+        artifacts: list[dict[str, Any]] = []
+        try:
+            runs = self.task_run_service.list_task_runs(session_id=session_id, limit=5)
+            for run in reversed(runs):
+                if task_run_id and run.task_run_id == task_run_id:
+                    continue
+                detail = self.task_run_service.get_task_run(run.task_run_id)
+                if detail is None:
+                    continue
+                for artifact in detail.artifacts:
+                    payload = artifact.model_dump(mode="json") if hasattr(artifact, "model_dump") else dict(artifact)
+                    artifacts.append(payload)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("LangGraph artifact context loading failed: session_id=%s error=%s", session_id, exc)
+            return []
+        return artifacts[-20:]
+
+    def _run_graph_task_command(
+        self,
+        message: FeishuMessageContext,
+        *,
+        task_run_id: str | None,
+        workspace_context: str,
+        active_episode_id: int | None,
+        route_decision: RouteDecision | None,
+    ) -> dict | None:
+        if not self._should_run_graph_primary():
+            return None
+        if route_decision is None and not self.llm_service.is_configured():
+            return None
+        if route_decision is not None and not self._graph_primary_supports_route(route_decision):
+            logger.info(
+                "LangGraph primary skipped unsupported legacy route: message_id=%s route=%s",
+                message.message_id,
+                route_decision.route,
+            )
+            return None
+        current_document = None
+        graph_workspace_context = workspace_context
+        graph_clarification = None
+        legacy_route = None
+        if route_decision is not None and route_decision.route == "doc":
+            current_document = self._resolve_target_document_for_instruction(message.session_id, message.text)
+            graph_clarification = self._build_document_selection_clarification(
+                message,
+                route_decision,
+                target_document=current_document,
+            )
+            if graph_clarification is None:
+                graph_workspace_context = self._workspace_context_for_route(
+                    route_decision,
+                    message,
+                    workspace_context,
+                    active_episode_id=active_episode_id,
+                    target_document=current_document,
+                )
+        if route_decision is not None:
+            legacy_route = {
+                "route": route_decision.route,
+                "source": route_decision.source,
+                "confidence": route_decision.confidence,
+                "needs_clarification": route_decision.needs_clarification or graph_clarification is not None,
+                "clarification_question": graph_clarification.get("question") if graph_clarification else None,
+                "clarification": graph_clarification,
+                "reason": graph_clarification.get("reason") if graph_clarification else route_decision.reason,
+                "requested_outputs": list(route_decision.requested_outputs),
+            }
+        try:
+            if route_decision is None:
+                logger.info("LangGraph primary direct mode started: message_id=%s", message.message_id)
+            return self.graph_runner.run_task_graph(
+                message,
+                task_run_id=task_run_id,
+                workspace_context=graph_workspace_context,
+                active_episode_id=active_episode_id,
+                current_document=current_document,
+                legacy_route=legacy_route,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "LangGraph primary mode failed, falling back to legacy workflow: message_id=%s error=%s",
+                message.message_id,
+                exc,
+            )
+            return None
+
+    @staticmethod
+    def _graph_primary_supports_route(route_decision: RouteDecision) -> bool:
+        route = str(route_decision.route or "").strip().lower()
+        requested_outputs = {
+            str(item or "").strip().lower()
+            for item in route_decision.requested_outputs
+        }
+        if route_decision.needs_clarification:
+            return True
+        if route == "unknown":
+            return True
+        if route in {"status", "tasks", "summary", "risks", "help", "doc", "slides", "canvas", "delivery"}:
+            return True
+        return bool(requested_outputs & {"doc", "slides", "canvas"})
 
     def _should_run_dag_planner(self, route_decision: RouteDecision) -> bool:
         if route_decision.needs_clarification:
@@ -1188,6 +1333,15 @@ class FeishuWorkflowService:
         answer_value: str,
         answered_by: str = "user",
     ) -> dict | None:
+        if self._should_run_graph_primary():
+            graph_result = self.graph_runner.resume_after_confirmation(
+                task_run_id,
+                confirmation_id=confirmation_id,
+                answer_value=answer_value,
+                answered_by=answered_by,
+            )
+            if graph_result is not None:
+                return graph_result
         return self.revision_workflow.resume_task_run_after_confirmation(
             task_run_id,
             confirmation_id=confirmation_id,

@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -99,6 +100,7 @@ class TaskRunSummary(BaseModel):
 
 class TaskRunDetail(TaskRunSummary):
     metadata_json: str | None = None
+    graph_trace: dict[str, Any] | None = None
     steps: list[TaskRunStepRecord] = Field(default_factory=list)
     artifacts: list[ArtifactRecord] = Field(default_factory=list)
     artifact_checks: list[ArtifactCheckRecord] = Field(default_factory=list)

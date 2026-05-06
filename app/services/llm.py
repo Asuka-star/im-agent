@@ -1,6 +1,7 @@
 import hashlib
 import json
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 from app.core.config import settings
@@ -10,19 +11,48 @@ from app.services.llm_prompts import LLMPromptBuilder
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class _LLMProvider:
+    name: str
+    api_key: str
+    base_url: str
+    model: str
+
+
+def _clean_setting(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _normalize_xiaomi_model(value: Any) -> str:
+    model = _clean_setting(value)
+    aliases = {
+        "mimo-v2.5-pro": "mimo-v2.5-pro",
+        "mimo-v2-5-pro": "mimo-v2.5-pro",
+        "mimo v2.5 pro": "mimo-v2.5-pro",
+        "mimo-v2.5": "mimo-v2.5",
+        "mimo-v2-5": "mimo-v2.5",
+        "mimo v2.5": "mimo-v2.5",
+    }
+    return aliases.get(model.lower(), model)
+
+
 class LLMService:
     """OpenAI-compatible client for collaboration analysis and response planning."""
 
     def __init__(self) -> None:
-        self.api_key = settings.llm_api_key or settings.anthropic_auth_token
-        self.base_url = (settings.llm_base_url or settings.anthropic_base_url).rstrip("/")
-        self.model = settings.llm_model or settings.anthropic_model
+        self.api_key = _clean_setting(settings.llm_api_key) or _clean_setting(settings.anthropic_auth_token)
+        self.base_url = (_clean_setting(settings.llm_base_url) or _clean_setting(settings.anthropic_base_url)).rstrip("/")
+        self.model = _clean_setting(settings.llm_model) or _clean_setting(settings.anthropic_model)
+        self.xiaomi_api_key = _clean_setting(settings.xiaomi_llm_api_key)
+        self.xiaomi_base_url = _clean_setting(settings.xiaomi_llm_base_url).rstrip("/")
+        self.xiaomi_model = _normalize_xiaomi_model(settings.xiaomi_llm_model)
         self.client = OpenAICompatibleJSONClient(api_key=self.api_key, base_url=self.base_url)
+        self._provider_clients: dict[tuple[str, str, str], OpenAICompatibleJSONClient] = {}
         self.prompts = LLMPromptBuilder()
         self._plan_cache: dict[str, dict[str, Any]] = {}
 
     def is_configured(self) -> bool:
-        return bool(self.api_key and self.base_url and self.model)
+        return bool(self._configured_providers())
 
     def extract_collaboration(self, raw_text: str) -> dict[str, Any]:
         self._ensure_configured()
@@ -66,6 +96,31 @@ class LLMService:
         logger.info(
             "LLM lightweight route resolved: route=%s confidence=%s clarification=%s",
             result.get("route"),
+            result.get("confidence"),
+            result.get("needs_clarification"),
+        )
+        return result
+
+    def interpret_workspace_command(self, workspace_context: str, instruction: str) -> dict[str, Any]:
+        self._ensure_configured()
+        payload = self._json_payload(
+            system_prompt=self._workspace_command_prompt(),
+            user_content=self._context_request_content(
+                self._compact_planning_context(workspace_context, max_chars=2400),
+                instruction,
+                context_label="command context",
+            ),
+            temperature=0.0,
+        )
+        result = self._chat_json(
+            payload,
+            request_name="interpret_workspace_command",
+            timeout_seconds=settings.langgraph_llm_timeout_seconds,
+        )
+        logger.info(
+            "LLM workspace command interpreted: operation=%s object=%s confidence=%s clarification=%s",
+            result.get("operation"),
+            result.get("object"),
             result.get("confidence"),
             result.get("needs_clarification"),
         )
@@ -356,7 +411,63 @@ class LLMService:
         return f"[{context_label}]\n{workspace_context}\n\n[当前请求]\n{instruction}"
 
     def _chat_json(self, payload: dict[str, Any], *, request_name: str, timeout_seconds: float) -> dict[str, Any]:
-        return self.client.chat_json(payload, request_name=request_name, timeout_seconds=timeout_seconds)
+        providers = self._configured_providers()
+        if not providers:
+            raise RuntimeError("LLM config is incomplete.")
+        last_error: Exception | None = None
+        for index, provider in enumerate(providers):
+            provider_payload = {**payload, "model": provider.model}
+            try:
+                result = self._client_for_provider(provider).chat_json(
+                    provider_payload,
+                    request_name=request_name,
+                    timeout_seconds=timeout_seconds,
+                )
+                if index > 0:
+                    logger.info(
+                        "LLM fallback provider succeeded: request=%s provider=%s model=%s",
+                        request_name,
+                        provider.name,
+                        provider.model,
+                )
+                return result
+            except Exception as exc:
+                if provider.name == "xiaomi" and "response_format" in provider_payload:
+                    try:
+                        relaxed_payload = dict(provider_payload)
+                        relaxed_payload.pop("response_format", None)
+                        result = self._client_for_provider(provider).chat_json(
+                            relaxed_payload,
+                            request_name=request_name,
+                            timeout_seconds=timeout_seconds,
+                        )
+                        logger.info(
+                            "LLM provider succeeded without response_format: request=%s provider=%s model=%s",
+                            request_name,
+                            provider.name,
+                            provider.model,
+                        )
+                        return result
+                    except Exception as relaxed_exc:
+                        logger.warning(
+                            "LLM provider retry without response_format failed: request=%s provider=%s error=%s",
+                            request_name,
+                            provider.name,
+                            relaxed_exc,
+                        )
+                last_error = exc
+                if index + 1 >= len(providers):
+                    break
+                fallback = providers[index + 1]
+                logger.warning(
+                    "LLM provider failed, retrying fallback: request=%s provider=%s fallback=%s error=%s",
+                    request_name,
+                    provider.name,
+                    fallback.name,
+                    exc,
+                )
+        assert last_error is not None
+        raise last_error
 
     def _post_chat_completion(self, payload: dict[str, Any], *, request_name: str, timeout_seconds: float) -> dict[str, Any]:
         return self.client.post_chat_completion(payload, request_name=request_name, timeout_seconds=timeout_seconds)
@@ -366,6 +477,42 @@ class LLMService:
 
     def _parse_json(self, text: str) -> dict[str, Any]:
         return self.client.parse_json(text)
+
+    def _configured_providers(self) -> list[_LLMProvider]:
+        providers: list[_LLMProvider] = []
+        xiaomi_api_key = _clean_setting(self.xiaomi_api_key)
+        xiaomi_base_url = _clean_setting(self.xiaomi_base_url).rstrip("/")
+        xiaomi_model = _normalize_xiaomi_model(self.xiaomi_model)
+        api_key = _clean_setting(self.api_key)
+        base_url = _clean_setting(self.base_url).rstrip("/")
+        model = _clean_setting(self.model)
+        if xiaomi_api_key and xiaomi_base_url and xiaomi_model:
+            providers.append(
+                _LLMProvider(
+                    name="xiaomi",
+                    api_key=xiaomi_api_key,
+                    base_url=xiaomi_base_url,
+                    model=xiaomi_model,
+                )
+            )
+        if api_key and base_url and model:
+            providers.append(
+                _LLMProvider(
+                    name="deepseek",
+                    api_key=api_key,
+                    base_url=base_url,
+                    model=model,
+                )
+            )
+        return providers
+
+    def _client_for_provider(self, provider: _LLMProvider) -> OpenAICompatibleJSONClient:
+        key = (provider.name, provider.api_key, provider.base_url)
+        client = self._provider_clients.get(key)
+        if client is None:
+            client = OpenAICompatibleJSONClient(api_key=provider.api_key, base_url=provider.base_url)
+            self._provider_clients[key] = client
+        return client
 
     def _extraction_prompt(self) -> str:
         return self.prompts.extraction()
@@ -390,6 +537,9 @@ class LLMService:
 
     def _route_prompt(self) -> str:
         return self.prompts.route()
+
+    def _workspace_command_prompt(self) -> str:
+        return self.prompts.workspace_command()
 
     def _task_intent_prompt(self) -> str:
         return self.prompts.task_intent()
@@ -446,6 +596,10 @@ class LLMService:
             "reason",
         }
         sanitized = {key: result[key] for key in allowed_keys if key in result}
+        if "confidence" in sanitized:
+            sanitized["confidence"] = cls._normalize_confidence(sanitized["confidence"])
+        if "needs_clarification" in sanitized:
+            sanitized["needs_clarification"] = cls._normalize_bool(sanitized["needs_clarification"])
         if "requested_outputs" in sanitized:
             sanitized["requested_outputs"] = cls._sanitize_requested_outputs(sanitized["requested_outputs"])
         return sanitized
@@ -555,6 +709,15 @@ class LLMService:
         except (TypeError, ValueError):
             return 0.0
         return max(0.0, min(confidence, 1.0))
+
+    @staticmethod
+    def _normalize_bool(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value > 0
+        normalized = str(value or "").strip().lower()
+        return normalized in {"true", "yes", "y", "1", "需要", "是"}
 
     @staticmethod
     def _sanitize_requested_outputs(value: Any) -> list[str]:

@@ -5,6 +5,7 @@ from html import escape
 from pathlib import Path
 
 from app.services.artifact_skills import CanvasSkill
+from app.utils.values import coerce_positive_int
 
 
 class CanvasArtifactService:
@@ -72,15 +73,20 @@ class CanvasArtifactService:
         if not shapes:
             labels = self._flow_labels(canvas, instruction=instruction, workspace_context=workspace_context)
             shapes = self._template_shapes(template, labels)
-        return {
-            "canvas_id": f"canvas_{uuid.uuid4().hex[:12]}",
+        scene = {
+            "canvas_id": str(canvas.get("canvas_id") or f"canvas_{uuid.uuid4().hex[:12]}").strip()
+            or f"canvas_{uuid.uuid4().hex[:12]}",
             "title": str(canvas.get("title") or title or "Canvas").strip() or "Canvas",
-            "version": 1,
-            "schema": "im-agent.canvas.v1",
+            "version": coerce_positive_int(canvas.get("version")) or 1,
+            "schema": str(canvas.get("schema") or "im-agent.canvas.v1").strip() or "im-agent.canvas.v1",
             "template": template,
-            "summary": self._scene_summary(template, shapes),
+            "summary": canvas.get("summary") if isinstance(canvas.get("summary"), dict) else self._scene_summary(template, shapes),
             "shapes": shapes,
         }
+        for key in ("revision_instruction", "artifact_edit_plan"):
+            if key in canvas:
+                scene[key] = canvas[key]
+        return scene
 
     def _normalize_shapes(self, raw_shapes: list) -> list[dict]:
         shapes: list[dict] = []

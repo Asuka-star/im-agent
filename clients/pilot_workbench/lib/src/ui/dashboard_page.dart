@@ -909,6 +909,10 @@ class _DetailPanel extends StatelessWidget {
                   _SummaryCard(controller: controller, detail: detail),
                   const SizedBox(height: 16),
                   _StageTimeline(detail: detail),
+                  if (detail.graphTrace != null) ...[
+                    const SizedBox(height: 16),
+                    _GraphTraceCard(trace: detail.graphTrace!),
+                  ],
                   const SizedBox(height: 16),
                   _SectionCard(
                     title: '执行步骤',
@@ -1810,6 +1814,457 @@ class _StageTimeline extends StatelessWidget {
             return _StageCard(item: item);
           },
         ),
+      ),
+    );
+  }
+}
+
+class _GraphTraceCard extends StatelessWidget {
+  const _GraphTraceCard({required this.trace});
+
+  final Map<String, dynamic> trace;
+
+  @override
+  Widget build(BuildContext context) {
+    final command = _graphMap(trace['command']);
+    final plan = _graphMap(trace['plan']);
+    final planSteps = _graphList(plan['steps']);
+    final workers = _graphList(trace['workers']);
+    final review = _graphMap(trace['review']);
+    final comparison = _graphMap(trace['comparison']);
+    final traceNodes = _graphList(trace['trace']);
+    final contextSources = traceNodes
+        .expand((node) => _graphList(node['sources']))
+        .toList(growable: false);
+    final source = _stringValue(trace['source']);
+    final operation = _stringValue(command['operation']);
+    final object = _stringValue(command['object']);
+    final confidence = _graphDouble(command['confidence']);
+    final reviewOk = review.isEmpty || review['ok'] == true;
+
+    return _SectionCard(
+      title: 'LangGraph Trace',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              _Badge(
+                label: source.isEmpty ? 'graph' : source,
+                color: const Color(0xFF116A7B),
+              ),
+              if (operation.isNotEmpty || object.isNotEmpty)
+                _Badge(
+                  label: [
+                    operation,
+                    object,
+                  ].where((item) => item.isNotEmpty).join(' / '),
+                  color: const Color(0xFF8CCDEB),
+                ),
+              if (confidence != null)
+                _Badge(
+                  label: 'confidence ${(confidence * 100).round()}%',
+                  color: const Color(0xFF73C8A9),
+                ),
+              _Badge(
+                label: reviewOk ? 'review ok' : 'needs attention',
+                color: reviewOk
+                    ? const Color(0xFF73C8A9)
+                    : const Color(0xFFC85D3A),
+              ),
+            ],
+          ),
+          if (_stringValue(command['target_text']).isNotEmpty ||
+              _stringValue(command['reason']).isNotEmpty) ...[
+            const SizedBox(height: 12),
+            Text(
+              [
+                _stringValue(command['target_text']),
+                _stringValue(command['reason']),
+              ].where((item) => item.isNotEmpty).join(' · '),
+              maxLines: 3,
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                color: const Color(0xFF455560),
+                height: 1.45,
+              ),
+            ),
+          ],
+          if (comparison.isNotEmpty) ...[
+            const SizedBox(height: 14),
+            _GraphComparisonPanel(comparison: comparison),
+          ],
+          if (planSteps.isNotEmpty) ...[
+            const SizedBox(height: 16),
+            Text(
+              'DAG Plan',
+              style: Theme.of(
+                context,
+              ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 10),
+            Column(
+              children: planSteps
+                  .map(
+                    (step) => Padding(
+                      padding: const EdgeInsets.only(bottom: 8),
+                      child: _GraphPlanRow(step: step),
+                    ),
+                  )
+                  .toList(),
+            ),
+          ],
+          if (workers.isNotEmpty) ...[
+            const SizedBox(height: 14),
+            Text(
+              'Workers',
+              style: Theme.of(
+                context,
+              ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 10),
+            Column(
+              children: workers
+                  .map(
+                    (worker) => Padding(
+                      padding: const EdgeInsets.only(bottom: 8),
+                      child: _GraphWorkerRow(worker: worker),
+                    ),
+                  )
+                  .toList(),
+            ),
+          ],
+          if (contextSources.isNotEmpty) ...[
+            const SizedBox(height: 14),
+            Text(
+              'Context Sources',
+              style: Theme.of(
+                context,
+              ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 10),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: contextSources
+                  .map((source) => _GraphSourceChip(source: source))
+                  .toList(),
+            ),
+          ],
+          if (traceNodes.isNotEmpty) ...[
+            const SizedBox(height: 14),
+            Text(
+              'Node Trace',
+              style: Theme.of(
+                context,
+              ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: traceNodes
+                  .take(8)
+                  .map(
+                    (node) => _Badge(
+                      label: [
+                        _stringValue(node['node']),
+                        _stringValue(node['status']),
+                      ].where((item) => item.isNotEmpty).join(': '),
+                      color: _graphStatusColor(_stringValue(node['status'])),
+                    ),
+                  )
+                  .toList(),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _GraphComparisonPanel extends StatelessWidget {
+  const _GraphComparisonPanel({required this.comparison});
+
+  final Map<String, dynamic> comparison;
+
+  @override
+  Widget build(BuildContext context) {
+    final status = _stringValue(comparison['status']);
+    final legacyRoute = _stringValue(comparison['legacy_route']);
+    final graphRoute = _stringValue(comparison['graph_route']);
+    final legacyOutputs = _graphStringList(comparison['legacy_outputs']);
+    final graphOutputs = _graphStringList(comparison['graph_outputs']);
+    final confidenceDelta = _graphDouble(comparison['confidence_delta']);
+    final notes = _graphStringList(comparison['notes']);
+    final matched = status == 'match';
+    final details = [
+      if (legacyRoute.isNotEmpty || graphRoute.isNotEmpty)
+        'route ${legacyRoute.isEmpty ? '-' : legacyRoute} -> ${graphRoute.isEmpty ? '-' : graphRoute}',
+      if (legacyOutputs.isNotEmpty || graphOutputs.isNotEmpty)
+        'outputs ${legacyOutputs.join(', ').isEmpty ? '-' : legacyOutputs.join(', ')} -> ${graphOutputs.join(', ').isEmpty ? '-' : graphOutputs.join(', ')}',
+      if (confidenceDelta != null)
+        'confidence delta ${confidenceDelta >= 0 ? '+' : ''}${confidenceDelta.toStringAsFixed(2)}',
+      if (notes.isNotEmpty) 'notes ${notes.join(', ')}',
+    ];
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: matched
+            ? const Color(0xFF73C8A9).withValues(alpha: 0.08)
+            : const Color(0xFFC85D3A).withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+          color: matched ? const Color(0xFF73C8A9) : const Color(0xFFC85D3A),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              _Badge(
+                label: matched ? 'shadow match' : 'shadow diverged',
+                color: matched
+                    ? const Color(0xFF73C8A9)
+                    : const Color(0xFFC85D3A),
+              ),
+              _Badge(
+                label: comparison['route_match'] == true
+                    ? 'route ok'
+                    : 'route diff',
+                color: comparison['route_match'] == true
+                    ? const Color(0xFF73C8A9)
+                    : const Color(0xFFC85D3A),
+              ),
+              _Badge(
+                label: comparison['outputs_match'] == true
+                    ? 'outputs ok'
+                    : 'outputs diff',
+                color: comparison['outputs_match'] == true
+                    ? const Color(0xFF73C8A9)
+                    : const Color(0xFFC85D3A),
+              ),
+              _Badge(
+                label: comparison['needs_clarification_match'] == true
+                    ? 'clarify ok'
+                    : 'clarify diff',
+                color: comparison['needs_clarification_match'] == true
+                    ? const Color(0xFF73C8A9)
+                    : const Color(0xFFC85D3A),
+              ),
+            ],
+          ),
+          if (details.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            Text(
+              details.join(' · '),
+              maxLines: 3,
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                color: const Color(0xFF455560),
+                height: 1.4,
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _GraphPlanRow extends StatelessWidget {
+  const _GraphPlanRow({required this.step});
+
+  final Map<String, dynamic> step;
+
+  @override
+  Widget build(BuildContext context) {
+    final status = _stringValue(step['status']);
+    final dependencies = _graphStringList(step['depends_on']);
+    final elapsed = _graphDouble(step['elapsed_ms']);
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF8FBFC),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: const Color(0xFFD8E2E8)),
+      ),
+      child: Row(
+        children: [
+          Icon(
+            step['can_run_parallel'] == true
+                ? Icons.call_split_rounded
+                : Icons.linear_scale_rounded,
+            color: const Color(0xFF116A7B),
+            size: 18,
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  [
+                    _stringValue(step['worker']),
+                    _stringValue(step['operation']),
+                  ].where((item) => item.isNotEmpty).join(' · '),
+                  style: Theme.of(
+                    context,
+                  ).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w700),
+                ),
+                if (dependencies.isNotEmpty)
+                  Text(
+                    'after ${dependencies.join(', ')}',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: const Color(0xFF72808A),
+                    ),
+                  ),
+                if (_stringValue(step['goal']).isNotEmpty)
+                  Text(
+                    _stringValue(step['goal']),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: const Color(0xFF72808A),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          if (_stringValue(step['agent']).isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: _Badge(
+                label: _stringValue(step['agent']),
+                color: const Color(0xFF116A7B),
+              ),
+            ),
+          if (elapsed != null)
+            Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: Text(
+                _formatGraphDuration(elapsed),
+                style: Theme.of(
+                  context,
+                ).textTheme.bodySmall?.copyWith(color: const Color(0xFF72808A)),
+              ),
+            ),
+          if (status.isNotEmpty)
+            _Badge(label: localizeStatus(status), color: _statusColor(status)),
+        ],
+      ),
+    );
+  }
+}
+
+class _GraphWorkerRow extends StatelessWidget {
+  const _GraphWorkerRow({required this.worker});
+
+  final Map<String, dynamic> worker;
+
+  @override
+  Widget build(BuildContext context) {
+    final status = _stringValue(worker['status']);
+    final elapsed = _graphDouble(worker['elapsed_ms']);
+    final preview = _stringValue(worker['reply_preview']);
+    final artifactCount = _graphInt(worker['artifact_count']);
+    final error = _stringValue(worker['error']);
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: const Color(0xFFD8E2E8)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  [
+                    _stringValue(worker['worker']),
+                    _stringValue(worker['operation']),
+                  ].where((item) => item.isNotEmpty).join(' · '),
+                  style: Theme.of(
+                    context,
+                  ).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w700),
+                ),
+              ),
+              if (elapsed != null)
+                Padding(
+                  padding: const EdgeInsets.only(right: 8),
+                  child: Text(
+                    _formatGraphDuration(elapsed),
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: const Color(0xFF72808A),
+                    ),
+                  ),
+                ),
+              if (status.isNotEmpty)
+                _Badge(
+                  label: localizeStatus(status),
+                  color: _statusColor(status),
+                ),
+            ],
+          ),
+          if (preview.isNotEmpty || artifactCount > 0 || error.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            Text(
+              [
+                if (preview.isNotEmpty) preview,
+                if (artifactCount > 0) 'artifacts $artifactCount',
+                if (error.isNotEmpty) error,
+              ].join(' · '),
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                color: error.isNotEmpty
+                    ? const Color(0xFFC85D3A)
+                    : const Color(0xFF72808A),
+                height: 1.35,
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _GraphSourceChip extends StatelessWidget {
+  const _GraphSourceChip({required this.source});
+
+  final Map<String, dynamic> source;
+
+  @override
+  Widget build(BuildContext context) {
+    final status = _stringValue(source['status']);
+    final elapsed = _graphDouble(source['elapsed_ms']);
+    final count = _graphInt(source['count']);
+    final error = _stringValue(source['error']);
+    final label = [
+      _stringValue(source['field']),
+      if (count > 0) '$count',
+      if (elapsed != null) _formatGraphDuration(elapsed),
+    ].where((item) => item.isNotEmpty).join(' · ');
+    return Tooltip(
+      message: error.isEmpty ? label : error,
+      child: _Badge(
+        label: label.isEmpty ? 'source' : label,
+        color: status == 'failed'
+            ? const Color(0xFFC85D3A)
+            : const Color(0xFF116A7B),
       ),
     );
   }
@@ -4712,6 +5167,70 @@ String _localizeDocSyncMode(String mode) {
 String _stringValue(Object? value) {
   final text = value?.toString().trim() ?? '';
   return text == 'null' ? '' : text;
+}
+
+Map<String, dynamic> _graphMap(Object? value) {
+  if (value is Map<String, dynamic>) {
+    return value;
+  }
+  if (value is Map) {
+    return value.map((key, item) => MapEntry(key.toString(), item));
+  }
+  return const <String, dynamic>{};
+}
+
+List<Map<String, dynamic>> _graphList(Object? value) {
+  if (value is! List) {
+    return const [];
+  }
+  return value
+      .map(_graphMap)
+      .where((item) => item.isNotEmpty)
+      .toList(growable: false);
+}
+
+List<String> _graphStringList(Object? value) {
+  if (value is! List) {
+    return const [];
+  }
+  return value
+      .map(_stringValue)
+      .where((item) => item.isNotEmpty)
+      .toList(growable: false);
+}
+
+double? _graphDouble(Object? value) {
+  if (value is num) {
+    return value.toDouble();
+  }
+  return double.tryParse(_stringValue(value));
+}
+
+int _graphInt(Object? value) {
+  if (value is num) {
+    return value.toInt();
+  }
+  return int.tryParse(_stringValue(value)) ?? 0;
+}
+
+String _formatGraphDuration(double elapsedMs) {
+  if (elapsedMs >= 1000) {
+    return '${(elapsedMs / 1000).toStringAsFixed(1)}s';
+  }
+  return '${elapsedMs.round()}ms';
+}
+
+Color _graphStatusColor(String status) {
+  if (status == 'failed') {
+    return const Color(0xFFC85D3A);
+  }
+  if (status == 'running') {
+    return const Color(0xFFB7791F);
+  }
+  if (status == 'clarify' || status == 'needs_review') {
+    return const Color(0xFF8CCDEB);
+  }
+  return const Color(0xFF73C8A9);
 }
 
 double _doubleValue(Object? value, double fallback) {

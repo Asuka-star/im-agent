@@ -23,6 +23,7 @@ from app.services.session_display_service import SessionDisplayService
 from app.services.session_document_service import SessionDocumentService
 from app.services.task_artifact_verifier import TaskArtifactVerifier
 from app.services.task_context_pack import TaskContextPackBuilder
+from app.services.task_run_state import TERMINAL_STATUSES, transition_task_run_status
 from app.utils.values import coerce_positive_int
 
 
@@ -129,10 +130,13 @@ class TaskRunService:
                 .order_by(ConfirmationRequest.id.asc())
             ).scalars().all()
 
+            step_records = [self._step_from_row(item) for item in steps]
+            metadata = self._decode_json_object(row.metadata_json)
             detail = TaskRunDetail(
                 **self._summary_from_row(row).model_dump(),
                 metadata_json=row.metadata_json,
-                steps=[self._step_from_row(item) for item in steps],
+                graph_trace=self._build_graph_trace(metadata, step_records),
+                steps=step_records,
                 artifacts=[self._artifact_from_row(item) for item in artifacts],
                 confirmations=[self._confirmation_from_row(item) for item in confirmations],
                 session_documents=self._session_documents_for_session(row.session_id),
@@ -171,9 +175,21 @@ class TaskRunService:
             if stage:
                 row.stage = stage
             if status:
-                row.status = status
-                if status in {"completed", "failed"}:
-                    row.completed_at = datetime.now(timezone.utc)
+                transition = transition_task_run_status(row.status, status)
+                if transition.accepted:
+                    row.status = transition.requested_status
+                    if transition.completed_at is not None and row.completed_at is None:
+                        row.completed_at = transition.completed_at
+                    elif transition.requested_status not in TERMINAL_STATUSES:
+                        row.completed_at = None
+                else:
+                    logger.warning(
+                        "Rejected task run status transition: task_run_id=%s current=%s requested=%s reason=%s",
+                        task_run_id,
+                        transition.current_status,
+                        transition.requested_status,
+                        transition.reason,
+                    )
             if latest_summary is not None:
                 row.latest_summary = latest_summary
             if latest_reply_preview is not None:
@@ -348,7 +364,18 @@ class TaskRunService:
                 select(TaskRun).where(TaskRun.task_run_id == task_run_id)
             ).scalar_one_or_none()
             if task_run is not None and task_run.status == "waiting_confirmation":
-                task_run.status = "running"
+                transition = transition_task_run_status(task_run.status, "running")
+                if transition.accepted:
+                    task_run.status = transition.requested_status
+                    task_run.completed_at = None
+                else:
+                    logger.warning(
+                        "Rejected confirmation task run transition: task_run_id=%s current=%s requested=%s reason=%s",
+                        task_run_id,
+                        transition.current_status,
+                        transition.requested_status,
+                        transition.reason,
+                    )
                 task_run.stage = "confirmation_resolved"
 
             session.commit()
@@ -462,6 +489,209 @@ class TaskRunService:
             logger.warning("Failed to load session documents for task run detail: session_id=%s error=%s", session_id, exc)
             return []
         return [self._session_document_from_payload(item) for item in payloads]
+
+    def _build_graph_trace(self, metadata: dict, steps: list[TaskRunStepRecord]) -> dict | None:
+        execution = metadata.get("langgraph_execution")
+        shadow = metadata.get("langgraph_shadow")
+        if isinstance(execution, dict):
+            source = "execution"
+            payload = execution
+        elif isinstance(shadow, dict):
+            source = "shadow"
+            payload = shadow
+        else:
+            return None
+
+        command = payload.get("command") if isinstance(payload.get("command"), dict) else {}
+        plan = payload.get("plan") if isinstance(payload.get("plan"), dict) else {}
+        raw_plan_steps = plan.get("steps") if isinstance(plan.get("steps"), list) else []
+        worker_results = payload.get("worker_results") if isinstance(payload.get("worker_results"), dict) else {}
+        worker_steps = self._graph_worker_steps(steps)
+        worker_status_by_id = {item["step_id"]: item for item in worker_steps if item.get("step_id")}
+
+        plan_steps = []
+        for item in raw_plan_steps:
+            if not isinstance(item, dict):
+                continue
+            step_id = str(item.get("step_id") or "")
+            worker_status = worker_status_by_id.get(step_id, {})
+            plan_steps.append(
+                {
+                    "step_id": step_id,
+                    "worker": str(item.get("worker") or ""),
+                    "operation": str(item.get("operation") or ""),
+                    "agent": str((item.get("input") or {}).get("agent") or "") if isinstance(item.get("input"), dict) else "",
+                    "goal": self._truncate_text((item.get("input") or {}).get("goal") or "") if isinstance(item.get("input"), dict) else "",
+                    "depends_on": item.get("depends_on") if isinstance(item.get("depends_on"), list) else [],
+                    "can_run_parallel": bool(item.get("can_run_parallel")),
+                    "status": worker_status.get("status") or self._worker_result_status(worker_results.get(step_id)),
+                    "elapsed_ms": worker_status.get("elapsed_ms") or self._worker_result_elapsed(worker_results.get(step_id)),
+                }
+            )
+
+        workers = worker_steps
+        for step_id, result in worker_results.items():
+            if not isinstance(result, dict) or step_id in worker_status_by_id:
+                continue
+            workers.append(self._worker_result_trace(str(step_id), result))
+
+        review = payload.get("review") if isinstance(payload.get("review"), dict) else None
+        reply = payload.get("reply") if isinstance(payload.get("reply"), dict) else None
+        trace = payload.get("trace") if isinstance(payload.get("trace"), list) else []
+        errors = payload.get("errors") if isinstance(payload.get("errors"), list) else []
+        return {
+            "source": source,
+            "command": self._compact_graph_command(command),
+            "plan": {
+                "plan_id": str(plan.get("plan_id") or ""),
+                "step_count": len(plan_steps),
+                "parallel_step_count": len([item for item in plan_steps if item.get("can_run_parallel")]),
+                "steps": plan_steps,
+            },
+            "workers": workers,
+            "review": self._compact_graph_review(review),
+            "reply_preview": self._truncate_text(reply.get("text") if isinstance(reply, dict) else ""),
+            "legacy_route": payload.get("legacy_route") if isinstance(payload.get("legacy_route"), dict) else None,
+            "comparison": self._compact_graph_comparison(payload.get("comparison")),
+            "trace": [item for item in trace if isinstance(item, dict)],
+            "errors": [item for item in errors if isinstance(item, dict)],
+        }
+
+    def _graph_worker_steps(self, steps: list[TaskRunStepRecord]) -> list[dict]:
+        workers: list[dict] = []
+        for step in steps:
+            if step.step_type != "graph_worker":
+                continue
+            payload = self._decode_json_object(step.output_json)
+            output = payload.get("output") if isinstance(payload.get("output"), dict) else {}
+            workers.append(
+                {
+                    "step_key": step.step_key,
+                    "step_id": str(payload.get("step_id") or step.step_key.removeprefix("graph.worker.")),
+                    "worker": str(payload.get("worker") or ""),
+                    "operation": str(payload.get("operation") or ""),
+                    "status": step.status,
+                    "elapsed_ms": self._float_or_none(payload.get("elapsed_ms")),
+                    "reply_preview": self._truncate_text(output.get("reply_preview") or output.get("summary") or ""),
+                    "artifact_count": len(output.get("artifacts")) if isinstance(output.get("artifacts"), list) else 0,
+                    "error": step.error,
+                }
+            )
+        return workers
+
+    def _worker_result_trace(self, step_id: str, result: dict) -> dict:
+        output = result.get("output") if isinstance(result.get("output"), dict) else {}
+        return {
+            "step_id": step_id,
+            "worker": str(result.get("worker") or ""),
+            "operation": "",
+            "status": str(result.get("status") or ("done" if result.get("ok") else "failed")),
+            "elapsed_ms": self._float_or_none(result.get("elapsed_ms")),
+            "reply_preview": self._truncate_text(output.get("reply_preview") or output.get("summary") or ""),
+            "artifact_count": len(output.get("artifacts")) if isinstance(output.get("artifacts"), list) else 0,
+            "error": str(result.get("error") or "") or None,
+        }
+
+    def _compact_graph_command(self, command: dict) -> dict:
+        return {
+            "mode": str(command.get("mode") or ""),
+            "operation": str(command.get("operation") or ""),
+            "object": str(command.get("object") or ""),
+            "target_text": self._truncate_text(command.get("target_text") or "", max_chars=120),
+            "target_owner": str(command.get("target_owner") or ""),
+            "target_status": str(command.get("target_status") or ""),
+            "requested_outputs": command.get("requested_outputs") if isinstance(command.get("requested_outputs"), list) else [],
+            "artifact_goals": command.get("artifact_goals") if isinstance(command.get("artifact_goals"), dict) else {},
+            "destructive": bool(command.get("destructive")),
+            "batch": bool(command.get("batch")),
+            "confidence": self._float_or_none(command.get("confidence")),
+            "needs_clarification": bool(command.get("needs_clarification")),
+            "reason": self._truncate_text(command.get("reason") or ""),
+        }
+
+    def _compact_graph_review(self, review: dict | None) -> dict | None:
+        if not isinstance(review, dict):
+            return None
+        clarification = review.get("clarification") if isinstance(review.get("clarification"), dict) else {}
+        return {
+            "ok": bool(review.get("ok")),
+            "needs_clarification": bool(review.get("needs_clarification")),
+            "risks": review.get("risks") if isinstance(review.get("risks"), list) else [],
+            "missing_outputs": review.get("missing_outputs") if isinstance(review.get("missing_outputs"), list) else [],
+            "checks": self._compact_graph_review_checks(review.get("checks")),
+            "clarification_question": self._truncate_text(clarification.get("question") or ""),
+        }
+
+    def _compact_graph_review_checks(self, checks: object) -> list[dict]:
+        if not isinstance(checks, list):
+            return []
+        compacted: list[dict] = []
+        for item in checks:
+            if not isinstance(item, dict):
+                continue
+            compacted.append(
+                {
+                    "agent": str(item.get("agent") or ""),
+                    "status": str(item.get("status") or ""),
+                    "ok": bool(item.get("ok")),
+                    "summary": self._truncate_text(item.get("summary") or ""),
+                    "risk_count": len(item.get("risks")) if isinstance(item.get("risks"), list) else 0,
+                }
+            )
+        return compacted
+
+    def _compact_graph_comparison(self, comparison: object) -> dict | None:
+        if not isinstance(comparison, dict):
+            return None
+        return {
+            "status": str(comparison.get("status") or ""),
+            "route_match": bool(comparison.get("route_match")),
+            "outputs_match": bool(comparison.get("outputs_match")),
+            "needs_clarification_match": bool(comparison.get("needs_clarification_match")),
+            "legacy_route": str(comparison.get("legacy_route") or ""),
+            "graph_route": str(comparison.get("graph_route") or ""),
+            "legacy_outputs": comparison.get("legacy_outputs") if isinstance(comparison.get("legacy_outputs"), list) else [],
+            "graph_outputs": comparison.get("graph_outputs") if isinstance(comparison.get("graph_outputs"), list) else [],
+            "legacy_confidence": self._float_or_none(comparison.get("legacy_confidence")),
+            "graph_confidence": self._float_or_none(comparison.get("graph_confidence")),
+            "confidence_delta": self._float_or_none(comparison.get("confidence_delta")),
+            "notes": comparison.get("notes") if isinstance(comparison.get("notes"), list) else [],
+        }
+
+    @staticmethod
+    def _worker_result_status(result: object) -> str:
+        if isinstance(result, dict):
+            return str(result.get("status") or ("done" if result.get("ok") else "failed"))
+        return ""
+
+    def _worker_result_elapsed(self, result: object) -> float | None:
+        if isinstance(result, dict):
+            return self._float_or_none(result.get("elapsed_ms"))
+        return None
+
+    @staticmethod
+    def _decode_json_object(raw: str | None) -> dict:
+        if not raw:
+            return {}
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    @staticmethod
+    def _float_or_none(value: object) -> float | None:
+        try:
+            return float(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _truncate_text(value: object, *, max_chars: int = 220) -> str:
+        text = str(value or "").strip()
+        if len(text) <= max_chars:
+            return text
+        return f"{text[: max_chars - 3].rstrip()}..."
 
     def _publish_task_run_event(self, task_run_id: str, *, event_type: str) -> None:
         detail = self.get_task_run(task_run_id)

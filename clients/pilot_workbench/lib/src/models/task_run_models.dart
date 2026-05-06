@@ -248,6 +248,7 @@ class TaskRunDetail extends TaskRunSummary {
     required this.confirmations,
     required this.sessionDocuments,
     this.metadataJson,
+    this.graphTrace,
     super.intent,
     super.sessionLabel,
     super.sourceRef,
@@ -260,6 +261,7 @@ class TaskRunDetail extends TaskRunSummary {
   });
 
   final String? metadataJson;
+  final Map<String, dynamic>? graphTrace;
   final List<TaskRunStepRecord> steps;
   final List<ArtifactRecord> artifacts;
   final List<ConfirmationRequestRecord> confirmations;
@@ -281,6 +283,7 @@ class TaskRunDetail extends TaskRunSummary {
       latestReplyPreview: json['latest_reply_preview'] as String?,
       latestError: json['latest_error'] as String?,
       metadataJson: json['metadata_json'] as String?,
+      graphTrace: _asMap(json['graph_trace']),
       createdBy: json['created_by'] as String?,
       createdAt: _parseDateTime(json['created_at']),
       updatedAt: _parseDateTime(json['updated_at']),
@@ -323,6 +326,16 @@ Map<String, dynamic>? _decodeJsonMap(String? source) {
   } on FormatException {
     return null;
   }
+}
+
+Map<String, dynamic>? _asMap(Object? value) {
+  if (value is Map<String, dynamic>) {
+    return value;
+  }
+  if (value is Map) {
+    return value.map((key, item) => MapEntry(key.toString(), item));
+  }
+  return null;
 }
 
 List<dynamic> _decodeJsonList(String? source) {

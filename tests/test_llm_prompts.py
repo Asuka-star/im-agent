@@ -32,6 +32,7 @@ class LLMPromptTests(unittest.TestCase):
         service = LLMService()
 
         self.assertEqual(service._route_prompt(), service.prompts.route())
+        self.assertEqual(service._workspace_command_prompt(), service.prompts.workspace_command())
         self.assertEqual(service._dag_plan_prompt(), service.prompts.dag_plan())
         self.assertEqual(service._analysis_request_prompt("risks"), service.prompts.analysis_request("risks"))
         self.assertEqual(service._doc_edit_intent_prompt(), service.prompts.doc_edit_intent())
@@ -65,6 +66,31 @@ class LLMPromptTests(unittest.TestCase):
         self.assertIn("requested_outputs", prompt)
         self.assertIn("Do not include content payload keys", prompt)
 
+    def test_workspace_command_prompt_separates_task_delete_from_ppt_generation(self) -> None:
+        prompt = LLMPromptBuilder().workspace_command()
+
+        self.assertIn("Command Interpreter Agent", prompt)
+        self.assertIn('"route":"status|tasks|summary|risks|doc|slides|canvas|delivery|help|unknown"', prompt)
+        self.assertIn('"operation":"read|analyze|create|update|remove|complete|assign|generate|revise|recommend|chat|clarify|help|unknown"', prompt)
+        self.assertIn('"target_text"', prompt)
+        self.assertIn('"artifact_goals"', prompt)
+        self.assertIn("Risk/blocker analysis", prompt)
+        self.assertIn("删除制作ppt的任务", prompt)
+        self.assertIn("does not mean generate slides", prompt)
+        self.assertIn("Do not execute tasks", prompt)
+
+    def test_interpret_workspace_command_uses_graph_timeout(self) -> None:
+        service = LLMService()
+        service.api_key = "test-key"
+        service.base_url = "https://example.test"
+        service.model = "demo-model"
+
+        with patch.object(service, "_chat_json", return_value={"operation": "read", "object": "tasks"}) as chat_json:
+            result = service.interpret_workspace_command("[tasks]", "现在有哪些任务")
+
+        self.assertEqual(result["operation"], "read")
+        self.assertEqual(chat_json.call_args.kwargs["request_name"], "interpret_workspace_command")
+
     def test_next_action_rerank_prompt_is_dedicated_and_bounded(self) -> None:
         prompt = LLMPromptBuilder().next_action_rerank()
 
@@ -84,6 +110,118 @@ class LLMPromptTests(unittest.TestCase):
         self.assertEqual(payload["response_format"], {"type": "json_object"})
         self.assertEqual(payload["messages"][0], {"role": "system", "content": "sys"})
         self.assertEqual(payload["messages"][1], {"role": "user", "content": "user"})
+
+    def test_llm_service_can_use_xiaomi_as_primary_provider(self) -> None:
+        service = LLMService()
+        service.api_key = ""
+        service.base_url = ""
+        service.model = ""
+        service.xiaomi_api_key = "xiaomi-key"
+        service.xiaomi_base_url = "https://xiaomi.example/v1"
+        service.xiaomi_model = "xiaomi-model"
+
+        self.assertTrue(service.is_configured())
+        self.assertEqual([provider.name for provider in service._configured_providers()], ["xiaomi"])
+
+    def test_llm_service_normalizes_xiaomi_model_aliases(self) -> None:
+        service = LLMService()
+        service.api_key = ""
+        service.base_url = ""
+        service.model = ""
+        service.xiaomi_api_key = "xiaomi-key"
+        service.xiaomi_base_url = "https://token-plan-cn.xiaomimimo.com/v1"
+        service.xiaomi_model = "MiMo-V2.5-Pro"
+
+        providers = service._configured_providers()
+
+        self.assertEqual(providers[0].model, "mimo-v2.5-pro")
+
+    def test_llm_service_ignores_whitespace_only_provider_values(self) -> None:
+        service = LLMService()
+        service.api_key = "deepseek-key"
+        service.base_url = "https://openrouter.example/v1"
+        service.model = "deepseek-model"
+        service.xiaomi_api_key = " "
+        service.xiaomi_base_url = "https://xiaomi.example/v1"
+        service.xiaomi_model = "MiMo-V2.5-Pro"
+
+        self.assertEqual([provider.name for provider in service._configured_providers()], ["deepseek"])
+
+    def test_llm_service_falls_back_from_xiaomi_to_deepseek(self) -> None:
+        service = LLMService()
+        service.xiaomi_api_key = "xiaomi-key"
+        service.xiaomi_base_url = "https://xiaomi.example/v1"
+        service.xiaomi_model = "xiaomi-model"
+        service.api_key = "deepseek-key"
+        service.base_url = "https://openrouter.example/v1"
+        service.model = "deepseek-model"
+
+        class FakeProviderClient:
+            def __init__(self, response):
+                self.response = response
+                self.calls = []
+
+            def chat_json(self, payload, *, request_name, timeout_seconds):
+                self.calls.append(
+                    {
+                        "payload": payload,
+                        "request_name": request_name,
+                        "timeout_seconds": timeout_seconds,
+                    }
+                )
+                if isinstance(self.response, Exception):
+                    raise self.response
+                return dict(self.response)
+
+        clients = {
+            "xiaomi": FakeProviderClient(RuntimeError("xiaomi unavailable")),
+            "deepseek": FakeProviderClient({"ok": True}),
+        }
+
+        with patch.object(service, "_client_for_provider", side_effect=lambda provider: clients[provider.name]):
+            result = service._chat_json(
+                {"model": "placeholder", "messages": []},
+                request_name="route_workspace_request",
+                timeout_seconds=3,
+            )
+
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(clients["xiaomi"].calls[0]["payload"]["model"], "xiaomi-model")
+        self.assertEqual(clients["deepseek"].calls[0]["payload"]["model"], "deepseek-model")
+
+    def test_llm_service_retries_xiaomi_without_response_format_before_fallback(self) -> None:
+        service = LLMService()
+        service.xiaomi_api_key = "xiaomi-key"
+        service.xiaomi_base_url = "https://xiaomi.example/v1"
+        service.xiaomi_model = "MiMo-V2.5-Pro"
+        service.api_key = "deepseek-key"
+        service.base_url = "https://openrouter.example/v1"
+        service.model = "deepseek-model"
+
+        class XiaomiClient:
+            def __init__(self):
+                self.calls = []
+
+            def chat_json(self, payload, *, request_name, timeout_seconds):
+                self.calls.append(payload)
+                if "response_format" in payload:
+                    raise RuntimeError("response_format unsupported")
+                return {"ok": True, "provider": "xiaomi"}
+
+        xiaomi = XiaomiClient()
+        deepseek = object()
+
+        with patch.object(service, "_client_for_provider", side_effect=lambda provider: xiaomi if provider.name == "xiaomi" else deepseek):
+            result = service._chat_json(
+                {"model": "placeholder", "response_format": {"type": "json_object"}, "messages": []},
+                request_name="route_workspace_request",
+                timeout_seconds=3,
+            )
+
+        self.assertEqual(result["provider"], "xiaomi")
+        self.assertEqual(xiaomi.calls[0]["model"], "mimo-v2.5-pro")
+        self.assertIn("response_format", xiaomi.calls[0])
+        self.assertNotIn("response_format", xiaomi.calls[1])
 
     def test_plan_workspace_request_uses_lightweight_timeout_and_cache(self) -> None:
         service = LLMService()
@@ -181,6 +319,26 @@ class LLMPromptTests(unittest.TestCase):
 
         self.assertEqual(routed["requested_outputs"], ["slides", "doc"])
         self.assertNotIn("slides", routed)
+
+    def test_lightweight_route_normalizes_confidence_and_clarification(self) -> None:
+        service = LLMService()
+        service.api_key = "test-key"
+        service.base_url = "https://example.test"
+        service.model = "demo-model"
+
+        with patch.object(
+            service,
+            "_chat_json",
+            return_value={
+                "route": "status",
+                "confidence": -1,
+                "needs_clarification": -1,
+            },
+        ):
+            routed = service.route_workspace_request("帮我总结一下项目进展")
+
+        self.assertEqual(routed["confidence"], 0.0)
+        self.assertFalse(routed["needs_clarification"])
 
     def test_lightweight_sanitizers_tolerate_scalar_outputs_and_dropped_dependencies(self) -> None:
         service = LLMService()

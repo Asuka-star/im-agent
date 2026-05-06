@@ -126,6 +126,131 @@ class TaskRunServiceTests(unittest.TestCase):
         self.assertEqual(len(detail.confirmations), 1)
         self.assertEqual(detail.confirmations[0].status, "pending")
 
+    def test_detail_derives_langgraph_trace_from_metadata_and_worker_steps(self) -> None:
+        created = self.service.create_task_run(
+            session_id="oc_graph",
+            title="Graph run",
+            source_type="group",
+            metadata={
+                "langgraph_execution": {
+                    "command": {
+                        "mode": "workspace_action",
+                        "operation": "generate",
+                        "object": "workspace",
+                        "requested_outputs": ["doc", "slides"],
+                        "confidence": 0.91,
+                    },
+                    "plan": {
+                        "plan_id": "plan_1",
+                        "steps": [
+                            {
+                                "step_id": "doc_generate",
+                                "worker": "doc",
+                                "operation": "generate",
+                                "input": {"agent": "DocAgent", "goal": "doc goal"},
+                                "can_run_parallel": True,
+                            },
+                            {
+                                "step_id": "slides_generate",
+                                "worker": "slides",
+                                "operation": "generate",
+                                "can_run_parallel": True,
+                            },
+                        ],
+                    },
+                    "worker_results": {
+                        "doc_generate": {
+                            "worker": "doc",
+                            "ok": True,
+                            "status": "done",
+                            "elapsed_ms": 12.5,
+                            "output": {"reply_preview": "doc ready"},
+                        }
+                    },
+                    "review": {
+                        "ok": True,
+                        "needs_clarification": False,
+                        "checks": [
+                            {
+                                "agent": "ValidatorAgent",
+                                "status": "passed",
+                                "ok": True,
+                                "summary": "All planned graph worker steps completed.",
+                                "risks": [],
+                            },
+                            {
+                                "agent": "ShieldAgent",
+                                "status": "passed",
+                                "ok": True,
+                                "summary": "No risky graph operation detected.",
+                                "risks": [],
+                            },
+                        ],
+                    },
+                    "reply": {"text": "all ready"},
+                    "comparison": {
+                        "status": "match",
+                        "route_match": True,
+                        "outputs_match": True,
+                        "needs_clarification_match": True,
+                        "legacy_route": "doc",
+                        "graph_route": "doc",
+                        "legacy_outputs": ["doc", "slides"],
+                        "graph_outputs": ["doc", "slides"],
+                        "legacy_confidence": 0.9,
+                        "graph_confidence": 0.91,
+                        "confidence_delta": 0.01,
+                    },
+                    "trace": [{"node": "graph.planner", "status": "done"}],
+                    "errors": [],
+                }
+            },
+        )
+        self.service.upsert_step(
+            created.task_run_id,
+            step_key="graph.worker.slides_generate",
+            title="LangGraph worker slides",
+            step_type="graph_worker",
+            status="done",
+            output_payload={
+                "step_id": "slides_generate",
+                "worker": "slides",
+                "operation": "generate",
+                "elapsed_ms": 28,
+                "output": {
+                    "reply_preview": "slides ready",
+                    "artifacts": [{"artifact_type": "slides"}],
+                },
+            },
+        )
+
+        detail = self.service.get_task_run(created.task_run_id)
+
+        self.assertIsNotNone(detail)
+        assert detail is not None
+        self.assertIsNotNone(detail.graph_trace)
+        assert detail.graph_trace is not None
+        self.assertEqual(detail.graph_trace["source"], "execution")
+        self.assertEqual(detail.graph_trace["command"]["operation"], "generate")
+        self.assertEqual(detail.graph_trace["plan"]["step_count"], 2)
+        workers = {item["step_id"]: item for item in detail.graph_trace["workers"]}
+        self.assertEqual(workers["slides_generate"]["elapsed_ms"], 28.0)
+        self.assertEqual(workers["slides_generate"]["artifact_count"], 1)
+        self.assertEqual(workers["doc_generate"]["reply_preview"], "doc ready")
+        plan_steps = {item["step_id"]: item for item in detail.graph_trace["plan"]["steps"]}
+        self.assertEqual(plan_steps["doc_generate"]["agent"], "DocAgent")
+        self.assertEqual(plan_steps["doc_generate"]["goal"], "doc goal")
+        self.assertEqual(plan_steps["slides_generate"]["status"], "done")
+        self.assertEqual(detail.graph_trace["comparison"]["status"], "match")
+        self.assertEqual(detail.graph_trace["comparison"]["graph_route"], "doc")
+        self.assertEqual(detail.graph_trace["comparison"]["confidence_delta"], 0.01)
+        self.assertEqual(
+            [item["agent"] for item in detail.graph_trace["review"]["checks"]],
+            ["ValidatorAgent", "ShieldAgent"],
+        )
+        self.assertEqual(detail.graph_trace["review"]["checks"][0]["status"], "passed")
+        self.assertEqual(detail.graph_trace["reply_preview"], "all ready")
+
     def test_resolve_confirmation_updates_run_status(self) -> None:
         created = self.service.create_task_run(
             session_id="oc_test",
@@ -156,6 +281,68 @@ class TaskRunServiceTests(unittest.TestCase):
         self.assertEqual(detail.status, "running")
         self.assertEqual(detail.stage, "confirmation_resolved")
         self.assertEqual(detail.confirmations[0].answered_by, "tester")
+
+    def test_update_task_run_accepts_partial_failed_as_terminal_status(self) -> None:
+        created = self.service.create_task_run(
+            session_id="oc_test",
+            title="生成多产物",
+            source_type="group",
+        )
+        self.service.update_task_run(created.task_run_id, status="running", stage="executing_artifacts")
+
+        updated = self.service.update_task_run(
+            created.task_run_id,
+            status="partial_failed",
+            stage="delivered_with_partial_failure",
+            latest_error="slides failed",
+        )
+        detail = self.service.get_task_run(created.task_run_id)
+
+        self.assertIsNotNone(updated)
+        self.assertIsNotNone(detail)
+        assert detail is not None
+        self.assertEqual(detail.status, "partial_failed")
+        self.assertEqual(detail.stage, "delivered_with_partial_failure")
+        self.assertEqual(detail.latest_error, "slides failed")
+        self.assertIsNotNone(detail.completed_at)
+
+    def test_update_task_run_rejects_terminal_to_running_transition(self) -> None:
+        created = self.service.create_task_run(
+            session_id="oc_test",
+            title="已完成任务",
+            source_type="group",
+        )
+        self.service.update_task_run(created.task_run_id, status="running", stage="processing")
+        self.service.update_task_run(created.task_run_id, status="completed", stage="delivered")
+
+        with self.assertLogs("app.services.task_run_service", level="WARNING") as logs:
+            updated = self.service.update_task_run(created.task_run_id, status="running", stage="late_resume")
+        detail = self.service.get_task_run(created.task_run_id)
+
+        self.assertIsNotNone(updated)
+        self.assertTrue(any("Rejected task run status transition" in line for line in logs.output))
+        self.assertIsNotNone(detail)
+        assert detail is not None
+        self.assertEqual(detail.status, "completed")
+        self.assertEqual(detail.stage, "late_resume")
+        self.assertIsNotNone(detail.completed_at)
+
+    def test_update_task_run_rejects_unknown_status(self) -> None:
+        created = self.service.create_task_run(
+            session_id="oc_test",
+            title="未知状态",
+            source_type="group",
+        )
+
+        with self.assertLogs("app.services.task_run_service", level="WARNING") as logs:
+            self.service.update_task_run(created.task_run_id, status="mystery", stage="processing")
+        detail = self.service.get_task_run(created.task_run_id)
+
+        self.assertTrue(any("unknown task run status" in line for line in logs.output))
+        self.assertIsNotNone(detail)
+        assert detail is not None
+        self.assertEqual(detail.status, "queued")
+        self.assertEqual(detail.stage, "processing")
 
     def test_create_run_publishes_realtime_events(self) -> None:
         with patch("app.services.task_run_service.realtime_hub.emit_room") as emit_room:

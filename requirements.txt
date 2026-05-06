@@ -8,3 +8,4 @@ python-dotenv==1.1.1
 psycopg[binary]==3.2.9
 pgvector==0.4.1
 python-pptx==1.0.2
+langgraph==1.1.10

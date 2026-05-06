@@ -168,6 +168,32 @@ class CanvasArtifactTests(unittest.TestCase):
         self.assertEqual(node["group"], "Intake")
         self.assertEqual(arrow["color"], "#334455")
 
+    def test_canvas_service_preserves_revision_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = CanvasArtifactService(root_dir=Path(tmpdir))
+            artifact = service.generate_flow(
+                title="Architecture",
+                instruction="revise canvas",
+                llm_result={
+                    "canvas": {
+                        "title": "Architecture",
+                        "version": 2,
+                        "revision_instruction": "revise canvas",
+                        "artifact_edit_plan": {"operations": [{"type": "update"}]},
+                        "shapes": [{"id": "n1", "type": "node", "text": "Updated"}],
+                    }
+                },
+                workspace_context="",
+                task_run_id="run_canvas",
+                session_id="s1",
+            )
+
+        preview = artifact["preview"]
+        self.assertEqual(artifact["version"], 2)
+        self.assertEqual(preview["version"], 2)
+        self.assertEqual(preview["revision_instruction"], "revise canvas")
+        self.assertEqual(preview["artifact_edit_plan"]["operations"][0]["type"], "update")
+
     def test_canvas_service_tolerates_non_numeric_shape_coordinates(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             service = CanvasArtifactService(root_dir=Path(tmpdir))

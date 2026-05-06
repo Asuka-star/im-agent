@@ -24,7 +24,7 @@ class RouteDecision:
 class RequestRouter:
     """Routes high-frequency collaboration requests before deep LLM planning."""
 
-    ROUTES = {"status", "summary", "tasks", "risks", "doc", "slides", "canvas", "help", "unknown"}
+    ROUTES = {"status", "summary", "tasks", "risks", "doc", "slides", "canvas", "delivery", "help", "unknown"}
     EXACT_ROUTE_COMMANDS = {
         "任务列表": "status",
         "任务清单": "status",
@@ -44,6 +44,11 @@ class RequestRouter:
         "使用说明": "help",
         "你能做什么": "help",
         "能做什么": "help",
+        "你好": "help",
+        "您好": "help",
+        "嗨": "help",
+        "hi": "help",
+        "hello": "help",
         "help": "help",
     }
 
@@ -145,6 +150,7 @@ class RequestRouter:
     RISK_KEYWORDS = ("风险", "阻塞", "卡点", "问题点", "风险项")
     ARTIFACT_OUTPUT_ACTIONS = (
         "生成",
+        "生产",
         "写成",
         "写到",
         "写入",
@@ -159,9 +165,14 @@ class RequestRouter:
         "转成",
         "形成",
         "产出",
+        "画一",
+        "画个",
+        "画出",
+        "绘制",
         "make",
         "create",
         "generate",
+        "draw",
         "write",
         "sync",
         "export",
@@ -205,20 +216,6 @@ class RequestRouter:
     LOW_CONFIDENCE_THRESHOLD = 0.45
 
     def route(self, instruction: str, *, llm_service: Any | None = None) -> RouteDecision:
-        exact_decision = self.route_by_exact_rule(instruction)
-        if exact_decision is not None:
-            return exact_decision
-
-        rule_decision = self.route_by_rule(instruction)
-        text = (instruction or "").strip()
-        lowered = text.lower()
-        if (
-            rule_decision is not None
-            and rule_decision.route == "tasks"
-            and self._is_task_status_update_request(text, lowered)
-        ):
-            return rule_decision
-
         if llm_service is not None and getattr(llm_service, "is_configured", lambda: False)():
             try:
                 result = llm_service.route_workspace_request(instruction)
@@ -226,6 +223,11 @@ class RequestRouter:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Lightweight request routing failed, using fallback route: %s", exc)
 
+        exact_decision = self.route_by_exact_rule(instruction)
+        if exact_decision is not None:
+            return exact_decision
+
+        rule_decision = self.route_by_rule(instruction)
         if rule_decision is not None:
             return rule_decision
 
@@ -288,12 +290,16 @@ class RequestRouter:
                 reason="用户指出了产物和局部范围，但没有明确要删除、移动、改写还是补充。",
             )
 
-        requested_outputs = self._requested_outputs(
-            text=text,
-            lowered=lowered,
-            doc_requested=doc_requested,
-            slides_requested=slides_requested,
-            canvas_requested=canvas_requested,
+        requested_outputs = (
+            self._requested_outputs(
+                text=text,
+                lowered=lowered,
+                doc_requested=doc_requested,
+                slides_requested=slides_requested,
+                canvas_requested=canvas_requested,
+            )
+            if output_requested
+            else ()
         )
         primary_artifact = requested_outputs[0] if requested_outputs else ""
 
@@ -368,16 +374,19 @@ class RequestRouter:
         confidence = self._normalize_confidence(result.get("confidence"))
         if route not in self.ROUTES:
             route = "unknown"
+        requested_outputs = self._normalize_requested_outputs(result.get("requested_outputs"), fallback_route=route)
         needs_clarification = bool(result.get("needs_clarification"))
         if route == "unknown" or confidence < self.LOW_CONFIDENCE_THRESHOLD:
             needs_clarification = True
+        if requested_outputs and route in {"doc", "slides", "canvas"}:
+            needs_clarification = False
         return RouteDecision(
             route=route,
             source="llm",
             confidence=confidence,
             needs_clarification=needs_clarification,
             reason=str(result.get("reason") or "").strip(),
-            requested_outputs=self._normalize_requested_outputs(result.get("requested_outputs"), fallback_route=route),
+            requested_outputs=requested_outputs,
         )
 
     def _is_doc_request(self, text: str, lowered: str) -> bool:
