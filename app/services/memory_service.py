@@ -4,10 +4,11 @@ import threading
 from datetime import datetime, timezone
 
 from sqlalchemy import delete, desc, or_, select
+from sqlalchemy.exc import IntegrityError
 
 from app.core.config import settings
 from app.db.database import SessionLocal
-from app.db.models import Episode, Memory, MemoryChunk, Message, Session, Task, TaskChangeLog, UserAlias
+from app.db.models import AppSetting, Episode, Memory, MemoryChunk, Message, Session, Task, TaskChangeLog, UserAlias
 from app.schemas.analyze import AnalyzeResponse
 from app.schemas.task import TaskItem
 from app.services.app_state import AppStateService
@@ -32,13 +33,11 @@ class MemoryService:
         if not normalized_session_id:
             return
 
-        sessions = self.get_team_group_sessions(normalized_team_id)
-        if normalized_session_id not in sessions:
-            sessions.append(normalized_session_id)
-            self.app_state.set_value(
-                self._team_group_sessions_key(normalized_team_id),
-                json.dumps(sessions, ensure_ascii=False),
-            )
+        self.app_state.update_json_value(
+            self._team_group_sessions_key(normalized_team_id),
+            default=[],
+            updater=lambda current: self._append_unique_session_id(current, normalized_session_id),
+        )
 
     def get_team_group_sessions(self, team_id: str | None) -> list[str]:
         raw = self.app_state.get_value(self._team_group_sessions_key(self.normalize_team_id(team_id)))
@@ -152,13 +151,23 @@ class MemoryService:
         return payload if isinstance(payload, dict) else {}
 
     def ensure_session(self, session_id: str) -> None:
-        with SessionLocal() as session:
-            existing = session.execute(
-                select(Session.id).where(Session.session_id == session_id)
-            ).scalar_one_or_none()
-            if existing is None:
-                session.add(Session(session_id=session_id))
-                session.commit()
+        normalized_session_id = (session_id or "").strip()
+        if not normalized_session_id:
+            return
+
+        while True:
+            with SessionLocal() as session:
+                existing = session.execute(
+                    select(Session.id).where(Session.session_id == normalized_session_id)
+                ).scalar_one_or_none()
+                if existing is not None:
+                    return
+                session.add(Session(session_id=normalized_session_id))
+                try:
+                    session.commit()
+                    return
+                except IntegrityError:
+                    session.rollback()
 
     def _team_group_sessions_key(self, team_id: str) -> str:
         return f"{self.TEAM_GROUP_SESSIONS_KEY_PREFIX}:{team_id}"
@@ -289,25 +298,31 @@ class MemoryService:
 
     def ensure_active_episode(self, session_id: str) -> Episode:
         self.ensure_session(session_id)
-        with SessionLocal() as session:
-            episode = session.execute(
-                select(Episode)
-                .where(Episode.session_id == session_id, Episode.status == "active")
-                .order_by(desc(Episode.id))
-                .limit(1)
-            ).scalar_one_or_none()
-            if episode is not None:
-                return episode
+        while True:
+            with SessionLocal() as session:
+                self._lock_session_row(session, session_id)
+                episode = session.execute(
+                    select(Episode)
+                    .where(Episode.session_id == session_id, Episode.status == "active")
+                    .order_by(desc(Episode.id))
+                    .limit(1)
+                ).scalar_one_or_none()
+                if episode is not None:
+                    return episode
 
-            episode = Episode(session_id=session_id, status="active")
-            session.add(episode)
-            session.commit()
-            session.refresh(episode)
-            logger.info("Opened new discussion episode: session_id=%s episode_id=%s", session_id, episode.id)
-            return episode
+                episode = Episode(session_id=session_id, status="active")
+                session.add(episode)
+                try:
+                    session.commit()
+                    session.refresh(episode)
+                    logger.info("Opened new discussion episode: session_id=%s episode_id=%s", session_id, episode.id)
+                    return episode
+                except IntegrityError:
+                    session.rollback()
 
     def close_active_episode(self, session_id: str, *, title: str | None = None) -> int | None:
         with SessionLocal() as session:
+            self._lock_session_row(session, session_id)
             episode = session.execute(
                 select(Episode)
                 .where(Episode.session_id == session_id, Episode.status == "active")
@@ -340,8 +355,11 @@ class MemoryService:
         if mentioned_users:
             self._upsert_user_aliases(session_id, mentioned_users)
         with SessionLocal() as session:
+            self._lock_session_row(session, session_id)
             if message_id:
-                existing = session.execute(select(Message).where(Message.message_id == message_id)).scalar_one_or_none()
+                existing = session.execute(
+                    select(Message).where(Message.message_id == message_id).with_for_update()
+                ).scalar_one_or_none()
                 if existing is not None:
                     if session_id and (not existing.session_id or existing.session_id == existing.message_id):
                         existing.session_id = session_id
@@ -593,7 +611,6 @@ class MemoryService:
             return {"memory_count": 0, "chunk_count": 0, "dirty_records": []}
 
         dirty_at = datetime.now(timezone.utc).isoformat()
-        records = self.get_source_dirty_records(normalized_session_id)
         record = {
             "message_id": normalized_message_id,
             "episode_id": episode_id,
@@ -601,20 +618,16 @@ class MemoryService:
             "reason": reason,
             "dirty_at": dirty_at,
         }
-        records = [
-            item
-            for item in records
-            if not (
-                item.get("message_id") == normalized_message_id
-                and item.get("episode_id") == episode_id
-                and item.get("event_type") == event_type
-            )
-        ]
-        records.append(record)
-        records = records[-20:]
-        self.app_state.set_value(
+        records = self.app_state.update_json_value(
             self._source_dirty_key(normalized_session_id),
-            json.dumps(records, ensure_ascii=False),
+            default=[],
+            updater=lambda current: self._append_source_dirty_record(
+                current,
+                record=record,
+                message_id=normalized_message_id,
+                episode_id=episode_id,
+                event_type=event_type,
+            ),
         )
 
         dirty_memory_count = 0
@@ -677,8 +690,14 @@ class MemoryService:
             session.commit()
         return {"memory_count": dirty_memory_count, "chunk_count": deleted_chunk_count, "dirty_records": records}
 
-    def get_source_dirty_records(self, session_id: str) -> list[dict]:
-        raw = self.app_state.get_value(self._source_dirty_key(session_id))
+    def get_source_dirty_records(self, session_id: str, *, db_session=None) -> list[dict]:
+        if db_session is None:
+            raw = self.app_state.get_value(self._source_dirty_key(session_id))
+        else:
+            row = db_session.execute(
+                select(AppSetting).where(AppSetting.key == self._source_dirty_key(session_id))
+            ).scalar_one_or_none()
+            raw = row.value if row is not None else None
         if not raw:
             return []
         try:
@@ -698,6 +717,7 @@ class MemoryService:
     ) -> None:
         self.ensure_session(session_id)
         with SessionLocal() as session:
+            self._lock_session_row(session, session_id)
             session.add(
                 Message(
                     session_id=session_id,
@@ -730,12 +750,6 @@ class MemoryService:
         preserve_unmatched_previous: bool = True,
     ) -> None:
         self.ensure_session(session_id)
-        previous_tasks = self.get_current_tasks(session_id)
-        merged_tasks = self._merge_current_tasks(
-            previous_tasks,
-            analysis.tasks,
-            preserve_unmatched_previous=preserve_unmatched_previous,
-        )
         payload = {
             "summary": analysis.summary,
             "risks": analysis.risks,
@@ -745,6 +759,13 @@ class MemoryService:
         }
 
         with SessionLocal() as session:
+            self._lock_session_row(session, session_id)
+            previous_tasks = self._get_current_tasks(session, session_id)
+            merged_tasks = self._merge_current_tasks(
+                previous_tasks,
+                analysis.tasks,
+                preserve_unmatched_previous=preserve_unmatched_previous,
+            )
             session.add(
                 Memory(
                     session_id=session_id,
@@ -767,17 +788,18 @@ class MemoryService:
                     )
                 )
 
-            session.commit()
+            for row in self._build_task_change_rows(
+                session_id=session_id,
+                episode_id=episode_id,
+                previous_tasks=previous_tasks,
+                current_tasks=merged_tasks,
+                reason=analysis.summary,
+                preserve_unmatched_previous=preserve_unmatched_previous,
+                source_message_id=source_message_id,
+            ):
+                session.add(row)
 
-        self._record_task_changes(
-            session_id=session_id,
-            episode_id=episode_id,
-            previous_tasks=previous_tasks,
-            current_tasks=merged_tasks,
-            reason=analysis.summary,
-            preserve_unmatched_previous=preserve_unmatched_previous,
-            source_message_id=source_message_id,
-        )
+            session.commit()
 
         chunk_kwargs = {
             "session_id": session_id,
@@ -849,64 +871,23 @@ class MemoryService:
 
     def get_current_tasks(self, session_id: str) -> list[Task]:
         with SessionLocal() as session:
-            return (
-                session.execute(
-                    select(Task)
-                    .where(Task.session_id == session_id)
-                    .order_by(Task.id.asc())
-                )
-                .scalars()
-                .all()
-            )
+            return self._get_current_tasks(session, session_id)
 
     def get_recent_memories(self, session_id: str, limit: int = 3) -> list[Memory]:
-        dirty_episode_ids = self._dirty_episode_ids(session_id)
-        dirty_message_ids = self._dirty_source_message_ids(session_id)
         with SessionLocal() as session:
-            rows = (
-                session.execute(
-                    select(Memory)
-                    .where(Memory.session_id == session_id)
-                    .order_by(desc(Memory.id))
-                    .limit(max(limit * 4, limit))
-                )
-                .scalars()
-                .all()
+            return self._filter_recent_memories(
+                self._recent_memory_rows(session, session_id, limit=limit),
+                session_id,
+                limit=limit,
             )
-        filtered = [
-            memory
-            for memory in rows
-            if not self._memory_payload_is_dirty(
-                memory.payload,
-                dirty_episode_ids=dirty_episode_ids,
-                dirty_message_ids=dirty_message_ids,
-            )
-        ]
-        return filtered[:limit]
 
     def get_recent_task_changes(self, session_id: str, limit: int = 8) -> list[TaskChangeLog]:
-        dirty_episode_ids = self._dirty_episode_ids(session_id)
-        dirty_message_ids = self._dirty_source_message_ids(session_id)
         with SessionLocal() as session:
-            rows = (
-                session.execute(
-                    select(TaskChangeLog)
-                    .where(TaskChangeLog.session_id == session_id)
-                    .order_by(desc(TaskChangeLog.id))
-                    .limit(max(limit * 4, limit))
-                )
-                .scalars()
-                .all()
+            return self._filter_recent_task_changes(
+                self._recent_task_change_rows(session, session_id, limit=limit),
+                session_id,
+                limit=limit,
             )
-        return [
-            row
-            for row in rows
-            if not self._task_change_is_dirty(
-                row,
-                dirty_episode_ids=dirty_episode_ids,
-                dirty_message_ids=dirty_message_ids,
-            )
-        ][:limit]
 
     def search_relevant_memories(
         self,
@@ -914,29 +895,26 @@ class MemoryService:
         query_text: str,
         *,
         limit: int = 5,
+        db_session=None,
+        query_embedding: list[float] | None = None,
     ) -> list[MemoryChunk]:
         if not self.embedding_service.is_configured() or not query_text.strip():
             return []
 
-        try:
-            query_embedding = self.embedding_service.embed_text(query_text)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Embedding retrieval skipped due to embedding error: %s", exc)
-            return []
+        if query_embedding is None:
+            try:
+                query_embedding = self.embedding_service.embed_text(query_text)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Embedding retrieval skipped due to embedding error: %s", exc)
+                return []
 
         dirty_episode_ids = self._dirty_episode_ids(session_id)
         dirty_message_ids = self._dirty_source_message_ids(session_id)
-        with SessionLocal() as session:
-            statement = (
-                select(MemoryChunk)
-                .where(
-                    MemoryChunk.session_id == session_id,
-                    MemoryChunk.embedding.is_not(None),
-                )
-                .order_by(MemoryChunk.embedding.cosine_distance(query_embedding))
-                .limit(max(limit * 4, limit))
-            )
-            rows = session.execute(statement).scalars().all()
+        if db_session is None:
+            with SessionLocal() as session:
+                rows = self._relevant_memory_rows(session, session_id, query_embedding, limit=limit)
+        else:
+            rows = self._relevant_memory_rows(db_session, session_id, query_embedding, limit=limit)
         return [
             chunk
             for chunk in rows
@@ -954,26 +932,27 @@ class MemoryService:
         episode_id: int | None,
         exclude_message_id: str | None = None,
         limit: int = 20,
+        db_session=None,
     ) -> list[Message]:
         if episode_id is None:
             return []
 
-        with SessionLocal() as session:
-            statement = (
-                select(Message)
-                .where(
-                    Message.session_id == session_id,
-                    Message.role == "user",
-                    Message.episode_id == episode_id,
-                    self._active_message_filter(),
+        if db_session is None:
+            with SessionLocal() as session:
+                return self._episode_messages(
+                    session,
+                    session_id,
+                    episode_id=episode_id,
+                    exclude_message_id=exclude_message_id,
+                    limit=limit,
                 )
-                .order_by(Message.id.asc())
-            )
-            if exclude_message_id:
-                statement = statement.where(Message.message_id != exclude_message_id)
-
-            messages = session.execute(statement).scalars().all()
-            return messages[-limit:] if limit and len(messages) > limit else messages
+        return self._episode_messages(
+            db_session,
+            session_id,
+            episode_id=episode_id,
+            exclude_message_id=exclude_message_id,
+            limit=limit,
+        )
 
     def build_discussion_block(
         self,
@@ -994,17 +973,7 @@ class MemoryService:
             exclude_message_id=exclude_message_id,
             limit=limit,
         )
-        if not messages:
-            return ""
-
-        alias_map = self._build_alias_map(
-            session_id,
-            [message.sender_id for message in messages if message.sender_id],
-        )
-        lines = ["[近期群聊讨论]"]
-        for message in messages:
-            lines.append(self._format_message_line(message, alias_map=alias_map))
-        return "\n".join(lines)
+        return self._build_discussion_block_from_messages(session_id, messages)
 
     def get_discussion_cutoff_at(
         self,
@@ -1048,24 +1017,60 @@ class MemoryService:
         include_semantic_search: bool = True,
         episode_id: int | None = None,
     ) -> str:
-        tasks = self.get_current_tasks(session_id)
-        memories = self.get_recent_memories(session_id)
-        task_changes = self.get_recent_task_changes(session_id)
-        source_dirty_records = self.get_source_dirty_records(session_id)
-        retrieved_chunks = (
-            self.search_relevant_memories(session_id, query_text or "", limit=5)
-            if include_semantic_search
-            else []
-        )
-        pending_block = (
-            self.build_discussion_block(
+        query_embedding: list[float] | None = None
+        if include_semantic_search and self.embedding_service.is_configured() and str(query_text or "").strip():
+            try:
+                query_embedding = self.embedding_service.embed_text(str(query_text or "").strip())
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Embedding retrieval skipped due to embedding error: %s", exc)
+        with SessionLocal() as session:
+            self._lock_session_row(session, session_id)
+            source_dirty_records = self.get_source_dirty_records(session_id, db_session=session)
+            target_episode_id = episode_id
+            if target_episode_id is None:
+                active_episode = session.execute(
+                    select(Episode)
+                    .where(Episode.session_id == session_id, Episode.status == "active")
+                    .order_by(desc(Episode.id))
+                    .limit(1)
+                ).scalar_one_or_none()
+                target_episode_id = active_episode.id if active_episode else None
+
+            tasks = self._get_current_tasks(session, session_id)
+            memories = self._filter_recent_memories(
+                self._recent_memory_rows(session, session_id, limit=3),
                 session_id,
-                episode_id=episode_id,
-                exclude_message_id=exclude_message_id,
+                limit=3,
             )
-            if include_pending
-            else ""
-        )
+            task_changes = self._filter_recent_task_changes(
+                self._recent_task_change_rows(session, session_id, limit=8),
+                session_id,
+                limit=8,
+            )
+            retrieved_chunks = (
+                self.search_relevant_memories(
+                    session_id,
+                    query_text or "",
+                    limit=5,
+                    db_session=session,
+                    query_embedding=query_embedding,
+                )
+                if include_semantic_search and query_embedding is not None
+                else []
+            )
+            pending_block = (
+                self._build_discussion_block_from_messages(
+                    session_id,
+                    self.get_episode_messages(
+                        session_id,
+                        episode_id=target_episode_id,
+                        exclude_message_id=exclude_message_id,
+                        db_session=session,
+                    ),
+                )
+                if include_pending
+                else ""
+            )
 
         if not tasks and not memories and not task_changes and not pending_block and not retrieved_chunks and not source_dirty_records:
             return ""
@@ -1168,6 +1173,199 @@ class MemoryService:
         preserve_unmatched_previous: bool,
         source_message_id: str | None,
     ) -> None:
+        rows = self._build_task_change_rows(
+            session_id=session_id,
+            episode_id=episode_id,
+            previous_tasks=previous_tasks,
+            current_tasks=current_tasks,
+            reason=reason,
+            preserve_unmatched_previous=preserve_unmatched_previous,
+            source_message_id=source_message_id,
+        )
+        if not rows:
+            return
+
+        with SessionLocal() as session:
+            for row in rows:
+                session.add(row)
+            session.commit()
+
+    @staticmethod
+    def _append_unique_session_id(current: list[object], session_id: str) -> list[str]:
+        sessions = [str(item or "").strip() for item in current if str(item or "").strip()]
+        if session_id not in sessions:
+            sessions.append(session_id)
+        return sessions
+
+    @staticmethod
+    def _append_source_dirty_record(
+        current: list[object],
+        *,
+        record: dict[str, object],
+        message_id: str,
+        episode_id: int | None,
+        event_type: str,
+    ) -> list[dict]:
+        records = [dict(item) for item in current if isinstance(item, dict)]
+        records = [
+            item
+            for item in records
+            if not (
+                item.get("message_id") == message_id
+                and item.get("episode_id") == episode_id
+                and item.get("event_type") == event_type
+            )
+        ]
+        records.append(dict(record))
+        return records[-20:]
+
+    def _lock_session_row(self, session, session_id: str) -> Session:
+        row = session.execute(
+            select(Session).where(Session.session_id == session_id).with_for_update()
+        ).scalar_one_or_none()
+        if row is None:
+            raise RuntimeError(f"Session row missing for {session_id}")
+        return row
+
+    def _get_current_tasks(self, session, session_id: str) -> list[Task]:
+        return (
+            session.execute(
+                select(Task)
+                .where(Task.session_id == session_id)
+                .order_by(Task.id.asc())
+            )
+            .scalars()
+            .all()
+        )
+
+    def _recent_memory_rows(self, session, session_id: str, *, limit: int) -> list[Memory]:
+        return (
+            session.execute(
+                select(Memory)
+                .where(Memory.session_id == session_id)
+                .order_by(desc(Memory.id))
+                .limit(max(limit * 4, limit))
+            )
+            .scalars()
+            .all()
+        )
+
+    def _filter_recent_memories(self, rows: list[Memory], session_id: str, *, limit: int) -> list[Memory]:
+        dirty_episode_ids = self._dirty_episode_ids(session_id)
+        dirty_message_ids = self._dirty_source_message_ids(session_id)
+        filtered = [
+            memory
+            for memory in rows
+            if not self._memory_payload_is_dirty(
+                memory.payload,
+                dirty_episode_ids=dirty_episode_ids,
+                dirty_message_ids=dirty_message_ids,
+            )
+        ]
+        return filtered[:limit]
+
+    def _recent_task_change_rows(self, session, session_id: str, *, limit: int) -> list[TaskChangeLog]:
+        return (
+            session.execute(
+                select(TaskChangeLog)
+                .where(TaskChangeLog.session_id == session_id)
+                .order_by(desc(TaskChangeLog.id))
+                .limit(max(limit * 4, limit))
+            )
+            .scalars()
+            .all()
+        )
+
+    def _filter_recent_task_changes(
+        self,
+        rows: list[TaskChangeLog],
+        session_id: str,
+        *,
+        limit: int,
+    ) -> list[TaskChangeLog]:
+        dirty_episode_ids = self._dirty_episode_ids(session_id)
+        dirty_message_ids = self._dirty_source_message_ids(session_id)
+        return [
+            row
+            for row in rows
+            if not self._task_change_is_dirty(
+                row,
+                dirty_episode_ids=dirty_episode_ids,
+                dirty_message_ids=dirty_message_ids,
+            )
+        ][:limit]
+
+    def _relevant_memory_rows(
+        self,
+        session,
+        session_id: str,
+        query_embedding: list[float],
+        *,
+        limit: int,
+    ) -> list[MemoryChunk]:
+        return (
+            session.execute(
+                select(MemoryChunk)
+                .where(
+                    MemoryChunk.session_id == session_id,
+                    MemoryChunk.embedding.is_not(None),
+                )
+                .order_by(MemoryChunk.embedding.cosine_distance(query_embedding))
+                .limit(max(limit * 4, limit))
+            )
+            .scalars()
+            .all()
+        )
+
+    def _episode_messages(
+        self,
+        session,
+        session_id: str,
+        *,
+        episode_id: int,
+        exclude_message_id: str | None,
+        limit: int,
+    ) -> list[Message]:
+        statement = (
+            select(Message)
+            .where(
+                Message.session_id == session_id,
+                Message.role == "user",
+                Message.episode_id == episode_id,
+                self._active_message_filter(),
+            )
+            .order_by(Message.id.asc())
+        )
+        if exclude_message_id:
+            statement = statement.where(Message.message_id != exclude_message_id)
+
+        messages = session.execute(statement).scalars().all()
+        return messages[-limit:] if limit and len(messages) > limit else messages
+
+    def _build_discussion_block_from_messages(self, session_id: str, messages: list[Message]) -> str:
+        if not messages:
+            return ""
+
+        alias_map = self._build_alias_map(
+            session_id,
+            [message.sender_id for message in messages if message.sender_id],
+        )
+        lines = ["[近期群聊讨论]"]
+        for message in messages:
+            lines.append(self._format_message_line(message, alias_map=alias_map))
+        return "\n".join(lines)
+
+    def _build_task_change_rows(
+        self,
+        *,
+        session_id: str,
+        episode_id: int | None,
+        previous_tasks: list[Task],
+        current_tasks: list[TaskItem],
+        reason: str,
+        preserve_unmatched_previous: bool,
+        source_message_id: str | None,
+    ) -> list[TaskChangeLog]:
         matched_pairs, unmatched_previous, unmatched_current = self._match_task_pairs(previous_tasks, current_tasks)
         rows: list[TaskChangeLog] = []
 
@@ -1248,14 +1446,7 @@ class MemoryService:
                         ),
                     )
                 )
-
-        if not rows:
-            return
-
-        with SessionLocal() as session:
-            for row in rows:
-                session.add(row)
-            session.commit()
+        return rows
 
     def _merge_current_tasks(
         self,

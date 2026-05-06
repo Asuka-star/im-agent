@@ -1,5 +1,6 @@
 import os
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -754,6 +755,77 @@ class TaskRunServiceTests(unittest.TestCase):
 
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0].session_id, "oc_alpha")
+
+    def test_upsert_step_is_atomic_under_concurrency(self) -> None:
+        created = self.service.create_task_run(
+            session_id="oc_parallel_step",
+            title="parallel step test",
+            source_type="group",
+        )
+        barrier = threading.Barrier(2)
+        errors: list[Exception] = []
+
+        def worker(status: str, output: str) -> None:
+            try:
+                barrier.wait(timeout=5)
+                self.service.upsert_step(
+                    created.task_run_id,
+                    step_key="request_received",
+                    title="receive request",
+                    status=status,
+                    output_payload={"value": output},
+                )
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        threads = [
+            threading.Thread(target=worker, args=("running", "a")),
+            threading.Thread(target=worker, args=("done", "b")),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(errors, [])
+        with self.test_session_local() as session:
+            rows = session.query(TaskRunStep).filter(
+                TaskRunStep.task_run_id == created.task_run_id,
+                TaskRunStep.step_key == "request_received",
+            ).all()
+        self.assertEqual(len(rows), 1)
+
+    def test_merge_task_run_metadata_is_atomic_under_concurrency(self) -> None:
+        created = self.service.create_task_run(
+            session_id="oc_parallel_meta",
+            title="parallel metadata test",
+            source_type="group",
+            metadata={"seed": True},
+        )
+        barrier = threading.Barrier(2)
+        errors: list[Exception] = []
+
+        def worker(patch_data: dict) -> None:
+            try:
+                barrier.wait(timeout=5)
+                self.service.merge_task_run_metadata(created.task_run_id, patch_data)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        threads = [
+            threading.Thread(target=worker, args=({"left": 1},)),
+            threading.Thread(target=worker, args=({"right": 2},)),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(errors, [])
+        metadata = self.service.get_task_run_metadata(created.task_run_id)
+        self.assertTrue(metadata["seed"])
+        self.assertEqual(metadata["left"], 1)
+        self.assertEqual(metadata["right"], 2)
 
 
 if __name__ == "__main__":

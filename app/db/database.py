@@ -109,6 +109,13 @@ def _run_lightweight_migrations() -> None:
         if "closed_at" not in episode_columns:
             with engine.begin() as connection:
                 connection.execute(text("ALTER TABLE episodes ADD COLUMN closed_at TIMESTAMPTZ"))
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS ix_episodes_session_active_unique "
+                    "ON episodes (session_id) WHERE status = 'active'"
+                )
+            )
 
     if "task_change_logs" in tables:
         change_columns = {column["name"] for column in inspector.get_columns("task_change_logs")}
@@ -148,3 +155,12 @@ def _run_lightweight_migrations() -> None:
                 connection.execute(
                     text("CREATE INDEX IF NOT EXISTS ix_task_runs_requirement_id ON task_runs (requirement_id)")
                 )
+
+    if "task_run_steps" in tables:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_task_run_steps_task_run_step "
+                    "ON task_run_steps (task_run_id, step_key)"
+                )
+            )

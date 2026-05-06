@@ -1,6 +1,7 @@
 import json
 import os
 import tempfile
+import threading
 import unittest
 from unittest.mock import Mock, patch
 
@@ -37,10 +38,13 @@ class TeamMemoryTests(unittest.TestCase):
 
         memory_patcher = patch("app.services.memory_service.SessionLocal", self.test_session_local)
         state_patcher = patch("app.services.app_state.SessionLocal", self.test_session_local)
+        doc_patcher = patch("app.services.session_document_service.SessionLocal", self.test_session_local)
         self.addCleanup(memory_patcher.stop)
         self.addCleanup(state_patcher.stop)
+        self.addCleanup(doc_patcher.stop)
         memory_patcher.start()
         state_patcher.start()
+        doc_patcher.start()
         self.service = MemoryService()
 
     def tearDown(self) -> None:
@@ -649,6 +653,162 @@ class TeamMemoryTests(unittest.TestCase):
         self.assertNotIn("direct dirty summary", context)
         self.service.app_state.set_value(self.service._source_dirty_key("oc_dirty_direct"), "[]")
         self.assertEqual(self.service.get_recent_task_changes("oc_dirty_direct"), [])
+
+    def test_register_team_group_session_is_atomic_under_concurrency(self) -> None:
+        barrier = threading.Barrier(2)
+        errors: list[Exception] = []
+
+        def worker(session_id: str) -> None:
+            try:
+                barrier.wait(timeout=5)
+                self.service.register_team_group_session("tenant_atomic", session_id)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        threads = [
+            threading.Thread(target=worker, args=("oc_group_a",)),
+            threading.Thread(target=worker, args=("oc_group_b",)),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(errors, [])
+        sessions = self.service.get_team_group_sessions("tenant_atomic")
+        self.assertEqual(set(sessions), {"oc_group_a", "oc_group_b"})
+
+    def test_ensure_active_episode_is_atomic_under_concurrency(self) -> None:
+        barrier = threading.Barrier(2)
+        results: list[int] = []
+        errors: list[Exception] = []
+
+        def worker() -> None:
+            try:
+                barrier.wait(timeout=5)
+                results.append(self.service.ensure_active_episode("oc_atomic_episode").id)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(errors, [])
+        self.assertEqual(len(set(results)), 1)
+        with self.test_session_local() as session:
+            active_count = session.query(Episode).filter(
+                Episode.session_id == "oc_atomic_episode",
+                Episode.status == "active",
+            ).count()
+        self.assertEqual(active_count, 1)
+
+    def test_session_document_history_survives_parallel_updates(self) -> None:
+        doc_service = SessionDocumentService()
+        barrier = threading.Barrier(2)
+        errors: list[Exception] = []
+
+        def worker(document_id: str) -> None:
+            try:
+                barrier.wait(timeout=5)
+                doc_service.save_current_document(
+                    "oc_parallel_docs",
+                    document_id=document_id,
+                    url=f"https://feishu.cn/docx/{document_id}",
+                    title=document_id,
+                )
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        threads = [
+            threading.Thread(target=worker, args=("doc_a",)),
+            threading.Thread(target=worker, args=("doc_b",)),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(errors, [])
+        documents = doc_service.list_documents("oc_parallel_docs")
+        self.assertEqual({item["document_id"] for item in documents}, {"doc_a", "doc_b"})
+
+    def test_save_round_preserves_parallel_task_updates(self) -> None:
+        barrier = threading.Barrier(2)
+        errors: list[Exception] = []
+
+        def worker(title: str, owner: str) -> None:
+            try:
+                barrier.wait(timeout=5)
+                self.service.save_round(
+                    session_id="oc_parallel_round",
+                    analysis=AnalyzeResponse(
+                        session_id="oc_parallel_round",
+                        summary=f"summary for {title}",
+                        tasks=[
+                            TaskItem(
+                                title=title,
+                                owner=owner,
+                                priority="medium",
+                                due_date="TBD",
+                                status="draft",
+                                notes="parallel update",
+                            )
+                        ],
+                        risks=[],
+                        next_actions=[],
+                        agent_traces=[AgentTrace(agent="planner", summary="ok")],
+                    ),
+                    embed=False,
+                    preserve_unmatched_previous=True,
+                )
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        threads = [
+            threading.Thread(target=worker, args=("task_a", "u1")),
+            threading.Thread(target=worker, args=("task_b", "u2")),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(errors, [])
+        tasks = self.service.get_current_tasks("oc_parallel_round")
+        self.assertEqual({task.title for task in tasks}, {"task_a", "task_b"})
+
+    def test_mark_source_dirty_preserves_parallel_records(self) -> None:
+        barrier = threading.Barrier(2)
+        errors: list[Exception] = []
+
+        def worker(message_id: str, event_type: str) -> None:
+            try:
+                barrier.wait(timeout=5)
+                self.service.mark_episode_outputs_source_dirty(
+                    session_id="oc_parallel_dirty",
+                    episode_id=1,
+                    message_id=message_id,
+                    event_type=event_type,
+                    reason=f"{message_id} changed",
+                )
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        threads = [
+            threading.Thread(target=worker, args=("msg_a", "im.message.updated_v1")),
+            threading.Thread(target=worker, args=("msg_b", "im.message.recalled_v1")),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(errors, [])
+        records = self.service.get_source_dirty_records("oc_parallel_dirty")
+        self.assertEqual({record["message_id"] for record in records}, {"msg_a", "msg_b"})
 
 
 if __name__ == "__main__":

@@ -1,9 +1,11 @@
 import json
 import logging
+import threading
 import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import desc, select
+from sqlalchemy.exc import IntegrityError
 
 from app.db.database import SessionLocal
 from app.db.models import Artifact, ConfirmationRequest, Requirement, TaskRun, TaskRunStep
@@ -28,6 +30,8 @@ from app.utils.values import coerce_positive_int
 
 
 logger = logging.getLogger(__name__)
+_TASK_RUN_MUTEX_GUARD = threading.Lock()
+_TASK_RUN_MUTEXES: dict[str, threading.Lock] = {}
 
 
 def _ordered_unique(values: list[str]) -> list[str]:
@@ -54,6 +58,14 @@ class TaskRunService:
         self.session_document_service = session_document_service or SessionDocumentService()
         self.artifact_verifier = artifact_verifier or TaskArtifactVerifier()
         self.context_pack_builder = context_pack_builder or TaskContextPackBuilder()
+
+    def _task_run_mutex(self, task_run_id: str) -> threading.Lock:
+        with _TASK_RUN_MUTEX_GUARD:
+            lock = _TASK_RUN_MUTEXES.get(task_run_id)
+            if lock is None:
+                lock = threading.Lock()
+                _TASK_RUN_MUTEXES[task_run_id] = lock
+            return lock
 
     def create_task_run(
         self,
@@ -171,47 +183,48 @@ class TaskRunService:
         latest_error: str | None = None,
         metadata: dict | None = None,
     ) -> TaskRunSummary | None:
-        with SessionLocal() as session:
-            row = session.execute(
-                select(TaskRun).where(TaskRun.task_run_id == task_run_id)
-            ).scalar_one_or_none()
-            if row is None:
-                return None
+        with self._task_run_mutex(task_run_id):
+            with SessionLocal() as session:
+                row = session.execute(
+                    select(TaskRun).where(TaskRun.task_run_id == task_run_id).with_for_update()
+                ).scalar_one_or_none()
+                if row is None:
+                    return None
 
-            if intent is not None:
-                row.intent = intent
-            if title:
-                row.title = title.strip()[:255]
-            if stage:
-                row.stage = stage
-            if status:
-                transition = transition_task_run_status(row.status, status)
-                if transition.accepted:
-                    row.status = transition.requested_status
-                    if transition.completed_at is not None and row.completed_at is None:
-                        row.completed_at = transition.completed_at
-                    elif transition.requested_status not in TERMINAL_STATUSES:
-                        row.completed_at = None
-                else:
-                    logger.warning(
-                        "Rejected task run status transition: task_run_id=%s current=%s requested=%s reason=%s",
-                        task_run_id,
-                        transition.current_status,
-                        transition.requested_status,
-                        transition.reason,
-                    )
-            if latest_summary is not None:
-                row.latest_summary = latest_summary
-            if latest_reply_preview is not None:
-                row.latest_reply_preview = latest_reply_preview
-            if latest_error is not None:
-                row.latest_error = latest_error
-            if metadata is not None:
-                row.metadata_json = json.dumps(metadata, ensure_ascii=False)
+                if intent is not None:
+                    row.intent = intent
+                if title:
+                    row.title = title.strip()[:255]
+                if stage:
+                    row.stage = stage
+                if status:
+                    transition = transition_task_run_status(row.status, status)
+                    if transition.accepted:
+                        row.status = transition.requested_status
+                        if transition.completed_at is not None and row.completed_at is None:
+                            row.completed_at = transition.completed_at
+                        elif transition.requested_status not in TERMINAL_STATUSES:
+                            row.completed_at = None
+                    else:
+                        logger.warning(
+                            "Rejected task run status transition: task_run_id=%s current=%s requested=%s reason=%s",
+                            task_run_id,
+                            transition.current_status,
+                            transition.requested_status,
+                            transition.reason,
+                        )
+                if latest_summary is not None:
+                    row.latest_summary = latest_summary
+                if latest_reply_preview is not None:
+                    row.latest_reply_preview = latest_reply_preview
+                if latest_error is not None:
+                    row.latest_error = latest_error
+                if metadata is not None:
+                    row.metadata_json = json.dumps(metadata, ensure_ascii=False)
 
-            session.commit()
-            session.refresh(row)
-            summary = self._summary_from_row(row)
+                session.commit()
+                session.refresh(row)
+                summary = self._summary_from_row(row)
 
         self._publish_task_run_event(task_run_id, event_type="task_run.updated")
         return summary
@@ -227,9 +240,22 @@ class TaskRunService:
         return parsed if isinstance(parsed, dict) else {}
 
     def merge_task_run_metadata(self, task_run_id: str, patch: dict) -> TaskRunSummary | None:
-        current = self.get_task_run_metadata(task_run_id)
-        current.update(patch)
-        return self.update_task_run(task_run_id, metadata=current)
+        with self._task_run_mutex(task_run_id):
+            with SessionLocal() as session:
+                row = session.execute(
+                    select(TaskRun).where(TaskRun.task_run_id == task_run_id).with_for_update()
+                ).scalar_one_or_none()
+                if row is None:
+                    return None
+                current = self._decode_json_object(row.metadata_json)
+                current.update(patch)
+                row.metadata_json = json.dumps(current, ensure_ascii=False)
+                session.commit()
+                session.refresh(row)
+                summary = self._summary_from_row(row)
+
+        self._publish_task_run_event(task_run_id, event_type="task_run.updated")
+        return summary
 
     def upsert_step(
         self,
@@ -244,48 +270,54 @@ class TaskRunService:
         error: str | None = None,
     ) -> TaskRunStepRecord:
         now = datetime.now(timezone.utc)
-        with SessionLocal() as session:
-            row = session.execute(
-                select(TaskRunStep).where(
-                    TaskRunStep.task_run_id == task_run_id,
-                    TaskRunStep.step_key == step_key,
-                )
-            ).scalar_one_or_none()
+        with self._task_run_mutex(task_run_id):
+            while True:
+                with SessionLocal() as session:
+                    row = session.execute(
+                        select(TaskRunStep).where(
+                            TaskRunStep.task_run_id == task_run_id,
+                            TaskRunStep.step_key == step_key,
+                        ).with_for_update()
+                    ).scalar_one_or_none()
 
-            if row is None:
-                row = TaskRunStep(
-                    task_run_id=task_run_id,
-                    step_key=step_key,
-                    title=title,
-                    step_type=step_type,
-                    status=status,
-                    input_json=json.dumps(input_payload, ensure_ascii=False) if input_payload is not None else None,
-                    output_json=json.dumps(output_payload, ensure_ascii=False) if output_payload is not None else None,
-                    error=error,
-                )
-                if status == "running":
-                    row.started_at = now
-                if status in {"done", "failed"}:
-                    row.finished_at = now
-                session.add(row)
-            else:
-                row.title = title
-                row.step_type = step_type
-                row.status = status
-                if input_payload is not None:
-                    row.input_json = json.dumps(input_payload, ensure_ascii=False)
-                if output_payload is not None:
-                    row.output_json = json.dumps(output_payload, ensure_ascii=False)
-                if error is not None:
-                    row.error = error
-                if status == "running" and row.started_at is None:
-                    row.started_at = now
-                if status in {"done", "failed"}:
-                    row.finished_at = now
+                    if row is None:
+                        row = TaskRunStep(
+                            task_run_id=task_run_id,
+                            step_key=step_key,
+                            title=title,
+                            step_type=step_type,
+                            status=status,
+                            input_json=json.dumps(input_payload, ensure_ascii=False) if input_payload is not None else None,
+                            output_json=json.dumps(output_payload, ensure_ascii=False) if output_payload is not None else None,
+                            error=error,
+                        )
+                        if status == "running":
+                            row.started_at = now
+                        if status in {"done", "failed"}:
+                            row.finished_at = now
+                        session.add(row)
+                    else:
+                        row.title = title
+                        row.step_type = step_type
+                        row.status = status
+                        if input_payload is not None:
+                            row.input_json = json.dumps(input_payload, ensure_ascii=False)
+                        if output_payload is not None:
+                            row.output_json = json.dumps(output_payload, ensure_ascii=False)
+                        if error is not None:
+                            row.error = error
+                        if status == "running" and row.started_at is None:
+                            row.started_at = now
+                        if status in {"done", "failed"}:
+                            row.finished_at = now
 
-            session.commit()
-            session.refresh(row)
-            step = self._step_from_row(row)
+                    try:
+                        session.commit()
+                        session.refresh(row)
+                        step = self._step_from_row(row)
+                        break
+                    except IntegrityError:
+                        session.rollback()
 
         self._publish_task_run_event(task_run_id, event_type="task_run.step_updated")
         return step

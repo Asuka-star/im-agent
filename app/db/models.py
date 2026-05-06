@@ -1,5 +1,5 @@
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import Column, DateTime, Integer, String, Text, func
+from sqlalchemy import Column, DateTime, Index, Integer, String, Text, UniqueConstraint, func, text
 
 from app.core.config import settings
 from app.db.database import Base
@@ -37,6 +37,15 @@ class UserAlias(Base):
 
 class Episode(Base):
     __tablename__ = "episodes"
+    __table_args__ = (
+        Index(
+            "ix_episodes_session_active_unique",
+            "session_id",
+            unique=True,
+            sqlite_where=text("status = 'active'"),
+            postgresql_where=text("status = 'active'"),
+        ),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     session_id = Column(String(128), nullable=False, index=True)
@@ -177,6 +186,9 @@ class TaskRun(Base):
 
 class TaskRunStep(Base):
     __tablename__ = "task_run_steps"
+    __table_args__ = (
+        UniqueConstraint("task_run_id", "step_key", name="uq_task_run_steps_task_run_step"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     task_run_id = Column(String(64), nullable=False, index=True)

@@ -188,10 +188,10 @@ class RequirementService:
         requirement_summary: RequirementSummary | None = None
         with SessionLocal() as session:
             requirement = session.execute(
-                select(Requirement).where(Requirement.requirement_id == requirement_id)
+                select(Requirement).where(Requirement.requirement_id == requirement_id).with_for_update()
             ).scalar_one_or_none()
             task_run = session.execute(
-                select(TaskRun).where(TaskRun.task_run_id == task_run_id)
+                select(TaskRun).where(TaskRun.task_run_id == task_run_id).with_for_update()
             ).scalar_one_or_none()
             if requirement is None or task_run is None:
                 return None
@@ -251,12 +251,12 @@ class RequirementService:
             requirement_summary: RequirementSummary | None = None
             with SessionLocal() as session:
                 task_run = session.execute(
-                    select(TaskRun).where(TaskRun.task_run_id == task_run_id)
+                    select(TaskRun).where(TaskRun.task_run_id == task_run_id).with_for_update()
                 ).scalar_one_or_none()
                 if task_run is None or not task_run.requirement_id:
                     return
                 requirement = session.execute(
-                    select(Requirement).where(Requirement.requirement_id == task_run.requirement_id)
+                    select(Requirement).where(Requirement.requirement_id == task_run.requirement_id).with_for_update()
                 ).scalar_one_or_none()
                 if requirement is None:
                     return
