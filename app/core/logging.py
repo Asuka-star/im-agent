@@ -5,7 +5,7 @@ from app.core.config import settings
 
 class _FrontendAccessLogFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
-        if not settings.suppress_frontend_access_logs:
+        if _access_log_enabled():
             return True
         message = record.getMessage()
         if self._is_successful_frontend_poll(message):
@@ -36,5 +36,17 @@ def configure_logging() -> None:
     )
     for logger_name in ("uvicorn.access", "uvicorn.error"):
         logger = logging.getLogger(logger_name)
-        if not any(isinstance(item, _FrontendAccessLogFilter) for item in logger.filters):
-            logger.addFilter(_FrontendAccessLogFilter())
+        _ensure_frontend_filter(logger)
+    logging.getLogger("uvicorn.access").disabled = not _access_log_enabled()
+
+
+def _access_log_enabled() -> bool:
+    return settings.log_frontend_requests or not settings.suppress_frontend_access_logs
+
+
+def _ensure_frontend_filter(logger: logging.Logger) -> None:
+    if not any(isinstance(item, _FrontendAccessLogFilter) for item in logger.filters):
+        logger.addFilter(_FrontendAccessLogFilter())
+    for handler in logger.handlers:
+        if not any(isinstance(item, _FrontendAccessLogFilter) for item in handler.filters):
+            handler.addFilter(_FrontendAccessLogFilter())

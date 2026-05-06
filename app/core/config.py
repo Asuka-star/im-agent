@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     app_host: str = Field(default="0.0.0.0", alias="APP_HOST")
     app_port: int = Field(default=8000, alias="APP_PORT")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
+    log_frontend_requests: bool = Field(default=False, alias="LOG_FRONTEND_REQUESTS")
     suppress_frontend_access_logs: bool = Field(default=True, alias="SUPPRESS_FRONTEND_ACCESS_LOGS")
     artifact_public_base_url: str = Field(
         default="http://science.topviewclub.cn",
