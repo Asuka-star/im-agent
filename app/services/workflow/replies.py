@@ -46,6 +46,7 @@ class WorkflowReplySender:
                 mode=mode,
                 reply_preview=reply_preview,
                 artifacts=artifacts,
+                task_run_id=task_run_id,
             )
 
         if reply_preview and settings.feishu_reply_enabled and message.chat_id:
@@ -103,14 +104,13 @@ class WorkflowReplySender:
                 if hasattr(self.workflow, "_task_run_title")
                 else mode
             )
-            detail = self.workflow.status_execution.synthetic_task_run_detail_for_message(message).model_copy(
-                update={
-                    "task_run_id": task_run_id or f"synthetic_{getattr(message, 'message_id', None) or message.session_id}",
-                    "intent": mode,
-                    "title": title,
-                    "latest_reply_preview": reply_preview,
-                    "artifacts": self.artifact_records_from_payloads(artifacts or []),
-                }
+            detail = self._synthetic_detail_for_reply(
+                message,
+                mode=mode,
+                title=title,
+                reply_preview=reply_preview,
+                artifacts=artifacts or [],
+                task_run_id=task_run_id,
             )
             checks = [
                 item.model_dump() if hasattr(item, "model_dump") else item
@@ -188,19 +188,20 @@ class WorkflowReplySender:
         mode: str,
         reply_preview: str | None,
         artifacts: list[dict] | None,
+        task_run_id: str | None = None,
     ) -> str | None:
         workflow = self.workflow
         if not reply_preview or "我建议下一步可以：" in reply_preview:
             return reply_preview
         if mode in {"status", "help", "speech_notice"}:
             return reply_preview
-        detail = workflow.status_execution.synthetic_task_run_detail_for_message(message).model_copy(
-            update={
-                "intent": mode,
-                "title": workflow._task_run_title(message.text, mode),
-                "latest_reply_preview": reply_preview,
-                "artifacts": self.artifact_records_from_payloads(artifacts or []),
-            }
+        detail = self._synthetic_detail_for_reply(
+            message,
+            mode=mode,
+            title=workflow._task_run_title(message.text, mode),
+            reply_preview=reply_preview,
+            artifacts=artifacts or [],
+            task_run_id=task_run_id,
         )
         reply_preview = self.append_artifact_checks_to_reply(reply_preview, detail)
         bundle = workflow.next_action_service.build_for_task_run(detail)
@@ -234,6 +235,66 @@ class WorkflowReplySender:
             lines.append(f"- {label}：{status}{suffix}")
         return reply_preview.rstrip() + "\n" + "\n".join(lines)
 
+    def _synthetic_detail_for_reply(
+        self,
+        message: FeishuMessageContext,
+        *,
+        mode: str,
+        title: str,
+        reply_preview: str | None,
+        artifacts: list[dict],
+        task_run_id: str | None,
+    ) -> Any:
+        detail = self.workflow.status_execution.synthetic_task_run_detail_for_message(message)
+        return detail.model_copy(
+            update={
+                "task_run_id": task_run_id or f"synthetic_{getattr(message, 'message_id', None) or message.session_id}",
+                "intent": mode,
+                "title": title,
+                "latest_reply_preview": reply_preview,
+                "artifacts": self.artifact_records_from_payloads(artifacts),
+                "session_documents": self._reply_session_documents(
+                    message,
+                    artifacts=artifacts,
+                    task_run_id=task_run_id,
+                ),
+            }
+        )
+
+    def _reply_session_documents(
+        self,
+        message: FeishuMessageContext,
+        *,
+        artifacts: list[dict],
+        task_run_id: str | None,
+    ) -> list[Any]:
+        workflow = self.workflow
+        try:
+            payloads = workflow.session_document_service.list_documents(message.session_id)
+            documents = [workflow.task_run_service._session_document_from_payload(item) for item in payloads]
+        except Exception:
+            return []
+
+        candidate_signatures = self._document_candidate_signatures(artifacts)
+        requirement_loader = getattr(workflow, "_requirement_document_target_for_task_run", None)
+        if task_run_id and callable(requirement_loader):
+            try:
+                target = requirement_loader(task_run_id)
+            except Exception:  # noqa: BLE001
+                target = None
+            signature = self._document_signature(target)
+            if signature is not None:
+                candidate_signatures.add(signature)
+
+        if not candidate_signatures:
+            return documents
+        filtered = [
+            document
+            for document in documents
+            if (signature := self._document_signature(document)) is not None and signature in candidate_signatures
+        ]
+        return filtered or documents
+
     @staticmethod
     def artifact_records_from_payloads(artifacts: list[dict]) -> list[ArtifactRecord]:
         records: list[ArtifactRecord] = []
@@ -258,6 +319,40 @@ class WorkflowReplySender:
                 )
             )
         return records
+
+    @staticmethod
+    def _document_candidate_signatures(artifacts: list[dict]) -> set[tuple[str, str]]:
+        signatures: set[tuple[str, str]] = set()
+        for artifact in artifacts:
+            if not isinstance(artifact, dict):
+                continue
+            artifact_type = str(artifact.get("artifact_type") or "").strip()
+            if artifact_type not in {"document", "doc", "feishu_doc"}:
+                continue
+            signature = WorkflowReplySender._document_signature(artifact)
+            if signature is not None:
+                signatures.add(signature)
+        return signatures
+
+    @staticmethod
+    def _document_signature(source: Any) -> tuple[str, str] | None:
+        if isinstance(source, dict):
+            preview = source.get("preview") if isinstance(source.get("preview"), dict) else {}
+            sync = preview.get("sync") if isinstance(preview.get("sync"), dict) else {}
+            document_id = str(source.get("document_id") or sync.get("document_id") or "").strip()
+            url = str(source.get("url") or sync.get("url") or preview.get("url") or "").strip()
+            title = str(source.get("title") or sync.get("title") or preview.get("title") or "").strip().lower()
+        else:
+            document_id = str(getattr(source, "document_id", None) or "").strip()
+            url = str(getattr(source, "url", None) or "").strip()
+            title = str(getattr(source, "title", None) or "").strip().lower()
+        if document_id:
+            return ("document_id", document_id)
+        if url:
+            return ("url", url)
+        if title:
+            return ("title", title)
+        return None
 
     def _check_status_label(self, status: str) -> str:
         if status == "ready":

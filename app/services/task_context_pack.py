@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 
@@ -39,12 +40,14 @@ class TaskContextPackBuilder:
             done = sum(1 for step in steps if str(_field(step, "status") or "") in {"done", "completed"})
             sources.append(_item("plan", "Agent 编排记录", f"{len(steps)} 个步骤，{done} 个已完成"))
 
+        seen_document_signatures: set[tuple[str, str]] = set()
         for document in list(getattr(detail, "session_documents", []) or [])[:4]:
             title = str(_field(document, "title") or "协作文档")
             version = str(_field(document, "version") or 1)
             sync_mode = str(_field(document, "sync_mode") or "synced")
             current = "当前文档，" if bool(_field(document, "is_current")) else ""
             url = str(_field(document, "url") or "").strip() or None
+            seen_document_signatures.add(_document_signature(_document_payload(document)))
             sources.append(
                 _item(
                     "document",
@@ -62,6 +65,11 @@ class TaskContextPackBuilder:
         ]
         for artifact in artifact_sources[:5]:
             artifact_type = str(_field(artifact, "artifact_type") or "artifact")
+            if artifact_type in {"document", "doc", "feishu_doc"}:
+                signature = _document_signature(_document_payload(artifact))
+                if signature in seen_document_signatures:
+                    continue
+                seen_document_signatures.add(signature)
             sources.append(
                 _item(
                     artifact_type,
@@ -172,6 +180,51 @@ def _field(item: object, field: str) -> Any:
     if isinstance(item, dict):
         return item.get(field)
     return getattr(item, field, None)
+
+
+def _preview(item: object) -> dict[str, Any]:
+    raw = _field(item, "preview")
+    if raw is None:
+        raw = _field(item, "preview_json")
+    if isinstance(raw, dict):
+        return raw
+    if not isinstance(raw, str) or not raw.strip():
+        return {}
+    try:
+        decoded = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return decoded if isinstance(decoded, dict) else {}
+
+
+def _document_payload(item: object) -> dict[str, Any]:
+    payload = {
+        "document_id": _field(item, "document_id"),
+        "url": _field(item, "url"),
+        "title": _field(item, "title"),
+    }
+    preview = _preview(item)
+    sync = preview.get("sync") if isinstance(preview.get("sync"), dict) else {}
+    if not payload.get("document_id"):
+        payload["document_id"] = sync.get("document_id")
+    if not payload.get("url"):
+        payload["url"] = sync.get("url") or preview.get("url")
+    if not payload.get("title"):
+        payload["title"] = sync.get("title") or preview.get("title")
+    return payload
+
+
+def _document_signature(payload: dict[str, Any]) -> tuple[str, str]:
+    document_id = str(payload.get("document_id") or "").strip()
+    if document_id:
+        return ("document_id", document_id)
+    url = str(payload.get("url") or "").strip()
+    if url:
+        return ("url", url)
+    title = str(payload.get("title") or "").strip().lower()
+    if title:
+        return ("title", title)
+    return ("fallback", json.dumps(payload, ensure_ascii=False, sort_keys=True))
 
 
 def _artifact_label(artifact_type: str) -> str:

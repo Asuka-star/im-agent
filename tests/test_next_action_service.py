@@ -112,6 +112,22 @@ class ContextualNextActionServiceTests(unittest.TestCase):
         self.assertIn("bundle_delivery", action_types)
         self.assertNotEqual(bundle.recommendations[0].action_type, "bundle_delivery")
 
+    def test_canvas_without_slides_does_not_recommend_slides_revision(self) -> None:
+        bundle = self.service.build_for_task_run(
+            _detail(
+                artifacts=[
+                    _artifact("document", provider="feishu_doc", url="https://feishu.cn/docx/doc_1"),
+                    _artifact("canvas"),
+                ],
+                session_documents=[_document()],
+            )
+        )
+        action_types = [item.action_type for item in bundle.recommendations]
+
+        self.assertIn("generate_slides", action_types)
+        self.assertIn("bundle_delivery", action_types)
+        self.assertNotIn("revise_slides", action_types)
+
     def test_slides_without_document_does_not_recommend_bundle_delivery(self) -> None:
         bundle = self.service.build_for_task_run(
             _detail(

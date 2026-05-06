@@ -168,6 +168,7 @@ class ContextualNextActionService:
                     score=52,
                 )
             )
+        if signals.get("has_doc") and signals.get("has_slides") and not signals.get("has_delivery"):
             candidates.append(
                 self._recommendation(
                     "revise_slides",

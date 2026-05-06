@@ -57,9 +57,9 @@ class TaskArtifactVerifier:
             for item in artifacts
             if str(_field(item, "artifact_type") or "") in {"document", "doc", "feishu_doc"}
         ]
-        link_count = sum(1 for item in documents if str(_field(item, "url") or "").strip())
-        link_count += sum(1 for item in document_artifacts if str(_field(item, "url") or "").strip())
-        total = len(documents) + len(document_artifacts)
+        unique_documents = _merge_document_sources(documents, document_artifacts)
+        link_count = sum(1 for item in unique_documents if str(item.get("url") or "").strip())
+        total = len(unique_documents)
         if total == 0:
             status = "missing"
             detail_text = "尚未生成文档产物"
@@ -172,10 +172,21 @@ class TaskArtifactVerifier:
         )
 
     def _shareable_links_check(self, detail: Any, artifacts: list[Any]) -> dict[str, str]:
-        link_count = sum(1 for item in artifacts if str(_field(item, "url") or "").strip())
         documents = list(getattr(detail, "session_documents", []) or [])
-        link_count += sum(1 for item in documents if str(_field(item, "url") or "").strip())
-        deliverable_count = len(artifacts) + len(documents)
+        document_artifacts = [
+            item
+            for item in artifacts
+            if str(_field(item, "artifact_type") or "") in {"document", "doc", "feishu_doc"}
+        ]
+        other_artifacts = [
+            item
+            for item in artifacts
+            if str(_field(item, "artifact_type") or "") not in {"document", "doc", "feishu_doc"}
+        ]
+        unique_documents = _merge_document_sources(documents, document_artifacts)
+        link_count = sum(1 for item in other_artifacts if str(_field(item, "url") or "").strip())
+        link_count += sum(1 for item in unique_documents if str(item.get("url") or "").strip())
+        deliverable_count = len(other_artifacts) + len(unique_documents)
         status = "ready" if link_count else "partial" if deliverable_count else "missing"
         detail = f"{link_count} 个产物可直接打开" if link_count else "当前只有结构化记录，缺少可打开链接"
         return _check("shareable_links", "可分享链接", status, detail, category="delivery")
@@ -194,7 +205,21 @@ class TaskArtifactVerifier:
         )
         if has_bundle:
             return _check("delivery_bundle", "交付包", "ready", "交付包已生成", category="delivery")
-        deliverable_count = len(deliverable_artifacts) + len(getattr(detail, "session_documents", []) or [])
+        document_artifacts = [
+            item
+            for item in deliverable_artifacts
+            if str(_field(item, "artifact_type") or "") in {"document", "doc", "feishu_doc"}
+        ]
+        other_artifacts = [
+            item
+            for item in deliverable_artifacts
+            if str(_field(item, "artifact_type") or "") not in {"document", "doc", "feishu_doc"}
+        ]
+        unique_documents = _merge_document_sources(
+            list(getattr(detail, "session_documents", []) or []),
+            document_artifacts,
+        )
+        deliverable_count = len(other_artifacts) + len(unique_documents)
         if deliverable_count:
             return _check(
                 "delivery_bundle",
@@ -248,3 +273,56 @@ def _positive_int(value: object) -> int:
         return max(int(value or 0), 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _merge_document_sources(documents: list[Any], document_artifacts: list[Any]) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in documents:
+        payload = _document_payload(item)
+        signature = _document_signature(payload)
+        if signature in seen:
+            continue
+        seen.add(signature)
+        merged.append(payload)
+    for item in document_artifacts:
+        payload = _document_payload(item)
+        signature = _document_signature(payload)
+        if signature in seen:
+            continue
+        seen.add(signature)
+        merged.append(payload)
+    return merged
+
+
+def _document_payload(item: Any) -> dict[str, Any]:
+    if isinstance(item, dict):
+        payload = dict(item)
+    else:
+        payload = {
+            "document_id": getattr(item, "document_id", None),
+            "url": getattr(item, "url", None),
+            "title": getattr(item, "title", None),
+        }
+        preview = _preview(item)
+        sync = preview.get("sync") if isinstance(preview.get("sync"), dict) else {}
+        if not payload.get("document_id"):
+            payload["document_id"] = sync.get("document_id")
+        if not payload.get("url"):
+            payload["url"] = sync.get("url") or preview.get("url")
+        if not payload.get("title"):
+            payload["title"] = sync.get("title") or preview.get("title")
+    return payload
+
+
+def _document_signature(payload: dict[str, Any]) -> tuple[str, str]:
+    document_id = str(payload.get("document_id") or "").strip()
+    if document_id:
+        return ("document_id", document_id)
+    url = str(payload.get("url") or "").strip()
+    if url:
+        return ("url", url)
+    title = str(payload.get("title") or "").strip().lower()
+    if title:
+        return ("title", title)
+    return ("fallback", json.dumps(payload, ensure_ascii=False, sort_keys=True))

@@ -739,6 +739,55 @@ class TaskRunServiceTests(unittest.TestCase):
         self.assertIsNone(detail.session_documents[0].updated_at)
         self.assertEqual(detail.session_documents[0].version, 1)
 
+    def test_detail_dedupes_session_document_and_document_artifact_views(self) -> None:
+        service = TaskRunService(
+            session_display_service=self.session_display_service,
+            session_document_service=_StubSessionDocumentService(
+                documents=[
+                    {
+                        "session_id": "oc_demo",
+                        "document_id": "doc_1",
+                        "title": "闇€姹傛枃妗?",
+                        "url": "https://feishu.cn/docx/doc_1",
+                        "version": 1,
+                        "sync_mode": "created",
+                        "is_current": True,
+                    }
+                ]
+            ),
+        )
+        created = service.create_task_run(
+            session_id="oc_demo",
+            title="鍒涘缓鍗忎綔浠诲姟",
+            source_type="group",
+        )
+        service.create_artifact(
+            created.task_run_id,
+            artifact_type="document",
+            title="闇€姹傛枃妗?",
+            provider="feishu_doc",
+            url="https://feishu.cn/docx/doc_1",
+            preview={
+                "sync": {
+                    "document_id": "doc_1",
+                    "title": "闇€姹傛枃妗?",
+                    "url": "https://feishu.cn/docx/doc_1",
+                    "version": 1,
+                }
+            },
+        )
+
+        detail = service.get_task_run(created.task_run_id)
+
+        self.assertIsNotNone(detail)
+        assert detail is not None
+        document_sources = [item for item in detail.context_pack.used_sources if item.kind == "document"]
+        self.assertEqual(len(document_sources), 1)
+        checks = {item.key: item.detail for item in detail.artifact_checks}
+        self.assertIn("1", checks["document"])
+        self.assertIn("1", checks["shareable_links"])
+        self.assertIn("1", checks["delivery_bundle"])
+
     def test_list_task_runs_can_filter_by_session_label_query(self) -> None:
         self.service.create_task_run(
             session_id="oc_alpha",
