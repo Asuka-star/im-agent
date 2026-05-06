@@ -46,7 +46,7 @@ async def receive_events(request: Request, background_tasks: BackgroundTasks) ->
             envelope.header.event_id if envelope.header else None,
             (time.perf_counter() - started_at) * 1000,
         )
-        return {}
+        return _card_action_ack_response()
 
     if event_handler.is_message_lifecycle_event(envelope):
         background_tasks.add_task(_process_message_lifecycle_background, payload)
@@ -101,6 +101,19 @@ def _is_card_action_event(payload: dict, envelope: FeishuEventEnvelope) -> bool:
         or payload.get("value")
     )
     return isinstance(value, (dict, str)) and "action" in str(value)
+
+
+def _card_action_ack_response() -> dict:
+    return {
+        "toast": {
+            "type": "info",
+            "content": "已收到选择，正在继续处理",
+            "i18n": {
+                "zh_cn": "已收到选择，正在继续处理",
+                "en_us": "Selection received. Continuing...",
+            },
+        }
+    }
 
 
 def _verify_callback_token(payload: dict, envelope: FeishuEventEnvelope) -> bool:

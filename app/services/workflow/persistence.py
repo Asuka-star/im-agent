@@ -63,6 +63,8 @@ class WorkflowResultPersistence:
                 status="done",
                 output_payload={"artifact_count": len(result["artifacts"])},
             )
+        if hasattr(workflow, "requirement_service"):
+            workflow.requirement_service.update_current_artifacts_from_task_run(task_run_id)
         workflow.task_run_service.update_task_run(
             task_run_id,
             intent=result["mode"],

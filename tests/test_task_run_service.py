@@ -6,7 +6,7 @@ from unittest.mock import patch
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.db.models import Artifact, ConfirmationRequest, TaskRun, TaskRunStep
+from app.db.models import Artifact, ConfirmationRequest, Requirement, TaskRun, TaskRunStep
 from app.services.task_run_service import TaskRunService
 
 
@@ -48,6 +48,14 @@ class _StubSessionDocumentService:
         return self.documents
 
 
+class _MappedSessionDocumentService:
+    def __init__(self, documents_by_session: dict[str, list[dict]]) -> None:
+        self.documents_by_session = documents_by_session
+
+    def list_documents(self, session_id: str) -> list[dict]:
+        return list(self.documents_by_session.get(session_id, []))
+
+
 class TaskRunServiceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
@@ -58,6 +66,7 @@ class TaskRunServiceTests(unittest.TestCase):
         TaskRunStep.__table__.create(bind=self.engine)
         Artifact.__table__.create(bind=self.engine)
         ConfirmationRequest.__table__.create(bind=self.engine)
+        Requirement.__table__.create(bind=self.engine)
 
         patcher = patch("app.services.task_run_service.SessionLocal", self.test_session_local)
         self.addCleanup(patcher.stop)
@@ -170,6 +179,117 @@ class TaskRunServiceTests(unittest.TestCase):
         check_status = {item.key: item.status for item in detail.artifact_checks}
         self.assertNotEqual(check_status["slides"], "missing")
         self.assertNotIn("演示稿", [item.label for item in detail.context_pack.missing_items])
+
+    def test_requirement_task_run_detail_does_not_reuse_other_requirement_artifacts(self) -> None:
+        with self.test_session_local() as session:
+            session.add_all(
+                [
+                    Requirement(
+                        requirement_id="req_activity",
+                        title="校园活动报名与审核系统",
+                        primary_session_id="oc_lifecycle",
+                    ),
+                    Requirement(
+                        requirement_id="req_lab",
+                        title="实验室设备预约系统",
+                        primary_session_id="oc_lifecycle",
+                    ),
+                ]
+            )
+            session.commit()
+
+        slides_run = self.service.create_task_run(
+            session_id="oc_lifecycle",
+            requirement_id="req_activity",
+            title="生成答辩 PPT",
+            source_type="group",
+        )
+        self.service.create_artifact(
+            slides_run.task_run_id,
+            artifact_type="slides_package",
+            title="校园活动报名系统答辩 PPT",
+            url="/api/artifacts/slides/activity.html",
+            preview={"slides": [{"title": "开场"}], "exports": {"html": "a", "pptx": "b"}},
+        )
+        canvas_run = self.service.create_task_run(
+            session_id="oc_lifecycle",
+            requirement_id="req_lab",
+            title="生成产品流程图",
+            source_type="group",
+        )
+        self.service.create_artifact(
+            canvas_run.task_run_id,
+            artifact_type="canvas",
+            title="实验室设备预约系统需求流程图",
+            url="/api/artifacts/canvas/lab.html",
+            preview={"schema": "im-agent.canvas.v1", "shapes": [{"type": "node"}], "exports": {"json": "a", "svg": "b", "html": "c"}},
+        )
+
+        activity_detail = self.service.get_task_run(slides_run.task_run_id)
+        lab_detail = self.service.get_task_run(canvas_run.task_run_id)
+
+        self.assertIsNotNone(activity_detail)
+        self.assertIsNotNone(lab_detail)
+        assert activity_detail is not None
+        assert lab_detail is not None
+        activity_checks = {item.key: item.status for item in activity_detail.artifact_checks}
+        lab_checks = {item.key: item.status for item in lab_detail.artifact_checks}
+        self.assertEqual(activity_checks["slides"], "ready")
+        self.assertEqual(activity_checks["canvas"], "missing")
+        self.assertEqual(lab_checks["canvas"], "ready")
+        self.assertEqual(lab_checks["slides"], "missing")
+
+    def test_requirement_task_run_detail_can_use_document_from_other_bound_session(self) -> None:
+        self.service.session_document_service = _MappedSessionDocumentService(
+            {
+                "oc_group": [],
+                "ou_personal": [
+                    {
+                        "session_id": "ou_personal",
+                        "document_id": "doc_p2p",
+                        "title": "个人单聊生成的需求方案",
+                        "url": "https://feishu.cn/docx/doc_p2p",
+                        "version": 1,
+                        "sync_mode": "created",
+                        "task_run_id": "run_doc",
+                    }
+                ],
+            }
+        )
+        with self.test_session_local() as session:
+            session.add(
+                Requirement(
+                    requirement_id="req_cross_session",
+                    title="校园活动报名系统",
+                    primary_session_id="oc_group",
+                    current_document_id="doc_p2p",
+                )
+            )
+            session.commit()
+        group_run = self.service.create_task_run(
+            session_id="oc_group",
+            requirement_id="req_cross_session",
+            title="整理需求",
+            source_type="group",
+        )
+        doc_run = self.service.create_task_run(
+            session_id="ou_personal",
+            requirement_id="req_cross_session",
+            title="生成需求文档",
+            source_type="p2p",
+        )
+        with self.test_session_local() as session:
+            row = session.query(TaskRun).filter_by(task_run_id=doc_run.task_run_id).one()
+            row.task_run_id = "run_doc"
+            session.commit()
+
+        detail = self.service.get_task_run(group_run.task_run_id)
+
+        self.assertIsNotNone(detail)
+        assert detail is not None
+        self.assertEqual([document.document_id for document in detail.session_documents], ["doc_p2p"])
+        checks = {item.key: item.status for item in detail.artifact_checks}
+        self.assertEqual(checks["document"], "ready")
 
     def test_detail_derives_langgraph_trace_from_metadata_and_worker_steps(self) -> None:
         created = self.service.create_task_run(

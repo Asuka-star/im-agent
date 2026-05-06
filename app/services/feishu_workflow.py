@@ -29,6 +29,8 @@ from app.services.presentation_artifact_service import PresentationArtifactServi
 from app.services.tools.presentation_tool import PresentationTool
 from app.services.response_formatter import ResponseFormatter
 from app.services.request_router import RequestRouter, RouteDecision
+from app.services.requirement_resolver import RequirementResolver
+from app.services.requirement_service import RequirementService
 from app.services.session_document_service import SessionDocumentService
 from app.services.tools.task_operation_tool import TaskOperationTool
 from app.services.task_run_service import TaskRunService
@@ -81,6 +83,15 @@ class FeishuWorkflowService:
         self.presentation_tool = PresentationTool(artifact_service=self.presentation_artifact_service)
         self.session_document_service = SessionDocumentService()
         self.task_run_service = TaskRunService()
+        self.interaction_service = InteractionService()
+        self.llm_service = LLMService()
+        self.next_action_service = ContextualNextActionService(llm_service=self.llm_service, enable_llm=False)
+        self.requirement_service = RequirementService(
+            task_run_service=self.task_run_service,
+            session_document_service=self.session_document_service,
+            next_action_service=self.next_action_service,
+        )
+        self.requirement_resolver = RequirementResolver(self.requirement_service, llm_service=self.llm_service)
         self.delivery_tool = DeliveryTool(
             delivery_artifact_service=self.delivery_artifact_service,
             task_run_service=self.task_run_service,
@@ -90,9 +101,6 @@ class FeishuWorkflowService:
             task_run_service=self.task_run_service,
             memory_service=self.memory_service,
         )
-        self.interaction_service = InteractionService()
-        self.llm_service = LLMService()
-        self.next_action_service = ContextualNextActionService(llm_service=self.llm_service, enable_llm=False)
         self.execution_planner = ExecutionPlanner()
         self.request_router = RequestRouter()
         self.response_formatter = ResponseFormatter()
@@ -456,7 +464,15 @@ class FeishuWorkflowService:
     def graph_context_artifacts_loader(self, session_id: str, task_run_id: str | None = None) -> list[dict[str, Any]]:
         artifacts: list[dict[str, Any]] = []
         try:
-            runs = self.task_run_service.list_task_runs(session_id=session_id, limit=5)
+            requirement_id = self._requirement_id_for_task_run(task_run_id)
+            try:
+                runs = self.task_run_service.list_task_runs(
+                    session_id=None if requirement_id else session_id,
+                    requirement_id=requirement_id,
+                    limit=5,
+                )
+            except TypeError:
+                runs = self.task_run_service.list_task_runs(session_id=session_id, limit=5)
             for run in reversed(runs):
                 if task_run_id and run.task_run_id == task_run_id:
                     continue
@@ -470,6 +486,95 @@ class FeishuWorkflowService:
             logger.warning("LangGraph artifact context loading failed: session_id=%s error=%s", session_id, exc)
             return []
         return artifacts[-20:]
+
+    def _requirement_id_for_task_run(self, task_run_id: str | None) -> str:
+        if not task_run_id:
+            return ""
+        try:
+            task_run = self.task_run_service.get_task_run(task_run_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Failed to load task run requirement: task_run_id=%s error=%s", task_run_id, exc)
+            return ""
+        return str(getattr(task_run, "requirement_id", "") or "").strip() if task_run else ""
+
+    def _requirement_workspace_context_for_task_run(self, task_run_id: str | None) -> str:
+        requirement_id = self._requirement_id_for_task_run(task_run_id)
+        if not requirement_id:
+            return ""
+        try:
+            requirement = self.requirement_service.get_requirement(requirement_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Failed to build requirement workspace context: requirement_id=%s error=%s", requirement_id, exc)
+            return ""
+        if requirement is None:
+            return ""
+
+        lines = [
+            "[当前需求工作区]",
+            f"- requirement_id: {requirement.requirement_id}",
+            f"- 标题: {requirement.title}",
+        ]
+        if requirement.summary:
+            lines.append(f"- 摘要: {requirement.summary}")
+
+        source_lines = []
+        for source in requirement.sources[-12:]:
+            text = str(getattr(source, "message_text", "") or "").strip()
+            if text:
+                source_lines.append(f"- {text}")
+        if source_lines:
+            lines.append("[当前需求讨论事实]")
+            lines.extend(source_lines)
+
+        artifact_lines = []
+        for label, artifact in (
+            ("文档", requirement.current_document),
+            ("演示稿", requirement.current_slides),
+            ("画布", requirement.current_canvas),
+            ("交付包", requirement.current_delivery),
+        ):
+            if artifact is None:
+                continue
+            title = str(getattr(artifact, "title", "") or getattr(artifact, "document_id", "") or "").strip()
+            url = str(getattr(artifact, "url", "") or "").strip()
+            artifact_lines.append(f"- {label}: {title or '已生成'}{f' | {url}' if url else ''}")
+        if artifact_lines:
+            lines.append("[当前需求已有产物]")
+            lines.extend(artifact_lines)
+
+        task_lines = []
+        for run in requirement.task_runs[-8:]:
+            task_lines.append(f"- {run.task_run_id}: {run.title} | {run.status}")
+        if task_lines:
+            lines.append("[当前需求运行记录]")
+            lines.extend(task_lines)
+
+        lines.append("[需求边界约束]")
+        lines.append("- 只使用当前需求工作区中的讨论事实和产物，不要混入同一群聊内其他需求。")
+        lines.append("- 未在讨论或当前文档中明确的信息必须标为待确认，不要补写技术栈、数据库、框架、排期或负责人。")
+        return "\n".join(lines)
+
+    def _requirement_document_target_for_task_run(self, task_run_id: str | None) -> dict | None:
+        if not task_run_id:
+            return None
+        try:
+            task_run = self.task_run_service.get_task_run(task_run_id)
+            requirement_id = str(getattr(task_run, "requirement_id", "") or "").strip() if task_run else ""
+            if not requirement_id:
+                return None
+            requirement = self.requirement_service.get_requirement(requirement_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Failed to load requirement-scoped document target: task_run_id=%s error=%s", task_run_id, exc)
+            return None
+        if requirement is None:
+            return None
+        current_document = getattr(requirement, "current_document", None)
+        if current_document is None:
+            return {}
+        if hasattr(current_document, "model_dump"):
+            payload = current_document.model_dump(mode="json")
+            return payload if isinstance(payload, dict) else {}
+        return dict(current_document) if isinstance(current_document, dict) else {}
 
     def _run_graph_task_command(
         self,
@@ -491,12 +596,15 @@ class FeishuWorkflowService:
                 route_decision.route,
             )
             return None
-        current_document = None
-        graph_workspace_context = workspace_context
+        requirement_document = self._requirement_document_target_for_task_run(task_run_id)
+        current_document = requirement_document
+        graph_workspace_context = self._requirement_workspace_context_for_task_run(task_run_id) or workspace_context
         graph_clarification = None
         legacy_route = None
         if route_decision is not None and route_decision.route == "doc":
-            current_document = self._resolve_target_document_for_instruction(message.session_id, message.text)
+            explicit_document = self._resolve_target_document_for_instruction(message.session_id, message.text)
+            if explicit_document is not None:
+                current_document = explicit_document
             graph_clarification = self._build_document_selection_clarification(
                 message,
                 route_decision,
@@ -747,12 +855,26 @@ class FeishuWorkflowService:
                 target_document=target_document,
             )
         if route_decision.route in {"slides", "canvas", "delivery"}:
-            return self._build_artifact_lifecycle_context(message, lifecycle_context or workspace_context)
+            return self._build_artifact_lifecycle_context(
+                message,
+                lifecycle_context or workspace_context,
+                target_document=target_document,
+            )
         return workspace_context
 
-    def _build_artifact_lifecycle_context(self, message: FeishuMessageContext, workspace_context: str) -> str:
+    def _build_artifact_lifecycle_context(
+        self,
+        message: FeishuMessageContext,
+        workspace_context: str,
+        *,
+        target_document: dict | None = None,
+    ) -> str:
         try:
-            current_doc = self.session_document_service.get_current_document(message.session_id)
+            current_doc = (
+                target_document
+                if target_document is not None
+                else self.session_document_service.get_current_document(message.session_id)
+            )
         except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to load current document context for artifact generation: %s", exc)
             current_doc = None
@@ -776,7 +898,11 @@ class FeishuWorkflowService:
         target_document: dict | None = None,
     ) -> str:
         try:
-            current_doc = target_document or self.session_document_service.get_current_document(message.session_id)
+            current_doc = (
+                target_document
+                if target_document is not None
+                else self.session_document_service.get_current_document(message.session_id)
+            )
         except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to load current document context for IM doc update: %s", exc)
             current_doc = None

@@ -1,6 +1,8 @@
 import type {
   NextActionBundle,
   RealtimeEvent,
+  RequirementDetail,
+  RequirementSummary,
   TaskRunDetail,
   TaskRunSummary,
 } from './types';
@@ -38,13 +40,57 @@ async function requestJson<T>(path: string, init?: RequestInit, params?: Record<
 
 export function listTaskRuns(options: {
   sessionQuery?: string;
+  requirementId?: string;
   status?: string;
   limit?: number;
 }): Promise<TaskRunSummary[]> {
   return requestJson<TaskRunSummary[]>('/task-runs/', undefined, {
     session_query: options.sessionQuery,
+    requirement_id: options.requirementId,
     status: options.status === 'all' ? undefined : options.status,
     limit: String(options.limit || 50),
+  });
+}
+
+export function listRequirements(options: {
+  query?: string;
+  sessionId?: string;
+  status?: string;
+  limit?: number;
+} = {}): Promise<RequirementSummary[]> {
+  return requestJson<RequirementSummary[]>('/requirements/', undefined, {
+    query: options.query,
+    session_id: options.sessionId,
+    status: options.status === 'all' ? undefined : options.status,
+    limit: String(options.limit || 50),
+  });
+}
+
+export function getRequirement(requirementId: string): Promise<RequirementDetail> {
+  return requestJson<RequirementDetail>(`/requirements/${encodeURIComponent(requirementId)}`);
+}
+
+export function createRequirement(payload: {
+  title: string;
+  summary?: string | null;
+  primarySessionId: string;
+  createdBy?: string | null;
+}): Promise<RequirementSummary> {
+  return requestJson<RequirementSummary>('/requirements/', {
+    method: 'POST',
+    body: JSON.stringify({
+      title: payload.title,
+      summary: payload.summary || null,
+      primary_session_id: payload.primarySessionId,
+      created_by: payload.createdBy || 'pilot_admin_web',
+    }),
+  });
+}
+
+export function reassignTaskRunRequirement(requirementId: string, taskRunId: string): Promise<TaskRunSummary> {
+  return requestJson<TaskRunSummary>(`/requirements/${encodeURIComponent(requirementId)}/task-runs/${encodeURIComponent(taskRunId)}/reassign`, {
+    method: 'POST',
+    body: JSON.stringify({ requirement_id: requirementId }),
   });
 }
 
@@ -120,15 +166,47 @@ export function wsUrl(path: string): string {
 export function connectSocket(path: string, onEvent: (event: RealtimeEvent) => void, onState: (state: string) => void): () => void {
   let closed = false;
   let heartbeat: number | undefined;
+  let reconnectTimer: number | undefined;
+  let reconnectAttempt = 0;
   let socket: WebSocket | undefined;
+
+  const clearHeartbeat = () => {
+    if (heartbeat) window.clearInterval(heartbeat);
+    heartbeat = undefined;
+  };
+
+  const clearReconnect = () => {
+    if (reconnectTimer) window.clearTimeout(reconnectTimer);
+    reconnectTimer = undefined;
+  };
+
+  const scheduleReconnect = () => {
+    if (closed || reconnectTimer) return;
+    onState('polling');
+    const delay = Math.min(12000, 1000 * 2 ** reconnectAttempt);
+    reconnectAttempt += 1;
+    reconnectTimer = window.setTimeout(() => {
+      reconnectTimer = undefined;
+      open();
+    }, delay);
+  };
 
   const open = () => {
     if (closed) return;
+    clearReconnect();
     onState('connecting');
     socket = new WebSocket(wsUrl(path));
     socket.onopen = () => {
+      reconnectAttempt = 0;
       onState('live');
-      heartbeat = window.setInterval(() => socket?.readyState === WebSocket.OPEN && socket.send('ping'), 25000);
+      clearHeartbeat();
+      heartbeat = window.setInterval(() => {
+        try {
+          if (socket?.readyState === WebSocket.OPEN) socket.send('ping');
+        } catch {
+          socket?.close();
+        }
+      }, 25000);
     };
     socket.onmessage = (message) => {
       if (typeof message.data !== 'string') return;
@@ -138,11 +216,16 @@ export function connectSocket(path: string, onEvent: (event: RealtimeEvent) => v
         return;
       }
     };
-    socket.onerror = () => onState('error');
+    socket.onerror = () => {
+      onState('error');
+      if (socket?.readyState !== WebSocket.CLOSING && socket?.readyState !== WebSocket.CLOSED) {
+        socket?.close();
+      }
+    };
     socket.onclose = () => {
-      if (heartbeat) window.clearInterval(heartbeat);
+      clearHeartbeat();
       if (closed) return;
-      onState('polling');
+      scheduleReconnect();
     };
   };
 
@@ -150,7 +233,8 @@ export function connectSocket(path: string, onEvent: (event: RealtimeEvent) => v
 
   return () => {
     closed = true;
-    if (heartbeat) window.clearInterval(heartbeat);
+    clearHeartbeat();
+    clearReconnect();
     socket?.close();
   };
 }

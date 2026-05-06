@@ -65,21 +65,6 @@ class FeishuCardBuilder:
             for index, item in enumerate(artifact_items[:3])
             if item.get("url")
         ]
-        if task_run_id:
-            actions.append(
-                {
-                    "tag": "button",
-                    "text": {"tag": "plain_text", "content": "生成交付包"},
-                    "type": "default",
-                    "value": build_card_action_payload(
-                        "create_delivery_bundle",
-                        session_id=session_id,
-                        task_run_id=task_run_id,
-                        source_message_id=source_message_id,
-                        payload={"mode": mode},
-                    ),
-                }
-            )
         if actions:
             elements.append({"tag": "action", "actions": actions[:4]})
         return self._card(title=title or "AI 协作产物已生成", template="turquoise", elements=elements)
@@ -176,25 +161,39 @@ class FeishuCardBuilder:
         elements: list[dict[str, Any]] = [
             {"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(lines)}}
         ]
-        actions = [
-            {
-                "tag": "button",
-                "text": {"tag": "plain_text", "content": self._shorten(option, 18)},
-                "type": "primary" if index == 0 else "default",
-                "value": build_card_action_payload(
-                    "select_clarification_option",
-                    session_id=session_id,
-                    task_run_id=task_run_id,
-                    source_message_id=source_message_id,
-                    payload={
-                        "option": option,
-                        "option_index": index,
-                        "confirmation_id": confirmation_id,
-                    },
-                ),
-            }
-            for index, option in enumerate(cleaned[:3])
+        option_lines = [
+            self._option_line(option_index + 1, cleaned[option_index])
+            for option_index in self._clarification_display_indexes(len(cleaned))
         ]
+        if option_lines:
+            elements.extend(
+                [
+                    {"tag": "hr"},
+                    {"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(option_lines)}},
+                ]
+            )
+        action_indexes = self._clarification_action_indexes(cleaned)
+        actions = []
+        for action_index, option_index in enumerate(action_indexes):
+            option = cleaned[option_index]
+            actions.append(
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": self._shorten(option, 18)},
+                    "type": "primary" if action_index == 0 else "default",
+                    "value": build_card_action_payload(
+                        "select_clarification_option",
+                        session_id=session_id,
+                        task_run_id=task_run_id,
+                        source_message_id=source_message_id,
+                        payload={
+                            "option": option,
+                            "option_index": option_index,
+                            "confirmation_id": confirmation_id,
+                        },
+                    ),
+                }
+            )
         elements.append({"tag": "action", "actions": actions})
         return self._card(title="需要你确认一下", template="orange", elements=elements)
 
@@ -363,3 +362,37 @@ class FeishuCardBuilder:
         if len(text) <= limit:
             return text
         return text[: max(limit - 1, 1)].rstrip() + "…"
+
+    def _option_line(self, index: int, option: str) -> str:
+        text = self._shorten(option, 72)
+        if self._has_visible_index(text):
+            return f"- {text}"
+        return f"- {index}. {text}"
+
+    @staticmethod
+    def _clarification_action_indexes(options: list[str]) -> list[int]:
+        option_count = len(options)
+        if option_count <= 3:
+            return list(range(option_count))
+        if _looks_like_other_option(options[-1]):
+            return [0, 1, option_count - 1]
+        return [0, 1, 2]
+
+    @staticmethod
+    def _clarification_display_indexes(option_count: int) -> list[int]:
+        if option_count <= 5:
+            return list(range(option_count))
+        return [0, 1, 2, 3, option_count - 1]
+
+    @staticmethod
+    def _has_visible_index(value: str) -> bool:
+        text = str(value or "").strip()
+        if not text:
+            return False
+        first = text.split(maxsplit=1)[0]
+        return first.rstrip(".、)）").isdigit()
+
+
+def _looks_like_other_option(value: str) -> bool:
+    text = str(value or "").strip()
+    return any(marker in text for marker in ("其他", "新建", "新需求", "另一个需求"))

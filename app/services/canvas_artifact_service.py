@@ -70,7 +70,16 @@ class CanvasArtifactService:
         canvas = llm_result.get("canvas") if isinstance(llm_result.get("canvas"), dict) else {}
         raw_shapes = canvas.get("shapes") if isinstance(canvas.get("shapes"), list) else []
         shapes = self._normalize_shapes(raw_shapes)
+        raw_template = self._raw_canvas_template(canvas)
+        instruction_template = self._instruction_template(instruction)
         template = self._select_template(canvas, instruction=instruction, workspace_context=workspace_context)
+        if self._should_discard_llm_shapes(
+            shapes,
+            template=template,
+            raw_template=raw_template,
+            instruction_template=instruction_template,
+        ):
+            shapes = []
         if not shapes:
             labels = self._flow_labels(canvas, instruction=instruction, workspace_context=workspace_context)
             shapes = self._template_shapes(template, labels)
@@ -148,6 +157,21 @@ class CanvasArtifactService:
         return default
 
     def _select_template(self, canvas: dict, *, instruction: str, workspace_context: str) -> str:
+        instruction_template = self._instruction_template(instruction)
+        if instruction_template:
+            return instruction_template
+        raw_template = self._raw_canvas_template(canvas)
+        if raw_template:
+            return raw_template
+        instruction_text = str(instruction or "")
+        combined_text = f"{instruction_text}\n{workspace_context}"
+        if re.search(r"(风险|隐患|阻塞|延期|延迟|应对|缓解|risk|mitigation|blocker)", combined_text, flags=re.IGNORECASE):
+            return "risk"
+        if re.search(r"(模块|架构|分工|前端|后端|设计|测试|交付|frontend|backend|module|architecture)", combined_text, flags=re.IGNORECASE):
+            return "module"
+        return "flow"
+
+    def _raw_canvas_template(self, canvas: dict) -> str:
         raw_template = str(canvas.get("template") or canvas.get("kind") or "").strip().lower()
         aliases = {
             "risk": "risk",
@@ -160,21 +184,46 @@ class CanvasArtifactService:
             "flowchart": "flow",
             "process": "flow",
         }
-        if raw_template in aliases:
-            return aliases[raw_template]
+        return aliases.get(raw_template, "")
+
+    def _instruction_template(self, instruction: str) -> str:
         instruction_text = str(instruction or "")
-        combined_text = f"{instruction_text}\n{workspace_context}"
-        if re.search(r"(流程图|产品流程|业务流程|用户流程|流程画布|流程|flowchart|process|flow)", instruction_text, flags=re.IGNORECASE):
-            return "flow"
         if re.search(r"(风险应对图|风险画布|风险矩阵|风险图|risk\s*map|mitigation)", instruction_text, flags=re.IGNORECASE):
             return "risk"
         if re.search(r"(模块图|架构图|系统架构|技术架构|module|architecture)", instruction_text, flags=re.IGNORECASE):
             return "module"
-        if re.search(r"(风险|隐患|阻塞|延期|延迟|应对|缓解|risk|mitigation|blocker)", combined_text, flags=re.IGNORECASE):
-            return "risk"
-        if re.search(r"(模块|架构|分工|前端|后端|设计|测试|交付|frontend|backend|module|architecture)", combined_text, flags=re.IGNORECASE):
-            return "module"
-        return "flow"
+        if re.search(r"(流程图|产品流程|业务流程|用户流程|流程画布|流程|flowchart|process|flow)", instruction_text, flags=re.IGNORECASE):
+            return "flow"
+        return ""
+
+    def _should_discard_llm_shapes(
+        self,
+        shapes: list[dict],
+        *,
+        template: str,
+        raw_template: str,
+        instruction_template: str,
+    ) -> bool:
+        if not shapes or not instruction_template:
+            return False
+        if raw_template and raw_template != instruction_template:
+            return True
+        if instruction_template == "flow" and template == "flow" and self._looks_like_risk_matrix(shapes):
+            return True
+        return False
+
+    def _looks_like_risk_matrix(self, shapes: list[dict]) -> bool:
+        markers = 0
+        for shape in shapes:
+            if not isinstance(shape, dict):
+                continue
+            group = str(shape.get("group") or "").strip()
+            text = str(shape.get("text") or shape.get("label") or "").strip()
+            if group in {"风险", "应对"}:
+                markers += 1
+            if re.search(r"^(风险|应对)[:：]", text) or text == "缓解":
+                markers += 1
+        return markers >= 2
 
     def _template_shapes(self, template: str, labels: list[str]) -> list[dict]:
         if template == "risk":
@@ -728,7 +777,7 @@ class CanvasArtifactService:
     <section class="canvas">{svg}</section>
     <nav class="links">
       <a href="{json_url}">JSON 场景</a>
-      <a href="{svg_url}">SVG 导出</a>
+      <a href="{svg_url}" download>SVG 导出</a>
     </nav>
   </main>
 </body>

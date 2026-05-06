@@ -37,6 +37,9 @@ class DeliveryTool:
         if detail is None:
             return None
 
+        if not self._has_delivery_links(detail):
+            raise ValueError("当前需求下还没有可汇总的文档、PPT 或 Canvas 链接，请先生成至少一个产物。")
+
         manifest = self.build_manifest(detail, requested_by=requested_by)
         artifact = self.delivery_artifact_service.persist_bundle(
             manifest,
@@ -76,6 +79,9 @@ class DeliveryTool:
         self.task_run_service.update_task_run(task_run_id, **update_kwargs)
         return self.task_run_service.get_task_run(task_run_id)
 
+    def _has_delivery_links(self, detail: Any) -> bool:
+        return any(item.get("status") == "ready" for item in self._latest_deliverables(detail))
+
     def _send_delivery_card(self, detail: Any, artifact: dict) -> dict[str, Any]:
         if not settings.feishu_reply_enabled or not settings.feishu_reply_card_enabled:
             return {"sent": False, "error": None}
@@ -99,45 +105,30 @@ class DeliveryTool:
         return {"sent": True, "error": None}
 
     def build_manifest(self, detail, *, requested_by: str) -> dict:
-        raw_artifacts = [
-            item
-            for item in (getattr(detail, "artifacts", []) or [])
-            if str(_field(item, "artifact_type") or "") != "delivery_bundle"
+        deliverables = self._latest_deliverables(detail)
+        artifacts = [
+            self._artifact_item_from_deliverable(item)
+            for item in deliverables
+            if item.get("status") == "ready"
         ]
-        artifacts = [self._artifact_item(item) for item in raw_artifacts]
-        documents = getattr(detail, "session_documents", []) or []
-        appended_documents: list[dict] = []
-        if documents and not any(item.get("artifact_type") == "document" for item in artifacts):
-            for document in documents:
-                appended_documents.append(
-                    {
-                        "artifact_id": _field(document, "document_id"),
-                        "artifact_type": "document",
-                        "title": _field(document, "title") or "协作文档",
-                        "status": "ready",
-                        "provider": "feishu" if _field(document, "url") else "local",
-                        "url": _field(document, "url"),
-                        "version": _field(document, "version") or 1,
-                    }
-                )
-            artifacts.extend(appended_documents)
-        checks = self.artifact_verifier.build_for_task_run(detail, assume_delivery_ready=True)
-        ready_count = sum(1 for item in checks if item.get("status") == "ready")
-        partial_count = sum(1 for item in checks if item.get("status") == "partial")
-        missing_count = sum(1 for item in checks if item.get("status") == "missing")
-        artifact_summaries = [
-            self._artifact_summary(item)
-            for item in [*raw_artifacts, *appended_documents]
+        ready_count = len(artifacts)
+        missing_labels = [str(item["label"]) for item in deliverables if item.get("status") != "ready"]
+        checks = [
+            {
+                "key": str(item["key"]),
+                "label": str(item["label"]),
+                "status": str(item["status"]),
+                "detail": str(item.get("detail") or ""),
+                "category": "delivery",
+            }
+            for item in deliverables
         ]
-        context_pack = _as_dict(getattr(detail, "context_pack", None)) or self.context_pack_builder.build_for_task_run(detail)
-        summary = (
-            f"本次任务已整理 {len(artifacts)} 个交付物，"
-            f"{ready_count}/{len(checks)} 个验收项满足。"
-        )
+        summary = f"已汇总当前需求下最新产物链接：{ready_count}/3 项已生成。"
         return {
-            "title": f"任务交付包 · {getattr(detail, 'title', '') or getattr(detail, 'task_run_id', '')}",
+            "title": f"需求交付清单 - {getattr(detail, 'title', '') or getattr(detail, 'task_run_id', '')}",
             "task_run_id": getattr(detail, "task_run_id", ""),
             "session_id": getattr(detail, "session_id", ""),
+            "requirement_id": getattr(detail, "requirement_id", None),
             "summary": summary,
             "source": {
                 "source_type": getattr(detail, "source_type", ""),
@@ -147,14 +138,124 @@ class DeliveryTool:
             },
             "checks": checks,
             "artifacts": artifacts,
-            "artifact_summaries": artifact_summaries,
-            "context_pack": context_pack,
+            "artifact_summaries": deliverables,
+            "deliverables": deliverables,
+            "context_pack": {},
             "highlights": [
-                f"验收清单：{ready_count} 项已满足，{partial_count} 项部分满足，{missing_count} 项待补齐。",
-                f"交付物：{len(artifacts)} 个，可打开链接 {sum(1 for item in artifacts if str(item.get('url') or '').strip())} 个。",
-                self._scene_highlight(checks),
+                f"已生成：{ready_count} 项；待补齐：{len(missing_labels)} 项。",
+                "本清单只汇总当前需求下最新的文档、PPT 和 Canvas 链接，不重新生成内容。",
             ],
-            "next_steps": self._next_steps(checks, artifacts),
+            "next_steps": [f"建议补齐：{'、'.join(missing_labels)}。"] if missing_labels else ["可将该清单作为当前需求的最终归档入口。"],
+        }
+
+    def _latest_deliverables(self, detail: Any) -> list[dict[str, Any]]:
+        document = self._latest_document(detail)
+        slides = self._latest_artifact_of_type(detail, {"slides", "slides_package"})
+        canvas = self._latest_artifact_of_type(detail, {"canvas"})
+        return [
+            self._deliverable_item(
+                key="document",
+                label="需求文档",
+                artifact_type="document",
+                item=document,
+                missing_detail="当前需求下还没有需求文档链接。",
+            ),
+            self._deliverable_item(
+                key="slides",
+                label="答辩 PPT",
+                artifact_type="slides_package",
+                item=slides,
+                missing_detail="当前需求下还没有 PPT 链接。",
+            ),
+            self._deliverable_item(
+                key="canvas",
+                label="Canvas / 流程图",
+                artifact_type="canvas",
+                item=canvas,
+                missing_detail="当前需求下还没有 Canvas 链接。",
+            ),
+        ]
+
+    def _latest_document(self, detail: Any) -> Any | None:
+        documents = list(getattr(detail, "session_documents", []) or [])
+        if documents:
+            current = [item for item in documents if bool(_field(item, "is_current"))]
+            candidates = current or documents
+            return max(candidates, key=_sort_key)
+        return self._latest_artifact_of_type(detail, {"document", "doc", "feishu_doc"})
+
+    def _latest_artifact_of_type(self, detail: Any, artifact_types: set[str]) -> Any | None:
+        candidates = [
+            item
+            for item in (getattr(detail, "artifacts", []) or [])
+            if str(_field(item, "artifact_type") or "").strip() in artifact_types
+        ]
+        if not candidates:
+            return None
+        return max(candidates, key=_sort_key)
+
+    def _deliverable_item(
+        self,
+        *,
+        key: str,
+        label: str,
+        artifact_type: str,
+        item: Any | None,
+        missing_detail: str,
+    ) -> dict[str, Any]:
+        if item is None:
+            return {
+                "key": key,
+                "label": label,
+                "artifact_type": artifact_type,
+                "title": label,
+                "status": "missing",
+                "detail": missing_detail,
+                "url": None,
+                "links": [],
+            }
+        title = str(_field(item, "title") or _field(item, "document_id") or label).strip() or label
+        url = str(_field(item, "url") or "").strip() or None
+        links = self._links_for_item(item, primary_url=url)
+        status = "ready" if links or url else "partial"
+        detail = f"最新{label}：{title}" if status == "ready" else f"已记录{label}，但缺少可打开链接。"
+        return {
+            "key": key,
+            "label": label,
+            "artifact_id": _field(item, "artifact_id") or _field(item, "document_id"),
+            "artifact_type": str(_field(item, "artifact_type") or artifact_type),
+            "title": title,
+            "status": status,
+            "provider": _field(item, "provider") or ("feishu" if key == "document" else "local"),
+            "url": url,
+            "version": _field(item, "version") or 1,
+            "updated_at": str(_field(item, "updated_at") or _field(item, "created_at") or ""),
+            "detail": detail,
+            "links": links,
+        }
+
+    def _links_for_item(self, item: Any, *, primary_url: str | None) -> list[dict[str, str]]:
+        links: list[dict[str, str]] = []
+        if primary_url:
+            links.append({"label": "打开", "url": primary_url})
+        exports = _preview(item).get("exports")
+        if isinstance(exports, dict):
+            for key, value in exports.items():
+                url = str(value or "").strip()
+                if url and all(existing["url"] != url for existing in links):
+                    links.append({"label": str(key).upper(), "url": url})
+        return links
+
+    def _artifact_item_from_deliverable(self, item: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "artifact_id": item.get("artifact_id"),
+            "artifact_type": item.get("artifact_type"),
+            "title": item.get("title") or item.get("label") or "协作产物",
+            "status": item.get("status") or "ready",
+            "provider": item.get("provider") or "local",
+            "url": item.get("url"),
+            "version": item.get("version") or 1,
+            "links": item.get("links") if isinstance(item.get("links"), list) else [],
         }
 
     def _artifact_item(self, artifact) -> dict:
@@ -359,3 +460,9 @@ def _as_dict(value: object) -> dict[str, Any]:
         data = dump(mode="json")
         return data if isinstance(data, dict) else {}
     return {}
+
+
+def _sort_key(item: object) -> tuple[str, int]:
+    updated = _field(item, "updated_at") or _field(item, "created_at") or ""
+    version = _positive_int(_field(item, "version"))
+    return (str(updated), version)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from types import SimpleNamespace
 from typing import Any
 
@@ -32,6 +33,17 @@ class WorkbenchRevisionWorkflow:
             return None
 
         metadata = workflow.task_run_service.get_task_run_metadata(task_run_id)
+        requirement_payload = metadata.get("requirement_confirmation")
+        if isinstance(requirement_payload, dict):
+            return self._resume_after_requirement_confirmation(
+                task_run_id,
+                detail=detail,
+                metadata=metadata,
+                confirmation_id=confirmation_id,
+                answer_value=answer_value,
+                answered_by=answered_by,
+            )
+
         resume_payload = metadata.get("resume_after_confirmation")
         if not isinstance(resume_payload, dict):
             return None
@@ -101,7 +113,11 @@ class WorkbenchRevisionWorkflow:
             session_id=detail.session_id,
             message_id=detail.trigger_message_id or confirmation_id,
             text=resumed_instruction,
-            chat_id=None,
+            raw_text=resumed_instruction,
+            chat_id=getattr(detail, "source_ref", None) or detail.session_id,
+            chat_type=getattr(detail, "source_type", None) or "group",
+            is_mentioned=True,
+            sender_id=answered_by,
         )
         result = workflow.execution_runner.execute_llm_request(
             synthetic_message,
@@ -113,6 +129,117 @@ class WorkbenchRevisionWorkflow:
         )
         workflow.result_persistence.persist_task_run_result(task_run_id, message_text=resumed_instruction, result=result, session_id=detail.session_id)
         return result
+
+    def _resume_after_requirement_confirmation(
+        self,
+        task_run_id: str,
+        *,
+        detail,
+        metadata: dict,
+        confirmation_id: str,
+        answer_value: str,
+        answered_by: str,
+    ) -> dict | None:
+        workflow = self.workflow
+        payload = metadata.get("requirement_confirmation")
+        if not isinstance(payload, dict):
+            return None
+        expected_confirmation_id = str(payload.get("confirmation_id") or "").strip()
+        if expected_confirmation_id and expected_confirmation_id != confirmation_id:
+            return None
+
+        candidates = payload.get("candidates") if isinstance(payload.get("candidates"), list) else []
+        chosen_requirement_id = self._requirement_id_from_answer(answer_value, candidates)
+        if chosen_requirement_id is None:
+            created = workflow.requirement_service.create_requirement(
+                title=workflow._task_run_title(str(payload.get("instruction") or detail.title), "requirement"),
+                primary_session_id=detail.session_id,
+                summary=str(payload.get("instruction") or "").strip() or detail.title,
+                created_by=answered_by,
+                source_message_id=detail.trigger_message_id,
+                source_type="confirmation",
+                metadata={
+                    "requirement_binding": {
+                        "source": "user_confirmation_create",
+                        "task_run_id": task_run_id,
+                    }
+                },
+            )
+            chosen_requirement_id = created.requirement_id
+
+        workflow.requirement_service.bind_task_run(
+            task_run_id=task_run_id,
+            requirement_id=chosen_requirement_id,
+            session_id=detail.session_id,
+            message_id=detail.trigger_message_id,
+            source_type="confirmation",
+        )
+        workflow.task_run_service.upsert_step(
+            task_run_id,
+            step_key="requirement_confirmation",
+            title="确认需求归属",
+            step_type="confirmation",
+            status="done",
+            output_payload={
+                "answer_value": answer_value,
+                "answered_by": answered_by,
+                "requirement_id": chosen_requirement_id,
+            },
+        )
+        metadata.pop("requirement_confirmation", None)
+        metadata["requirement_resolution"] = {
+            "action": "bind",
+            "requirement_id": chosen_requirement_id,
+            "confidence": 1.0,
+            "matched_by": "user_confirmation",
+            "reason": f"用户确认归属：{answer_value}",
+        }
+        workflow.task_run_service.update_task_run(task_run_id, metadata=metadata, stage="building_context", status="running")
+
+        instruction = str(payload.get("instruction") or detail.title).strip()
+        synthetic_message = SimpleNamespace(
+            session_id=detail.session_id,
+            message_id=detail.trigger_message_id or confirmation_id,
+            text=instruction,
+            raw_text=instruction,
+            chat_id=getattr(detail, "source_ref", None) or detail.session_id,
+            chat_type=detail.source_type,
+            is_mentioned=True,
+            sender_id=answered_by,
+        )
+        result = workflow._handle_mentioned_request(synthetic_message, task_run_id=task_run_id)
+        workflow.result_persistence.persist_task_run_result(
+            task_run_id,
+            message_text=instruction,
+            result=result,
+            session_id=detail.session_id,
+        )
+        return result
+
+    @staticmethod
+    def _requirement_id_from_answer(answer_value: str, candidates: list) -> str | None:
+        answer = str(answer_value or "").strip()
+        if not answer or ("新建" in answer and "需求" in answer):
+            return None
+        explicit_index = _requirement_answer_index(answer)
+        if explicit_index is not None:
+            if explicit_index < 1 or explicit_index > len(candidates):
+                return None
+            candidate = candidates[explicit_index - 1]
+            if not isinstance(candidate, dict):
+                return None
+            requirement_id = str(candidate.get("requirement_id") or "").strip()
+            return requirement_id or None
+        for index, candidate in enumerate(candidates, start=1):
+            if not isinstance(candidate, dict):
+                continue
+            requirement_id = str(candidate.get("requirement_id") or "").strip()
+            title = str(candidate.get("title") or "").strip()
+            if not requirement_id:
+                continue
+            if _answer_matches_candidate(answer, index=index, requirement_id=requirement_id, title=title):
+                return requirement_id or None
+        return None
 
     def revise_document_from_task_run(
         self,
@@ -152,6 +279,7 @@ class WorkbenchRevisionWorkflow:
                 "document_id": (document_id or "").strip() or None,
             },
             stage="building_context",
+            requirement_id=getattr(source_detail, "requirement_id", None),
         )
         task_run = revision_start.task_run
 
@@ -339,6 +467,7 @@ class WorkbenchRevisionWorkflow:
                 "requested_by": requested_by,
             },
             stage="slides_revision_context",
+            requirement_id=getattr(source_detail, "requirement_id", None),
         )
         task_run = revision_start.task_run
 
@@ -456,6 +585,30 @@ class WorkbenchRevisionWorkflow:
             session_id=session_id,
         )
         return workflow.task_run_service.get_task_run(task_run.task_run_id)
+
+
+def _requirement_answer_index(answer: str) -> int | None:
+    match = re.match(r"^(?:第\s*)?(\d+)\s*(?:[.、)）号个]|$)", answer)
+    if match:
+        return int(match.group(1))
+    match = re.search(r"第\s*(\d+)\s*[号个]", answer)
+    if match:
+        return int(match.group(1))
+    return None
+
+
+def _answer_matches_candidate(answer: str, *, index: int, requirement_id: str, title: str) -> bool:
+    if answer == requirement_id or answer == title:
+        return True
+    if answer == str(index):
+        return True
+    if re.match(rf"^(第\s*)?{index}\s*([.、)）号个]|$)", answer):
+        return True
+    if re.match(rf"^{index}\s*[.、)）]\s*", answer):
+        return True
+    if requirement_id and requirement_id in answer:
+        return True
+    return bool(title and title in answer)
 
 
 def build_confirmation_resume_instruction(instruction: str, answer_value: str) -> str:

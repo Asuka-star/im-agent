@@ -102,6 +102,7 @@ class ArtifactTitleService:
     def _subjects_from_project_phrases(text: str) -> list[str]:
         candidates: list[str] = []
         patterns = (
+            r"(?:基于|根据|围绕)\s*[“\"「]?([^，。；;\n\"”」]{4,60}?)[”\"」]?\s*(?:这份|这个|该|的)?(?:正式)?(?:需求方案文档|需求方案|需求文档|方案文档|文档|PPT|演示稿)",
             r"(?:想做|要做|做一个|建设|开发|打造|本次项目(?:是|为)?|项目(?:名称|主题)?[:：])\s*(?:一个|一套|一份)?\s*([^，。；;\n]+?(?:系统|平台|工具|应用|方案|Agent|机器人))",
             r"([^，。；;\n]{4,40}?(?:报名与审核系统|管理系统|协作系统|展示系统|审核系统|报名系统))",
         )
@@ -134,6 +135,14 @@ class ArtifactTitleService:
     def _is_generic_or_instruction_title(cls, title: str, instruction: str) -> bool:
         normalized = cls._clean_title(title).lower()
         if normalized in cls.GENERIC_ARTIFACT_TITLES:
+            return True
+        artifact_suffixes = (
+            r"答辩演示稿|汇报演示稿|演示稿|PPT|需求流程图|产品流程图|业务流程图|"
+            r"用户流程图|协作流程图|流程图|技术架构图|风险应对图|画布|canvas"
+        )
+        if re.search(rf"^(?:统计至)?\d{{4}}[-/年]\d{{1,2}}[-/月]\d{{1,2}}.*?(?:{artifact_suffixes})$", normalized, flags=re.IGNORECASE):
+            return True
+        if re.search(rf"^统计至.+?(?:{artifact_suffixes})$", normalized, flags=re.IGNORECASE):
             return True
         instruction_text = cls._clean_title(instruction)
         if instruction_text and normalized == instruction_text.lower():

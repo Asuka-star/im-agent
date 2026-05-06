@@ -106,7 +106,8 @@ class FeishuRouteTests(unittest.TestCase):
         ):
             response = asyncio.run(feishu.receive_events(_CardRequest(), background))
 
-        self.assertEqual(response, {})
+        self.assertEqual(response["toast"]["type"], "info")
+        self.assertIn("已收到", response["toast"]["content"])
         self.assertEqual(len(background.tasks), 1)
         fake_dedup.accept_for_processing.assert_not_called()
 
@@ -144,7 +145,8 @@ class FeishuRouteTests(unittest.TestCase):
         ):
             response = asyncio.run(feishu.receive_events(_LegacyCardRequest(), background))
 
-        self.assertEqual(response, {})
+        self.assertEqual(response["toast"]["type"], "info")
+        self.assertIn("已收到", response["toast"]["content"])
         self.assertEqual(len(background.tasks), 1)
         fake_dedup.accept_for_processing.assert_not_called()
 

@@ -13,6 +13,7 @@ from app.services.tools.task_operation_tool import TaskOperationTool
 from app.services.feishu_workflow import FeishuWorkflowService
 from app.services.presentation_artifact_service import PresentationArtifactService
 from app.services.request_router import RouteDecision
+from app.services.workflow.revisions import WorkbenchRevisionWorkflow
 
 
 class LLMTaskOperationTests(unittest.TestCase):
@@ -1575,6 +1576,56 @@ class LLMTaskOperationTests(unittest.TestCase):
         self.assertEqual(result["mode"], "doc")
         self.assertIs(execute_llm_request.call_args.kwargs["target_document"], matched_document)
 
+    def test_requirement_document_target_blocks_session_current_doc_fallback(self) -> None:
+        with patch.object(
+            self.service.task_run_service,
+            "get_task_run",
+            return_value=SimpleNamespace(requirement_id="req_1"),
+        ), patch.object(
+            self.service.requirement_service,
+            "get_requirement",
+            return_value=SimpleNamespace(current_document=None),
+        ):
+            target = self.service._requirement_document_target_for_task_run("run_1")
+
+        self.assertEqual(target, {})
+
+        message = SimpleNamespace(session_id="s1", message_id="m1")
+        with patch.object(
+            self.service.session_document_service,
+            "get_current_document",
+            return_value={"document_id": "doc_wrong", "title": "Wrong Requirement Doc", "version": 1},
+        ) as get_current_document, patch.object(
+            self.service.memory_service,
+            "build_discussion_block",
+            return_value="",
+        ):
+            context = self.service._build_doc_update_context(
+                message,
+                "base context",
+                active_episode_id=None,
+                target_document=target,
+            )
+
+        get_current_document.assert_not_called()
+        self.assertIn("base context", context)
+        self.assertNotIn("Wrong Requirement Doc", context)
+
+    def test_requirement_document_target_uses_requirement_current_document(self) -> None:
+        current_document = {"document_id": "doc_req", "title": "Requirement Doc", "version": 3}
+        with patch.object(
+            self.service.task_run_service,
+            "get_task_run",
+            return_value=SimpleNamespace(requirement_id="req_1"),
+        ), patch.object(
+            self.service.requirement_service,
+            "get_requirement",
+            return_value=SimpleNamespace(current_document=current_document),
+        ):
+            target = self.service._requirement_document_target_for_task_run("run_1")
+
+        self.assertEqual(target, current_document)
+
     def test_resolve_target_document_supports_relative_references(self) -> None:
         documents = [
             {"document_id": "doc_1", "title": "Project Weekly", "version": 3, "is_current": True},
@@ -2417,6 +2468,8 @@ class LLMTaskOperationTests(unittest.TestCase):
             "get_task_run",
             return_value=SimpleNamespace(
                 session_id="s1",
+                source_ref="oc_chat",
+                source_type="group",
                 trigger_message_id="m1",
                 metadata_json="{}",
             ),
@@ -2507,6 +2560,8 @@ class LLMTaskOperationTests(unittest.TestCase):
             "get_task_run",
             return_value=SimpleNamespace(
                 session_id="s1",
+                source_ref="oc_chat",
+                source_type="group",
                 trigger_message_id="m1",
                 metadata_json="{}",
             ),
@@ -2575,6 +2630,99 @@ class LLMTaskOperationTests(unittest.TestCase):
 
         self.assertIsNotNone(result)
         self.assertIs(execute_llm_request.call_args.kwargs["target_document"], selected_doc)
+        synthetic_message = execute_llm_request.call_args.args[0]
+        self.assertEqual(synthetic_message.chat_id, "oc_chat")
+        self.assertEqual(synthetic_message.chat_type, "group")
+
+    def test_requirement_confirmation_answer_matches_numbered_candidates(self) -> None:
+        candidates = [
+            {"requirement_id": "req_a", "title": "同名需求"},
+            {"requirement_id": "req_b", "title": "同名需求"},
+            {"requirement_id": "req_c", "title": "校园活动报名系统"},
+        ]
+
+        self.assertEqual(
+            WorkbenchRevisionWorkflow._requirement_id_from_answer("2. 同名需求", candidates),
+            "req_b",
+        )
+        self.assertEqual(
+            WorkbenchRevisionWorkflow._requirement_id_from_answer("第3个", candidates),
+            "req_c",
+        )
+        self.assertEqual(
+            WorkbenchRevisionWorkflow._requirement_id_from_answer("req_a", candidates),
+            "req_a",
+        )
+        self.assertIsNone(
+            WorkbenchRevisionWorkflow._requirement_id_from_answer("新建一个需求", candidates)
+        )
+
+    def test_requirement_confirmation_resume_keeps_chat_id_for_final_reply(self) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_handle(message, *, task_run_id=None):
+            captured["message"] = message
+            captured["task_run_id"] = task_run_id
+            return {
+                "session_id": "oc_session",
+                "mode": "delivery",
+                "reply_preview": "交付包已生成",
+                "reply_sent": False,
+                "reply_error": None,
+                "analysis": None,
+                "artifacts": [{"artifact_type": "delivery_bundle", "title": "交付包"}],
+            }
+
+        with patch.object(
+            self.service.task_run_service,
+            "get_task_run",
+            return_value=SimpleNamespace(
+                task_run_id="run_123",
+                session_id="oc_session",
+                source_ref="oc_chat",
+                source_type="group",
+                trigger_message_id="om_1",
+                title="整理一份正式需求方案文档",
+                metadata_json="{}",
+            ),
+        ), patch.object(
+            self.service.task_run_service,
+            "get_task_run_metadata",
+            return_value={
+                "requirement_confirmation": {
+                    "confirmation_id": "confirm_req_1",
+                    "instruction": "整理一份正式需求方案文档",
+                    "active_episode_id": None,
+                    "candidates": [{"requirement_id": "req_a", "title": "校园活动报名系统"}],
+                }
+            },
+        ), patch.object(
+            self.service.requirement_service,
+            "bind_task_run",
+        ), patch.object(
+            self.service.task_run_service,
+            "upsert_step",
+        ), patch.object(
+            self.service.task_run_service,
+            "update_task_run",
+        ), patch.object(
+            self.service,
+            "_handle_mentioned_request",
+            side_effect=fake_handle,
+        ), patch.object(
+            self.service.result_persistence,
+            "persist_task_run_result",
+        ):
+            result = self.service.resume_task_run_after_confirmation(
+                "run_123",
+                confirmation_id="confirm_req_1",
+                answer_value="1. 校园活动报名系统",
+                answered_by="tester",
+            )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(captured["task_run_id"], "run_123")
+        self.assertEqual(getattr(captured["message"], "chat_id"), "oc_chat")
 
     def test_revise_document_from_task_run_creates_workbench_run(self) -> None:
         source_detail = SimpleNamespace(session_id="s1", task_run_id="run_source")
@@ -3029,15 +3177,16 @@ class LLMTaskOperationTests(unittest.TestCase):
         preview = create_artifact.call_args.kwargs["preview"]
         self.assertEqual(preview["schema"], "agent-pilot.delivery.v1")
         self.assertEqual(len(preview["artifacts"]), 2)
-        self.assertGreaterEqual(len(preview["artifact_summaries"]), 2)
+        self.assertEqual(len(preview["artifact_summaries"]), 3)
+        self.assertEqual(len(preview["deliverables"]), 3)
         slides_summary = next(item for item in preview["artifact_summaries"] if item["artifact_type"] == "slides_package")
-        self.assertIn("2 页", slides_summary["metrics"])
-        self.assertTrue(any("讲者备注" in item for item in slides_summary["metrics"]))
+        self.assertEqual(slides_summary["label"], "答辩 PPT")
+        self.assertTrue(any(item["label"] == "PPTX" for item in slides_summary["links"]))
         self.assertTrue(preview["highlights"])
         self.assertIn("context_pack", preview)
-        self.assertTrue(preview["context_pack"]["used_sources"])
         self.assertEqual({item["key"]: item["status"] for item in preview["checks"]}["document"], "ready")
-        self.assertEqual({item["key"]: item["status"] for item in preview["checks"]}["presentation_or_canvas"], "ready")
+        self.assertEqual({item["key"]: item["status"] for item in preview["checks"]}["slides"], "ready")
+        self.assertEqual({item["key"]: item["status"] for item in preview["checks"]}["canvas"], "missing")
         self.assertEqual(card_calls[0]["receive_id"], "chat_1")
         self.assertEqual(card_calls[0]["card"]["header"]["title"]["content"], "任务交付包已生成")
         upsert_step.assert_called_once()
@@ -3064,6 +3213,15 @@ class LLMTaskOperationTests(unittest.TestCase):
                     provider="feishu",
                     status="ready",
                     url="https://feishu.example/doc",
+                    version=1,
+                ),
+                SimpleNamespace(
+                    artifact_id="artifact_slides",
+                    artifact_type="slides_package",
+                    title="评审演示稿",
+                    provider="local",
+                    status="ready",
+                    url="/api/artifacts/slides/run_delivery.html",
                     version=1,
                 )
             ],
@@ -3094,6 +3252,56 @@ class LLMTaskOperationTests(unittest.TestCase):
         self.assertNotIn("stage", update_task_run.call_args.kwargs)
         self.assertNotIn("status", update_task_run.call_args.kwargs)
         self.assertIn("latest_summary", update_task_run.call_args.kwargs)
+
+    def test_bundle_delivery_from_task_run_allows_document_only_link_index(self) -> None:
+        detail = SimpleNamespace(
+            task_run_id="run_delivery",
+            session_id="s1",
+            source_type="im",
+            source_ref="m1",
+            trigger_message_id="m1",
+            title="报名系统汇报",
+            status="completed",
+            steps=[SimpleNamespace(step_key="plan", status="done")],
+            artifacts=[
+                SimpleNamespace(
+                    artifact_id="artifact_doc",
+                    artifact_type="document",
+                    title="需求文档",
+                    provider="feishu",
+                    status="ready",
+                    url="https://feishu.example/doc",
+                    version=1,
+                )
+            ],
+            confirmations=[],
+            session_documents=[],
+        )
+
+        final_detail = SimpleNamespace(task_run_id="run_delivery", session_id="s1")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self.service.delivery_artifact_service.root_dir = Path(tmpdir)
+            with patch.object(
+                self.service.task_run_service,
+                "get_task_run",
+                side_effect=[detail, final_detail],
+            ), patch.object(
+                self.service.task_run_service,
+                "upsert_step",
+            ), patch.object(
+                self.service.task_run_service,
+                "create_artifact",
+            ) as create_artifact, patch.object(
+                self.service.task_run_service,
+                "update_task_run",
+            ):
+                result = self.service.bundle_delivery_from_task_run("run_delivery", requested_by="tester")
+
+        self.assertIs(result, final_detail)
+        preview = create_artifact.call_args.kwargs["preview"]
+        self.assertEqual([item["key"] for item in preview["deliverables"]], ["document", "slides", "canvas"])
+        self.assertEqual({item["key"]: item["status"] for item in preview["checks"]}["document"], "ready")
+        self.assertEqual({item["key"]: item["status"] for item in preview["checks"]}["slides"], "missing")
 
 
 if __name__ == "__main__":

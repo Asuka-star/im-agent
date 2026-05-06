@@ -81,6 +81,34 @@ class LLMPromptBuilder:
             '"confirmation":{"required":false,"reason":"","question":""},"fallback":"ask_clarification"}'
         )
 
+    def requirement_workspace_resolution(self) -> str:
+        return f"""
+You are the Requirement Workspace Resolver for a Feishu collaboration agent.
+Your main job is to decide whether the current user request belongs to an existing requirement workspace, starts a new requirement, needs clarification, or should not be attached to a requirement.
+{self._json_contract()}
+
+Schema:
+{{"action":"bind|create|clarify|skip",
+"requirement_id":"existing requirement id or null",
+"confidence":0.0,
+"matched_by":"explicit_title|semantic|current_requirement|single_active|new_request|not_requirement|ambiguous",
+"reason":"short Chinese reason",
+"new_requirement":{{"title":"title when action=create","summary":"short summary"}},
+"candidates":[{{"requirement_id":"req_xxx","score":0.0,"reason":"short reason"}}]}}
+
+Rules:
+- Prefer semantic understanding over keyword matching. Resolve references such as “刚才那个”, “上一个方案”, “评审版”, “报名系统”, “那份文档”, “继续改 PPT” using the candidate requirement titles, summaries, sessions, current artifacts, and recency hints.
+- bind only when one existing requirement is clearly the best match.
+- create when the request clearly starts a different requirement, explicitly says 新建/另一个/换个方向, or no candidate requirement fits a lifecycle request.
+- Treat "我们现在有一个新的需求" as evidence, not a command by itself. If it looks like a sub-requirement, phase, feature, module, or continuation of an existing candidate, bind or clarify instead of creating.
+- clarify when two or more candidates are plausible or the user uses vague references that cannot be uniquely grounded.
+- skip for pure read-only task/status/risk/help commands that do not continue a requirement lifecycle.
+- Do not invent requirement_id values. Use only ids from candidates.
+- Low confidence must choose clarify or skip, not bind.
+- Single chat and group chat can both continue any requirement; do not reject cross-session edits.
+- If source_type starts with im_passive, the message is a group-chat observation where the bot was not mentioned. Do not plan work or ask the user; only bind/create when the discussion topic is clear enough to update requirement context. For vague passive messages, choose clarify or skip.
+""".strip()
+
     def extraction(self) -> str:
         return f"""
 You are a narrow Feishu task extraction agent.
@@ -293,6 +321,7 @@ Schema:
 Rules:
 - Use only supported workspace facts and the current request.
 - Treat the IM discussion block as primary requirement evidence. Current task snapshots and task changes are only supporting implementation context.
+- Do not invent technology stacks, programming languages, frameworks, databases, deployment plans, integrations, permissions, metrics, dates, owners, or teams. If they are not explicitly stated in context, write 待确认 or 未明确.
 - If current document context exists, treat this as an update: preserve valid structure and return full content for only the sections that need refresh.
 - When the user asks for 需求文档、方案文档、正式文档、答辩材料, or 演示文稿前置材料, make the main structure about the requirement/solution: 背景与痛点、目标用户、核心需求、产品流程、技术方案、风险与约束、里程碑.
 - Keep tasks, owners, and deadlines as an implementation-plan section only; never let the whole document become a task list unless the user explicitly asks for tasks/TODOs.

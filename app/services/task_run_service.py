@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from sqlalchemy import desc, select
 
 from app.db.database import SessionLocal
-from app.db.models import Artifact, ConfirmationRequest, TaskRun, TaskRunStep
+from app.db.models import Artifact, ConfirmationRequest, Requirement, TaskRun, TaskRunStep
 from app.schemas.task_run import (
     ArtifactCheckRecord,
     ArtifactRecord,
@@ -28,6 +28,15 @@ from app.utils.values import coerce_positive_int
 
 
 logger = logging.getLogger(__name__)
+
+
+def _ordered_unique(values: list[str]) -> list[str]:
+    ordered: list[str] = []
+    for value in values:
+        normalized = str(value or "").strip()
+        if normalized and normalized not in ordered:
+            ordered.append(normalized)
+    return ordered
 
 
 class TaskRunService:
@@ -52,6 +61,7 @@ class TaskRunService:
         session_id: str,
         title: str,
         source_type: str,
+        requirement_id: str | None = None,
         source_ref: str | None = None,
         trigger_message_id: str | None = None,
         created_by: str | None = None,
@@ -62,6 +72,7 @@ class TaskRunService:
         with SessionLocal() as session:
             row = TaskRun(
                 task_run_id=task_run_id,
+                requirement_id=requirement_id,
                 session_id=session_id,
                 source_type=source_type,
                 source_ref=source_ref,
@@ -83,6 +94,7 @@ class TaskRunService:
         self,
         *,
         session_id: str | None = None,
+        requirement_id: str | None = None,
         session_query: str | None = None,
         status: str | None = None,
         limit: int = 20,
@@ -92,6 +104,8 @@ class TaskRunService:
             statement = select(TaskRun).order_by(desc(TaskRun.id)).limit(limit if not query_active else max(limit * 4, limit))
             if session_id:
                 statement = statement.where(TaskRun.session_id == session_id)
+            if requirement_id:
+                statement = statement.where(TaskRun.requirement_id == requirement_id)
             if status:
                 statement = statement.where(TaskRun.status == status)
             rows = session.execute(statement).scalars().all()
@@ -135,7 +149,7 @@ class TaskRunService:
                 steps=step_records,
                 artifacts=[self._artifact_from_row(item) for item in artifacts],
                 confirmations=[self._confirmation_from_row(item) for item in confirmations],
-                session_documents=self._session_documents_for_session(row.session_id),
+                session_documents=self._session_documents_for_task_run_detail(session, row),
             )
             detail.artifact_checks = [
                 ArtifactCheckRecord(**item)
@@ -399,6 +413,7 @@ class TaskRunService:
         metadata = self._decode_json_object(row.metadata_json)
         return TaskRunSummary(
             task_run_id=row.task_run_id,
+            requirement_id=row.requirement_id,
             session_id=row.session_id,
             session_label=self.session_display_service.resolve_session_label(
                 session_id=row.session_id,
@@ -455,12 +470,7 @@ class TaskRunService:
         )
 
     def _artifacts_for_task_run_detail(self, session, row: TaskRun) -> list[Artifact]:
-        run_ids = session.execute(
-            select(TaskRun.task_run_id)
-            .where(TaskRun.session_id == row.session_id)
-            .order_by(desc(TaskRun.id))
-            .limit(20)
-        ).scalars().all()
+        run_ids = self._context_task_run_ids(session, row)
         if row.task_run_id not in run_ids:
             run_ids.append(row.task_run_id)
         artifacts = session.execute(
@@ -477,6 +487,24 @@ class TaskRunService:
             seen.add(artifact_id)
             deduped.append(artifact)
         return deduped
+
+    def _context_task_run_ids(self, session, row: TaskRun) -> list[str]:
+        if row.requirement_id:
+            return list(
+                session.execute(
+                    select(TaskRun.task_run_id)
+                    .where(TaskRun.requirement_id == row.requirement_id)
+                    .order_by(TaskRun.id.asc())
+                ).scalars().all()
+            )
+        return list(
+            session.execute(
+                select(TaskRun.task_run_id)
+                .where(TaskRun.session_id == row.session_id)
+                .order_by(desc(TaskRun.id))
+                .limit(20)
+            ).scalars().all()
+        )
 
     def _confirmation_from_row(self, row: ConfirmationRequest) -> ConfirmationRequestRecord:
         return ConfirmationRequestRecord(
@@ -515,6 +543,50 @@ class TaskRunService:
             updated_at=updated_at,
             is_current=bool(payload.get("is_current")),
         )
+
+    def _session_documents_for_task_run_detail(self, session, row: TaskRun) -> list[SessionDocumentRecord]:
+        documents = self._session_documents_for_sessions(
+            self._context_session_ids(session, row) if row.requirement_id else [row.session_id]
+        )
+        if not row.requirement_id:
+            return documents
+        allowed_run_ids = set(self._context_task_run_ids(session, row))
+        allowed_doc_ids: set[str] = set()
+        requirement = session.execute(
+            select(Requirement.current_document_id).where(Requirement.requirement_id == row.requirement_id)
+        ).scalar_one_or_none()
+        if requirement:
+            allowed_doc_ids.add(str(requirement))
+        return [
+            document
+            for document in documents
+            if (document.task_run_id and document.task_run_id in allowed_run_ids)
+            or (document.document_id and document.document_id in allowed_doc_ids)
+        ]
+
+    def _context_session_ids(self, session, row: TaskRun) -> list[str]:
+        if not row.requirement_id:
+            return [row.session_id]
+        session_ids = list(
+            session.execute(
+                select(TaskRun.session_id)
+                .where(TaskRun.requirement_id == row.requirement_id)
+                .order_by(TaskRun.id.asc())
+            ).scalars().all()
+        )
+        return _ordered_unique([row.session_id, *session_ids])
+
+    def _session_documents_for_sessions(self, session_ids: list[str]) -> list[SessionDocumentRecord]:
+        documents: list[SessionDocumentRecord] = []
+        seen: set[tuple[str, str]] = set()
+        for session_id in _ordered_unique(session_ids):
+            for document in self._session_documents_for_session(session_id):
+                key = (document.session_id, document.document_id)
+                if key in seen:
+                    continue
+                seen.add(key)
+                documents.append(document)
+        return documents
 
     def _session_documents_for_session(self, session_id: str) -> list[SessionDocumentRecord]:
         try:
@@ -751,6 +823,7 @@ class TaskRunService:
     def _summary_payload(self, detail: TaskRunDetail) -> dict:
         return {
             "task_run_id": detail.task_run_id,
+            "requirement_id": detail.requirement_id,
             "session_id": detail.session_id,
             "session_label": detail.session_label,
             "source_type": detail.source_type,

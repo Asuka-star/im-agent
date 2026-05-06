@@ -1,6 +1,7 @@
 import json
 import logging
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
@@ -52,6 +53,8 @@ def _serve_local_artifact(kind: str, filename: str) -> FileResponse | Response:
         if restored is not None:
             return restored
         raise HTTPException(status_code=404, detail=ARTIFACT_NOT_FOUND)
+    if kind == "canvas" and suffix == ".svg":
+        return FileResponse(path, media_type=media_types[suffix], filename=filename, content_disposition_type="attachment")
     return FileResponse(path, media_type=media_types[suffix], filename=filename)
 
 
@@ -60,7 +63,7 @@ def _serve_artifact_from_db_preview(kind: str, filename: str, suffix: str) -> Re
     if preview is None:
         return None
     if kind == "canvas":
-        return _canvas_preview_response(preview, suffix)
+        return _canvas_preview_response(preview, suffix, filename)
     if kind == "slides":
         return _slides_preview_response(preview, suffix)
     return None
@@ -124,16 +127,24 @@ def _artifact_row_matches(row: Artifact, preview: dict, relative_url: str, filen
     return False
 
 
-def _canvas_preview_response(preview: dict, suffix: str) -> Response | None:
+def _canvas_preview_response(preview: dict, suffix: str, filename: str) -> Response | None:
     service = CanvasArtifactService()
     if suffix == ".json":
         return JSONResponse(preview)
     if suffix == ".svg":
-        return Response(service._build_svg(preview), media_type="image/svg+xml")
+        return Response(
+            service._build_svg(preview),
+            media_type="image/svg+xml",
+            headers={"Content-Disposition": _attachment_header(filename)},
+        )
     if suffix == ".html":
         svg = service._build_svg(preview)
         return HTMLResponse(service._build_html(preview, svg))
     return None
+
+
+def _attachment_header(filename: str) -> str:
+    return f"attachment; filename*=utf-8''{quote(filename)}"
 
 
 def _slides_preview_response(preview: dict, suffix: str) -> Response | None:

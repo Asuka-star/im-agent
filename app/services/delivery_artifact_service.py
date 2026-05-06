@@ -47,18 +47,21 @@ class DeliveryArtifactService:
             if isinstance(manifest.get("artifact_summaries"), list)
             else []
         )
+        deliverables = manifest.get("deliverables") if isinstance(manifest.get("deliverables"), list) else []
         return {
             "schema": "agent-pilot.delivery.v1",
             "version": self._coerce_version(manifest.get("version")),
             "title": str(manifest.get("title") or "任务交付包").strip() or "任务交付包",
             "task_run_id": str(manifest.get("task_run_id") or task_run_id),
             "session_id": str(manifest.get("session_id") or session_id),
+            "requirement_id": str(manifest.get("requirement_id") or "").strip() or None,
             "generated_at": str(manifest.get("generated_at") or now),
             "summary": str(manifest.get("summary") or "").strip(),
             "source": manifest.get("source") if isinstance(manifest.get("source"), dict) else {},
             "checks": [item for item in checks if isinstance(item, dict)],
             "artifacts": [item for item in items if isinstance(item, dict)],
             "artifact_summaries": [item for item in artifact_summaries if isinstance(item, dict)],
+            "deliverables": [item for item in deliverables if isinstance(item, dict)],
             "context_pack": manifest.get("context_pack") if isinstance(manifest.get("context_pack"), dict) else {},
             "highlights": [
                 str(item).strip()
@@ -79,6 +82,8 @@ class DeliveryArtifactService:
             return 1
 
     def _render_html(self, manifest: dict[str, Any]) -> str:
+        if manifest.get("deliverables"):
+            return self._render_link_index_html(manifest)
         title = html.escape(str(manifest.get("title") or "任务交付包"))
         summary = html.escape(str(manifest.get("summary") or ""))
         generated_at = html.escape(str(manifest.get("generated_at") or ""))
@@ -137,6 +142,92 @@ class DeliveryArtifactService:
 </body>
 </html>
 """
+
+    def _render_link_index_html(self, manifest: dict[str, Any]) -> str:
+        title = html.escape(str(manifest.get("title") or "需求交付清单"))
+        summary = html.escape(str(manifest.get("summary") or ""))
+        generated_at = html.escape(str(manifest.get("generated_at") or ""))
+        deliverables = manifest.get("deliverables") if isinstance(manifest.get("deliverables"), list) else []
+        deliverables_html = "\n".join(
+            self._render_deliverable(item)
+            for item in deliverables
+            if isinstance(item, dict)
+        )
+        highlights_html = "\n".join(f"<li>{html.escape(str(item))}</li>" for item in manifest.get("highlights", []))
+        next_steps_html = "\n".join(f"<li>{html.escape(str(item))}</li>" for item in manifest.get("next_steps", []))
+        return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{title}</title>
+  <style>
+    body {{ margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #1e2f38; background: #f6f8f9; }}
+    main {{ max-width: 880px; margin: 0 auto; padding: 32px 20px 48px; }}
+    header {{ background: #16262e; color: white; border-radius: 12px; padding: 22px 24px; }}
+    h1 {{ margin: 0 0 8px; font-size: 26px; }}
+    h2 {{ margin-top: 28px; font-size: 19px; }}
+    .meta {{ color: #c2d1d7; }}
+    .grid {{ display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }}
+    .card {{ background: white; border: 1px solid #dce5e9; border-radius: 10px; padding: 16px; }}
+    .label {{ color: #60717a; font-size: 13px; }}
+    .ready {{ color: #116a7b; font-weight: 700; }}
+    .missing {{ color: #9a5b12; font-weight: 700; }}
+    .links {{ display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }}
+    .links a {{ background: #eaf3f5; border-radius: 999px; color: #116a7b; padding: 6px 10px; text-decoration: none; }}
+    a {{ color: #116a7b; }}
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>{title}</h1>
+      <div class="meta">Generated at {generated_at}</div>
+      <p>{summary}</p>
+    </header>
+    <h2>最新产物链接</h2>
+    <section class="grid">{deliverables_html}</section>
+    <h2>说明</h2>
+    <section class="card"><ul>{highlights_html}</ul></section>
+    <h2>下一步</h2>
+    <section class="card"><ul>{next_steps_html}</ul></section>
+  </main>
+</body>
+</html>
+"""
+
+    def _render_deliverable(self, item: dict[str, Any]) -> str:
+        label = html.escape(str(item.get("label") or item.get("artifact_type") or "产物"))
+        title = html.escape(str(item.get("title") or label))
+        status = str(item.get("status") or "missing")
+        detail = html.escape(str(item.get("detail") or ""))
+        css = "ready" if status == "ready" else "missing"
+        status_text = "已生成" if status == "ready" else "待补齐"
+        links = item.get("links") if isinstance(item.get("links"), list) else []
+        links_html = "".join(
+            self._render_named_link(link)
+            for link in links
+            if isinstance(link, dict)
+        )
+        if not links_html:
+            url = str(item.get("url") or "").strip()
+            links_html = self._render_named_link({"label": "打开", "url": url}) if url else ""
+        return (
+            '<article class="card">'
+            f'<div class="label">{label}</div>'
+            f'<div class="{css}">{status_text}</div>'
+            f'<strong>{title}</strong>'
+            f'<p>{detail}</p>'
+            f'<div class="links">{links_html}</div>'
+            '</article>'
+        )
+
+    def _render_named_link(self, link: dict[str, Any]) -> str:
+        label = html.escape(str(link.get("label") or "打开"))
+        url = str(link.get("url") or "").strip()
+        if not url:
+            return ""
+        return f'<a href="{html.escape(url)}">{label}</a>'
 
     def _render_check(self, item: dict[str, Any]) -> str:
         label = html.escape(str(item.get("label") or item.get("key") or "检查项"))

@@ -489,7 +489,7 @@ class DocumentPackageBuilder:
             lines.append("数据模块面向老师提供统计结果、风险提醒和后续运营分析。")
         if any(keyword in " ".join(sentences) for keyword in ("接口压力", "高峰")):
             lines.append("报名高峰期需要关注接口限流、排队、缓存或异步处理等容量保障策略。")
-        return self._unique_lines(lines) or ["技术方案需要围绕核心流程补充模块划分、数据结构、权限边界和异常处理策略。"]
+        return self._unique_lines(lines) or ["技术栈、数据库、部署方式和系统集成方案未在讨论中明确，需后续确认。"]
 
     def _milestone_lines(self, buckets: dict[str, list[str]], sentences: list[str]) -> list[str]:
         lines = []

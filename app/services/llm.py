@@ -195,6 +195,26 @@ class LLMService:
         result.setdefault("reason", "用户要求沉淀当前需求讨论")
         return result
 
+    def resolve_requirement_workspace(self, context: dict[str, Any]) -> dict[str, Any]:
+        self._ensure_configured()
+        payload = self._json_payload(
+            system_prompt=self.prompts.requirement_workspace_resolution(),
+            user_content=json.dumps(context, ensure_ascii=False),
+            temperature=0.0,
+        )
+        result = self._chat_json(
+            payload,
+            request_name="resolve_requirement_workspace",
+            timeout_seconds=settings.llm_memory_gate_timeout_seconds,
+        )
+        logger.info(
+            "LLM requirement workspace resolved: action=%s requirement_id=%s confidence=%s",
+            result.get("action"),
+            result.get("requirement_id"),
+            result.get("confidence"),
+        )
+        return result
+
     def plan_workspace_request(self, workspace_context: str, instruction: str) -> dict[str, Any]:
         self._ensure_configured()
         cache_key = self._plan_cache_key(workspace_context, instruction)
@@ -601,25 +621,48 @@ class LLMService:
                 continue
             heading = str(section.get("heading") or "").strip()
             paragraphs = section.get("paragraphs")
-            if not isinstance(paragraphs, list) or not cls._is_implementation_section_heading(heading):
+            if not isinstance(paragraphs, list):
                 sanitized_sections.append(section)
                 continue
 
-            kept: list[Any] = []
-            removed_specifics = False
-            for paragraph in paragraphs:
-                text = str(paragraph or "").strip()
-                if not text:
-                    continue
-                if cls._has_ungrounded_plan_specifics(text, grounding_text):
-                    removed_specifics = True
-                    continue
-                kept.append(paragraph)
-            if removed_specifics:
-                fallback = "具体实施计划、负责人和截止时间尚未在本轮讨论中明确，需后续确认。"
-                if fallback not in [str(item).strip() for item in kept]:
-                    kept.insert(0, fallback)
-            section = {**section, "paragraphs": kept or ["具体实施计划、负责人和截止时间尚未在本轮讨论中明确，需后续确认。"]}
+            if cls._is_implementation_section_heading(heading):
+                kept: list[Any] = []
+                removed_specifics = False
+                for paragraph in paragraphs:
+                    text = str(paragraph or "").strip()
+                    if not text:
+                        continue
+                    if cls._has_ungrounded_plan_specifics(text, grounding_text):
+                        removed_specifics = True
+                        continue
+                    kept.append(paragraph)
+                if removed_specifics:
+                    fallback = "具体实施计划、负责人和截止时间尚未在本轮讨论中明确，需后续确认。"
+                    if fallback not in [str(item).strip() for item in kept]:
+                        kept.insert(0, fallback)
+                section = {**section, "paragraphs": kept or ["具体实施计划、负责人和截止时间尚未在本轮讨论中明确，需后续确认。"]}
+                sanitized_sections.append(section)
+                continue
+
+            if cls._is_technical_section_heading(heading):
+                kept = []
+                removed_specifics = False
+                for paragraph in paragraphs:
+                    text = str(paragraph or "").strip()
+                    if not text:
+                        continue
+                    if cls._has_ungrounded_technical_specifics(text, grounding_text):
+                        removed_specifics = True
+                        continue
+                    kept.append(paragraph)
+                if removed_specifics:
+                    fallback = "技术栈、数据库、部署方式和系统集成方案尚未在当前需求讨论或文档中明确，需后续确认。"
+                    if fallback not in [str(item).strip() for item in kept]:
+                        kept.insert(0, fallback)
+                section = {**section, "paragraphs": kept or ["技术栈、数据库、部署方式和系统集成方案尚未在当前需求讨论或文档中明确，需后续确认。"]}
+                sanitized_sections.append(section)
+                continue
+
             sanitized_sections.append(section)
 
         result = {**result, "doc": {**doc, "sections": sanitized_sections}}
@@ -628,6 +671,59 @@ class LLMService:
     @staticmethod
     def _is_implementation_section_heading(heading: str) -> bool:
         return any(marker in heading for marker in ("实施计划", "分工", "里程碑", "交付计划"))
+
+    @classmethod
+    def _is_technical_section_heading(cls, heading: str) -> bool:
+        return any(marker in str(heading or "") for marker in ("技术方案", "技术架构", "系统架构", "实现方案"))
+
+    @classmethod
+    def _has_ungrounded_technical_specifics(cls, text: str, grounding_text: str) -> bool:
+        normalized_text = str(text or "").strip()
+        normalized_grounding = str(grounding_text or "")
+        if not normalized_text:
+            return False
+        if any(marker in normalized_text for marker in ("待确认", "未明确", "尚未明确", "需后续确认", "待后续确认")):
+            return False
+        text_lower = normalized_text.lower()
+        grounding_lower = normalized_grounding.lower()
+        concrete_terms = (
+            "前后端分离",
+            "vue",
+            "react",
+            "angular",
+            "spring boot",
+            "springboot",
+            "node.js",
+            "nodejs",
+            "express",
+            "nest.js",
+            "nestjs",
+            "django",
+            "flask",
+            "fastapi",
+            "mysql",
+            "postgresql",
+            "postgres",
+            "redis",
+            "mongodb",
+            "elasticsearch",
+            "docker",
+            "kubernetes",
+            "k8s",
+            "java",
+            "python",
+            "typescript",
+            "javascript",
+            "数据库采用",
+            "部署",
+            "系统集成",
+            "教务系统",
+        )
+        for term in concrete_terms:
+            term_lower = term.lower()
+            if term_lower in text_lower and term_lower not in grounding_lower:
+                return True
+        return False
 
     @classmethod
     def _has_ungrounded_plan_specifics(cls, text: str, grounding_text: str) -> bool:
@@ -684,6 +780,12 @@ class LLMService:
         context = str(workspace_context or "")
         blocks: list[str] = [str(instruction or "")]
         allowed_headings = (
+            "[当前需求工作区]",
+            "[当前需求讨论事实]",
+            "[当前需求已有产物]",
+            "[当前需求运行记录]",
+            "[需求边界约束]",
+            "[当前协作文档]",
             "[本次待同步讨论]",
             "[近期群聊讨论]",
             "[实施计划参考]",

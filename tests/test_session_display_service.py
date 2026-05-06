@@ -91,6 +91,24 @@ class SessionDisplayServiceTests(unittest.TestCase):
             ],
         )
 
+    def test_workbench_run_uses_group_like_session_id_for_label(self) -> None:
+        chat_api = _StubChatAPI({"oc_group_demo": "AI Group"})
+        service = SessionDisplayService(
+            memory_service=_StubMemoryService(),
+            user_api=_StubUserAPI(),
+            chat_api=chat_api,
+        )
+
+        label = service.resolve_session_label(
+            session_id="oc_group_demo",
+            source_type="workbench",
+            source_ref="run_123",
+            created_by="pilot_admin_web",
+        )
+
+        self.assertEqual(label, "AI Group")
+        self.assertEqual(chat_api.calls, ["oc_group_demo"])
+
     def test_p2p_falls_back_to_user_profile_and_caches(self) -> None:
         user_api = _StubUserAPI({("open_id", "ou_demo"): "李四"})
         service = SessionDisplayService(

@@ -76,6 +76,7 @@ class ArtifactRouteTests(unittest.TestCase):
 
         self.assertEqual(Path(response.path).name, "sample.svg")
         self.assertEqual(response.media_type, "image/svg+xml")
+        self.assertIn("attachment", response.headers["content-disposition"])
 
     def test_get_local_canvas_artifact_returns_html_file(self) -> None:
         old_cwd = os.getcwd()
@@ -190,6 +191,7 @@ class ArtifactRouteTests(unittest.TestCase):
                 engine.dispose()
 
         self.assertEqual(response.media_type, "image/svg+xml")
+        self.assertIn("attachment", response.headers["content-disposition"])
         self.assertIn("<svg", response.body.decode("utf-8"))
         self.assertIn("学生查看活动列表", response.body.decode("utf-8"))
 

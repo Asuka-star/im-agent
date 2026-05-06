@@ -53,7 +53,11 @@ class ResponseFormatter:
         if options:
             lines.append("可选方案：")
             for index, option in enumerate(options, start=1):
-                lines.append(f"{index}. {option}")
+                option_text = str(option or "").strip()
+                if _has_visible_index(option_text):
+                    lines.append(option_text)
+                else:
+                    lines.append(f"{index}. {option_text}")
         lines.append("你可以在工作台里直接确认，或继续回复我更具体的要求。")
         return "\n".join(lines)
 
@@ -489,3 +493,11 @@ class ResponseFormatter:
             ]
         )
         return "\n".join(lines)
+
+
+def _has_visible_index(value: str) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    first = text.split(maxsplit=1)[0]
+    return first.rstrip(".、)）").isdigit()

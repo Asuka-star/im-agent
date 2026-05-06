@@ -34,6 +34,8 @@ def init_db() -> None:
         Memory,
         MemoryChunk,
         Message,
+        Requirement,
+        RequirementSource,
         Session,
         Task,
         TaskChangeLog,
@@ -136,4 +138,13 @@ def _run_lightweight_migrations() -> None:
                         "CREATE INDEX IF NOT EXISTS ix_memory_chunks_embedding_hnsw "
                         "ON memory_chunks USING hnsw (embedding vector_cosine_ops)"
                     )
+                )
+
+    if "task_runs" in tables:
+        task_run_columns = {column["name"] for column in inspector.get_columns("task_runs")}
+        if "requirement_id" not in task_run_columns:
+            with engine.begin() as connection:
+                connection.execute(text("ALTER TABLE task_runs ADD COLUMN requirement_id VARCHAR(64)"))
+                connection.execute(
+                    text("CREATE INDEX IF NOT EXISTS ix_task_runs_requirement_id ON task_runs (requirement_id)")
                 )

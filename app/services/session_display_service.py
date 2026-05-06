@@ -46,6 +46,13 @@ class SessionDisplayService:
             if label:
                 return label
 
+        if normalized_source_type != "p2p" and self._looks_like_group_chat_id(
+            normalized_session_id
+        ):
+            label = self._resolve_group_label(normalized_session_id)
+            if label:
+                return label
+
         if normalized_source_type == "p2p" and normalized_created_by:
             label = self._resolve_user_label(normalized_created_by)
             if label:
@@ -75,6 +82,10 @@ class SessionDisplayService:
         if label:
             self._set_cache(cache_key, label)
         return label
+
+    @staticmethod
+    def _looks_like_group_chat_id(value: str) -> bool:
+        return value.startswith("oc_")
 
     def _resolve_user_label(self, identifier: str) -> str | None:
         cache_key = f"user:{identifier}"

@@ -308,6 +308,9 @@ class ExecutableFakeWorkflow(FakeWorkflow):
     def graph_context_artifacts_loader(self, session_id, task_run_id):
         return list(self.context_artifacts)
 
+    def _requirement_workspace_context_for_task_run(self, task_run_id):
+        return ""
+
     def _pause_for_clarification(
         self,
         message,
@@ -1333,7 +1336,7 @@ class GraphRunnerTests(unittest.TestCase):
         self.assertEqual(checks["ShieldAgent"]["status"], "passed")
         self.assertIn("slides exporter unavailable", execution["review"]["risks"])
 
-    def test_task_graph_bundles_generated_artifacts_for_delivery(self) -> None:
+    def test_task_graph_delivery_does_not_generate_requested_outputs(self) -> None:
         workflow = ExecutableFakeWorkflow(
             FakeLLMService(
                 {
@@ -1341,8 +1344,8 @@ class GraphRunnerTests(unittest.TestCase):
                     "route": "delivery",
                     "operation": "generate",
                     "object": "delivery",
-                    "requested_outputs": ["slides"],
-                    "artifact_goals": {"slides": "make a delivery deck"},
+                    "requested_outputs": ["doc", "slides"],
+                    "artifact_goals": {"doc": "make a delivery document", "slides": "make a delivery deck"},
                     "confidence": 0.95,
                 }
             )
@@ -1357,11 +1360,10 @@ class GraphRunnerTests(unittest.TestCase):
 
         self.assertIsNotNone(result)
         self.assertEqual(result["mode"], "delivery")
-        self.assertEqual([item["artifact_type"] for item in result["artifacts"]], ["slides", "delivery_bundle"])
-        self.assertEqual(workflow.delivery_artifact_service.persisted[0]["task_run_id"], "run_1")
-        manifest = workflow.delivery_artifact_service.persisted[0]["manifest"]
-        self.assertEqual(len(manifest["artifacts"]), 1)
-        self.assertEqual(manifest["artifacts"][0]["artifact_type"], "slides")
+        self.assertEqual(result["artifacts"], [])
+        self.assertEqual(workflow.doc_execution.calls, [])
+        self.assertEqual(workflow.slides_execution.calls, [])
+        self.assertEqual(workflow.delivery_artifact_service.persisted, [])
 
     def test_task_graph_bundles_existing_context_artifacts_for_delivery(self) -> None:
         workflow = ExecutableFakeWorkflow(
@@ -1377,6 +1379,11 @@ class GraphRunnerTests(unittest.TestCase):
             )
         )
         workflow.context_artifacts = [
+            {
+                "artifact_type": "document",
+                "title": "Existing doc",
+                "url": "/doc-existing",
+            },
             {
                 "artifact_type": "slides_package",
                 "title": "Existing deck",
@@ -1396,7 +1403,100 @@ class GraphRunnerTests(unittest.TestCase):
         self.assertEqual(result["mode"], "delivery")
         self.assertEqual([item["artifact_type"] for item in result["artifacts"]], ["delivery_bundle"])
         manifest = workflow.delivery_artifact_service.persisted[0]["manifest"]
-        self.assertEqual(manifest["artifacts"][0]["title"], "Existing deck")
+        self.assertEqual([item["title"] for item in manifest["artifacts"]], ["Existing doc", "Existing deck"])
+
+    def test_task_graph_bundles_current_document_only_for_delivery(self) -> None:
+        workflow = ExecutableFakeWorkflow(
+            FakeLLMService(
+                {
+                    "mode": "workspace_action",
+                    "route": "delivery",
+                    "operation": "generate",
+                    "object": "delivery",
+                    "requested_outputs": [],
+                    "confidence": 0.95,
+                }
+            )
+        )
+
+        result = GraphRunner(workflow).run_task_graph(
+            message("生成交付包"),
+            task_run_id="run_1",
+            workspace_context="workspace",
+            active_episode_id=None,
+            current_document={"document_id": "doc_1", "title": "实验室设备预约系统需求方案", "url": "https://doc"},
+        )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["mode"], "delivery")
+        self.assertIn("交付包", result["reply_preview"])
+        manifest = workflow.delivery_artifact_service.persisted[0]["manifest"]
+        self.assertEqual([item["artifact_type"] for item in manifest["artifacts"]], ["document"])
+        self.assertEqual({item["key"]: item["status"] for item in manifest["deliverables"]}["document"], "ready")
+        self.assertEqual({item["key"]: item["status"] for item in manifest["deliverables"]}["slides"], "missing")
+
+    def test_delivery_route_does_not_generate_outputs_without_explicit_artifact_goals(self) -> None:
+        workflow = ExecutableFakeWorkflow(
+            FakeLLMService(
+                {
+                    "mode": "workspace_action",
+                    "route": "delivery",
+                    "operation": "generate",
+                    "object": "delivery",
+                    "requested_outputs": ["doc", "slides", "canvas"],
+                    "confidence": 0.9,
+                }
+            )
+        )
+        workflow.context_artifacts = [
+            {
+                "artifact_type": "canvas",
+                "title": "Existing canvas",
+                "url": "/canvas-existing",
+                "preview": {"schema": "im-agent.canvas.v1"},
+            }
+        ]
+
+        result = GraphRunner(workflow).run_task_graph(
+            message("基于刚才那个方案再生成一份交付包"),
+            task_run_id="run_1",
+            workspace_context="workspace",
+            active_episode_id=None,
+        )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["mode"], "delivery")
+        self.assertEqual(workflow.doc_execution.calls, [])
+        self.assertEqual(workflow.slides_execution.calls, [])
+        self.assertEqual(workflow.canvas_execution.calls, [])
+        self.assertIn("交付包", result["reply_preview"])
+        manifest = workflow.delivery_artifact_service.persisted[0]["manifest"]
+        self.assertEqual([item["artifact_type"] for item in manifest["artifacts"]], ["canvas"])
+        self.assertEqual({item["key"]: item["status"] for item in manifest["deliverables"]}["canvas"], "ready")
+
+    def test_artifact_worker_uses_requirement_context_when_available(self) -> None:
+        workflow = ExecutableFakeWorkflow(
+            FakeLLMService(
+                {
+                    "mode": "workspace_action",
+                    "route": "canvas",
+                    "operation": "generate",
+                    "object": "workspace",
+                    "requested_outputs": ["canvas"],
+                    "confidence": 0.9,
+                }
+            )
+        )
+        workflow._requirement_workspace_context_for_task_run = lambda task_run_id: "实验室设备预约系统上下文"
+
+        GraphRunner(workflow).run_task_graph(
+            message("基于实验室设备预约系统画流程图"),
+            task_run_id="run_1",
+            workspace_context="混合群聊上下文",
+            active_episode_id=None,
+        )
+
+        self.assertEqual(workflow.canvas_execution.calls[0]["kwargs"]["workspace_context"], "实验室设备预约系统上下文")
 
     def test_task_graph_revises_existing_slides_artifact(self) -> None:
         workflow = ExecutableFakeWorkflow(

@@ -45,7 +45,7 @@ if ($All) {
 import json
 from app.services.memory_service import MemoryService
 from app.db.database import SessionLocal
-from app.db.models import AppSetting
+from app.db.models import AppSetting, Requirement, RequirementSource, TaskRun
 
 def clear_all_session_documents():
     with SessionLocal() as session:
@@ -64,6 +64,19 @@ def clear_all_session_documents():
         session.commit()
         return {"scope": "all", "deleted_app_settings": deleted}
 
+def clear_all_requirements():
+    with SessionLocal() as session:
+        deleted = {}
+        deleted["task_run_requirement_links"] = (
+            session.query(TaskRun)
+            .filter(TaskRun.requirement_id.isnot(None))
+            .update({"requirement_id": None}, synchronize_session=False)
+        )
+        deleted["requirement_sources"] = session.query(RequirementSource).delete(synchronize_session=False)
+        deleted["requirements"] = session.query(Requirement).delete(synchronize_session=False)
+        session.commit()
+        return {"scope": "all", "deleted": deleted}
+
 result = {
     "memory": MemoryService().clear_all_memory(keep_aliases=$keepAliases),
     "session_documents": (
@@ -71,6 +84,7 @@ result = {
         if $($KeepDocuments.ToString())
         else clear_all_session_documents()
     ),
+    "requirements": clear_all_requirements(),
 }
 print(json.dumps(result, ensure_ascii=False))
 "@
@@ -82,7 +96,7 @@ else {
 import json
 from app.services.memory_service import MemoryService
 from app.db.database import SessionLocal
-from app.db.models import AppSetting
+from app.db.models import AppSetting, Requirement, RequirementSource, TaskRun
 
 def clear_session_documents(session_id):
     keys = [f"session_doc:{session_id}", f"session_docs:{session_id}"]
@@ -100,6 +114,49 @@ def clear_session_documents(session_id):
             "keys": keys,
         }
 
+def clear_session_requirements(session_id):
+    with SessionLocal() as session:
+        requirement_ids = {
+            row[0]
+            for row in session.query(Requirement.requirement_id)
+            .filter(Requirement.primary_session_id == session_id)
+            .all()
+        }
+        requirement_ids.update(
+            row[0]
+            for row in session.query(RequirementSource.requirement_id)
+            .filter(RequirementSource.session_id == session_id)
+            .all()
+        )
+        deleted = {
+            "task_run_requirement_links": 0,
+            "requirement_sources": 0,
+            "requirements": 0,
+        }
+        if requirement_ids:
+            deleted["task_run_requirement_links"] = (
+                session.query(TaskRun)
+                .filter(TaskRun.requirement_id.in_(requirement_ids))
+                .update({"requirement_id": None}, synchronize_session=False)
+            )
+            deleted["requirement_sources"] = (
+                session.query(RequirementSource)
+                .filter(RequirementSource.requirement_id.in_(requirement_ids))
+                .delete(synchronize_session=False)
+            )
+            deleted["requirements"] = (
+                session.query(Requirement)
+                .filter(Requirement.requirement_id.in_(requirement_ids))
+                .delete(synchronize_session=False)
+            )
+        session.commit()
+        return {
+            "scope": "session",
+            "session_id": session_id,
+            "requirement_ids": sorted(requirement_ids),
+            "deleted": deleted,
+        }
+
 result = {
     "memory": MemoryService().clear_session_memory(session_id=$sessionJson, keep_aliases=$keepAliases),
     "session_documents": (
@@ -107,6 +164,7 @@ result = {
         if $($KeepDocuments.ToString())
         else clear_session_documents($sessionJson)
     ),
+    "requirements": clear_session_requirements($sessionJson),
 }
 print(json.dumps(result, ensure_ascii=False))
 "@
@@ -130,3 +188,4 @@ if ($KeepDocuments) {
 else {
     Write-Host "Remembered Feishu document pointers/history were cleared. Remote Feishu docs were not deleted." -ForegroundColor Green
 }
+Write-Host "Requirement workspaces and requirement source links were cleared for the selected scope." -ForegroundColor Green

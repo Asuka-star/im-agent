@@ -80,6 +80,7 @@ class ConfirmationRequestRecord(BaseModel):
 
 class TaskRunSummary(BaseModel):
     task_run_id: str
+    requirement_id: str | None = None
     session_id: str
     session_label: str | None = None
     source_type: str

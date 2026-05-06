@@ -178,7 +178,7 @@ class FeishuCardActionTests(unittest.TestCase):
         )
         payload = {
             "header": {"event_type": "card.action.trigger"},
-            "event": {"message": {"chat_id": "oc_1"}, "action": {"value": value}},
+            "event": {"message": {"message_id": "card_msg_duplicate", "chat_id": "oc_1"}, "action": {"value": value}},
         }
 
         first = service.handle_raw_event(payload)
@@ -187,6 +187,8 @@ class FeishuCardActionTests(unittest.TestCase):
         self.assertEqual(first["msg"], "handled")
         self.assertEqual(second["msg"], "duplicate_ignored")
         self.assertEqual(len(workflow.task_run_service.steps), 1)
+        self.assertEqual(workflow.message_api.patched_cards[-1]["message_id"], "card_msg_duplicate")
+        self.assertEqual(workflow.message_api.patched_cards[-1]["card"]["header"]["template"], "grey")
 
     def test_select_clarification_option_resumes_task_run_and_patches_card(self) -> None:
         workflow = _FakeWorkflow([TaskItem(title="Backend development", owner="Alice", status="draft")])
@@ -202,22 +204,26 @@ class FeishuCardActionTests(unittest.TestCase):
             },
         )
 
-        result = service.handle_raw_event(
-            {
-                "header": {"event_type": "card.action.trigger", "event_id": "evt_2"},
-                "event": {
-                    "message": {"message_id": "card_msg_2", "chat_id": "oc_1"},
-                    "operator": {"user_id": "ou_1"},
-                    "action": {"value": value},
-                },
-            }
-        )
+        with patch("app.services.cards.action_handler.settings.feishu_reply_enabled", True):
+            result = service.handle_raw_event(
+                {
+                    "header": {"event_type": "card.action.trigger", "event_id": "evt_2"},
+                    "event": {
+                        "message": {"message_id": "card_msg_2", "chat_id": "oc_1"},
+                        "operator": {"user_id": "ou_1"},
+                        "action": {"value": value},
+                    },
+                }
+            )
 
         self.assertEqual(result["msg"], "handled")
         self.assertTrue(result["data"]["resumed"])
         self.assertEqual(workflow.resume_request["confirmation_id"], "confirm_1")
         self.assertIn("Bob", workflow.resume_request["answer_value"])
         self.assertEqual(workflow.message_api.patched_cards[0]["message_id"], "card_msg_2")
+        self.assertEqual(workflow.message_api.patched_cards[0]["card"]["header"]["template"], "blue")
+        self.assertTrue(workflow.message_api.text_messages)
+        self.assertIn("Bob", workflow.message_api.text_messages[0]["text"])
 
     def test_select_clarification_option_marks_task_run_failed_when_resume_fails(self) -> None:
         workflow = _FakeWorkflow([TaskItem(title="Backend development", owner="Alice", status="draft")])
@@ -249,7 +255,7 @@ class FeishuCardActionTests(unittest.TestCase):
         self.assertFalse(result["data"]["resumed"])
         self.assertEqual(workflow.task_run_service.updates[-1][1]["status"], "failed")
         self.assertEqual(workflow.task_run_service.updates[-1][1]["stage"], "confirmation_resume_failed")
-        self.assertIn("没有自动继续", workflow.message_api.patched_cards[0]["card"]["elements"][0]["text"]["content"])
+        self.assertIn("没有自动继续", workflow.message_api.patched_cards[-1]["card"]["elements"][0]["text"]["content"])
 
     def test_legacy_top_level_card_callback_payload_is_supported(self) -> None:
         workflow = _FakeWorkflow([TaskItem(title="Backend development", owner="Alice", status="draft")])

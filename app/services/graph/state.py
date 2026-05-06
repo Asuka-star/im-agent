@@ -161,10 +161,11 @@ class DAGPlan(BaseModel):
         route = _normalize_route(command.route)
         if route == "delivery":
             dependencies: list[str] = []
-            for output in outputs:
-                step = _plan_step(worker=output, operation="generate", command=command)
-                steps.append(step)
-                dependencies.append(step.step_id)
+            if _delivery_should_generate_outputs(command, outputs):
+                for output in outputs:
+                    step = _plan_step(worker=output, operation="generate", command=command)
+                    steps.append(step)
+                    dependencies.append(step.step_id)
             steps.append(
                 _plan_step(
                     worker="delivery",
@@ -274,6 +275,10 @@ def _plan_step(
         destructive=command.destructive,
         idempotency_key=hashlib.sha256(idempotency_source.encode("utf-8")).hexdigest()[:24],
     )
+
+
+def _delivery_should_generate_outputs(command: WorkspaceCommand, outputs: list[str]) -> bool:
+    return False
 
 
 def _normalize_mode(value: Any, *, operation: str, object_name: str) -> str:

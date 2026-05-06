@@ -97,7 +97,7 @@ class ContextualNextActionServiceTests(unittest.TestCase):
         self.assertIn("generate_canvas", action_types)
         self.assertLessEqual(len(bundle.recommendations), 3)
 
-    def test_slides_without_delivery_recommends_bundle_delivery(self) -> None:
+    def test_complete_core_artifacts_can_recommend_bundle_delivery(self) -> None:
         bundle = self.service.build_for_task_run(
             _detail(
                 artifacts=[
@@ -107,9 +107,20 @@ class ContextualNextActionServiceTests(unittest.TestCase):
                 session_documents=[_document()],
             )
         )
+        action_types = [item.action_type for item in bundle.recommendations]
 
-        self.assertEqual(bundle.recommendations[0].action_type, "bundle_delivery")
-        self.assertIn("bundle_delivery", [item.action_type for item in bundle.recommendations])
+        self.assertIn("bundle_delivery", action_types)
+        self.assertNotEqual(bundle.recommendations[0].action_type, "bundle_delivery")
+
+    def test_slides_without_document_does_not_recommend_bundle_delivery(self) -> None:
+        bundle = self.service.build_for_task_run(
+            _detail(
+                artifacts=[_artifact("slides_package")],
+                session_documents=[],
+            )
+        )
+
+        self.assertNotIn("bundle_delivery", [item.action_type for item in bundle.recommendations])
 
     def test_sync_failure_recommends_retry_and_avoids_share(self) -> None:
         bundle = self.service.build_for_task_run(

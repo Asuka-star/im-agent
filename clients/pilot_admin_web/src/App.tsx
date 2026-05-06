@@ -30,9 +30,13 @@ import {
   bundleDelivery,
   confirmTaskRun,
   connectSocket,
+  createRequirement,
+  getRequirement,
   getRecommendations,
   getTaskRun,
+  listRequirements,
   listTaskRuns,
+  reassignTaskRunRequirement,
   reviseDocument,
   reviseSlides,
 } from './api';
@@ -57,6 +61,9 @@ import type {
   JsonMap,
   NextActionBundle,
   RealtimeEvent,
+  RequirementDetail,
+  RequirementSummary,
+  SessionDocumentRecord,
   TaskRunDetail,
   TaskRunStepRecord,
   TaskRunSummary,
@@ -81,6 +88,9 @@ type SectionToggleProps = {
 
 export function App() {
   const [taskRuns, setTaskRuns] = useState<TaskRunSummary[]>([]);
+  const [requirements, setRequirements] = useState<RequirementSummary[]>([]);
+  const [selectedRequirementId, setSelectedRequirementId] = useState<string>('');
+  const [requirementDetail, setRequirementDetail] = useState<RequirementDetail | null>(null);
   const [selectedId, setSelectedId] = useState<string>('');
   const [detail, setDetail] = useState<TaskRunDetail | null>(null);
   const [recommendations, setRecommendations] = useState<NextActionBundle | null>(null);
@@ -88,6 +98,7 @@ export function App() {
   const [searchText, setSearchText] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
   const [listLoading, setListLoading] = useState(false);
+  const [requirementLoading, setRequirementLoading] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
   const [submitting, setSubmitting] = useState('');
   const [error, setError] = useState('');
@@ -102,6 +113,16 @@ export function App() {
       if (index >= 0) next[index] = incoming;
       else next.unshift(incoming);
       return next.sort(compareRunTime);
+    });
+  }, []);
+
+  const mergeRequirementSummary = useCallback((incoming: RequirementSummary) => {
+    setRequirements((current) => {
+      const next = [...current];
+      const index = next.findIndex((item) => item.requirement_id === incoming.requirement_id);
+      if (index >= 0) next[index] = incoming;
+      else next.unshift(incoming);
+      return next.sort(compareRequirementTime);
     });
   }, []);
 
@@ -125,6 +146,33 @@ export function App() {
     }
   }, [mergeSummary]);
 
+  const loadRequirement = useCallback(async (requirementId: string, quiet = false) => {
+    if (!quiet) setRequirementLoading(true);
+    setError('');
+    try {
+      const nextDetail = await getRequirement(requirementId);
+      const runs = [...nextDetail.task_runs].sort(compareRunTime);
+      setSelectedRequirementId(requirementId);
+      setRequirementDetail({ ...nextDetail, task_runs: runs });
+      mergeRequirementSummary(summaryFromRequirementDetail(nextDetail));
+      setLastUpdatedAt(new Date());
+      const selectedStillInRequirement = selectedId && runs.some((item) => item.task_run_id === selectedId);
+      if (selectedStillInRequirement) {
+        await loadDetail(selectedId, true);
+      } else if (runs[0]) {
+        await loadDetail(runs[0].task_run_id, true);
+      } else {
+        setSelectedId('');
+        setDetail(null);
+        setRecommendations(null);
+      }
+    } catch (nextError) {
+      setError(errorText(nextError));
+    } finally {
+      setRequirementLoading(false);
+    }
+  }, [loadDetail, mergeRequirementSummary, selectedId]);
+
   const refreshList = useCallback(async (keepSelection = true) => {
     setListLoading(true);
     setError('');
@@ -137,10 +185,13 @@ export function App() {
       setTaskRuns(sorted);
       setLastUpdatedAt(new Date());
       const selectedStillExists = keepSelection && selectedId && sorted.some((item) => item.task_run_id === selectedId);
+      const selectedRequirementRuns = selectedRequirementId
+        ? sorted.filter((item) => item.requirement_id === selectedRequirementId)
+        : sorted;
       if (selectedStillExists) {
         await loadDetail(selectedId, true);
-      } else if (sorted[0]) {
-        await loadDetail(sorted[0].task_run_id, true);
+      } else if (selectedRequirementRuns[0]) {
+        await loadDetail(selectedRequirementRuns[0].task_run_id, true);
       } else {
         setSelectedId('');
         setDetail(null);
@@ -151,19 +202,68 @@ export function App() {
     } finally {
       setListLoading(false);
     }
-  }, [loadDetail, selectedId, sessionQuery]);
+  }, [loadDetail, selectedId, selectedRequirementId, sessionQuery]);
+
+  const refreshRequirements = useCallback(async (keepSelection = true) => {
+    setRequirementLoading(true);
+    setError('');
+    try {
+      const items = await listRequirements({
+        query: sessionQuery.trim() || undefined,
+        status: 'active',
+        limit: 80,
+      });
+      const sorted = items.sort(compareRequirementTime);
+      setRequirements(sorted);
+      setLastUpdatedAt(new Date());
+      const selectedStillExists = keepSelection && selectedRequirementId && sorted.some((item) => item.requirement_id === selectedRequirementId);
+      if (selectedStillExists) {
+        await loadRequirement(selectedRequirementId, true);
+      } else if (sorted[0]) {
+        await loadRequirement(sorted[0].requirement_id, true);
+      } else {
+        setSelectedRequirementId('');
+        setRequirementDetail(null);
+      }
+    } catch (nextError) {
+      setError(errorText(nextError));
+    } finally {
+      setRequirementLoading(false);
+    }
+  }, [loadRequirement, selectedRequirementId, sessionQuery]);
 
   useEffect(() => {
-    refreshList(false);
+    void (async () => {
+      await refreshList(false);
+      await refreshRequirements(false);
+    })();
   }, []);
 
   useEffect(() => {
     const close = connectSocket('/ws/task-runs-feed?limit=80', (event) => {
+      if (Array.isArray(event.requirements)) {
+        setRequirements(event.requirements.sort(compareRequirementTime));
+      }
+      if (event.requirement) {
+        const incoming = 'task_runs' in event.requirement
+          ? summaryFromRequirementDetail(event.requirement as RequirementDetail)
+          : event.requirement as RequirementSummary;
+        mergeRequirementSummary(incoming);
+        if (selectedRequirementId === incoming.requirement_id) {
+          void loadRequirement(incoming.requirement_id, true);
+        }
+      }
       handleFeedEvent(event, setTaskRuns, selectedId, loadDetail);
+      const incomingRequirementId = event.task_run && !('steps' in event.task_run)
+        ? (event.task_run as TaskRunSummary).requirement_id
+        : null;
+      if (selectedRequirementId && incomingRequirementId === selectedRequirementId) {
+        void loadRequirement(selectedRequirementId, true);
+      }
       setLastUpdatedAt(new Date());
     }, (state) => setFeedState(state as ConnectionState));
     return close;
-  }, [loadDetail, selectedId]);
+  }, [loadDetail, loadRequirement, mergeRequirementSummary, selectedId, selectedRequirementId]);
 
   useEffect(() => {
     if (!selectedId) return undefined;
@@ -173,23 +273,35 @@ export function App() {
       setDetail(payload as TaskRunDetail);
       mergeSummary(summaryFromDetail(payload as TaskRunDetail));
       getRecommendations(selectedId).then(setRecommendations).catch(() => undefined);
+      if (selectedRequirementId && (payload as TaskRunDetail).requirement_id === selectedRequirementId) {
+        void loadRequirement(selectedRequirementId, true);
+      }
       setLastUpdatedAt(new Date());
     }, (state) => setTaskState(state as ConnectionState));
     return close;
-  }, [mergeSummary, selectedId]);
+  }, [loadRequirement, mergeSummary, selectedId, selectedRequirementId]);
 
   useEffect(() => {
     if (feedState === 'polling' || feedState === 'error' || taskState === 'polling' || taskState === 'error') {
-      const timer = window.setInterval(() => refreshList(true), 8000);
+      const timer = window.setInterval(() => {
+        void refreshList(true);
+        void refreshRequirements(true);
+      }, 8000);
       return () => window.clearInterval(timer);
     }
     return undefined;
-  }, [feedState, refreshList, taskState]);
+  }, [feedState, refreshList, refreshRequirements, taskState]);
+
+  const activeRuns = useMemo(() => {
+    return selectedRequirementId && requirementDetail
+      ? requirementDetail.task_runs
+      : taskRuns;
+  }, [requirementDetail, selectedRequirementId, taskRuns]);
 
   const visibleRuns = useMemo(() => {
     const keyword = searchText.trim().toLowerCase();
     const sessionKeyword = sessionQuery.trim().toLowerCase();
-    return taskRuns.filter((item) => {
+    return activeRuns.filter((item) => {
       if (statusFilter !== 'all' && item.status !== statusFilter) return false;
       if (sessionKeyword) {
         const sessionHaystack = [
@@ -213,10 +325,13 @@ export function App() {
         item.latest_reply_preview || '',
       ].join(' ').toLowerCase().includes(keyword);
     });
-  }, [searchText, statusFilter, taskRuns]);
+  }, [activeRuns, searchText, sessionQuery, statusFilter]);
 
   const sessionSummaries = useMemo(() => buildSessionSummaries(taskRuns), [taskRuns]);
-  const statusOptions = useMemo(() => buildStatusOptions(taskRuns), [taskRuns]);
+  const statusOptions = useMemo(() => buildStatusOptions(activeRuns), [activeRuns]);
+  const runEmptyTitle = selectedRequirementId && requirementDetail && activeRuns.length === 0
+    ? '这个需求还没有任务运行'
+    : '没有匹配的任务';
 
   const runAction = async (key: string, action: () => Promise<unknown>) => {
     setSubmitting(key);
@@ -230,11 +345,58 @@ export function App() {
         mergeSummary(summaryFromDetail(nextDetail));
       }
       await refreshList(true);
+      await refreshRequirements(true);
     } catch (nextError) {
       setError(errorText(nextError));
     } finally {
       setSubmitting('');
     }
+  };
+
+  const reassignRequirement = async (taskRunId: string, requirementId: string) => {
+    setSubmitting(`requirement:${taskRunId}`);
+    setError('');
+    try {
+      await reassignTaskRunRequirement(requirementId, taskRunId);
+      await refreshList(true);
+      await refreshRequirements(true);
+      await loadRequirement(requirementId, true);
+      await loadDetail(taskRunId, true);
+    } catch (nextError) {
+      setError(errorText(nextError));
+    } finally {
+      setSubmitting('');
+    }
+  };
+
+  const createRequirementFromTask = async (taskRun: TaskRunDetail, title: string) => {
+    setSubmitting(`requirement:create:${taskRun.task_run_id}`);
+    setError('');
+    try {
+      const created = await createRequirement({
+        title,
+        summary: taskRun.latest_summary || taskRun.latest_reply_preview || null,
+        primarySessionId: taskRun.session_id,
+        createdBy: 'pilot_admin_web',
+      });
+      mergeRequirementSummary(created);
+      await reassignTaskRunRequirement(created.requirement_id, taskRun.task_run_id);
+      await refreshList(true);
+      await refreshRequirements(true);
+      await loadRequirement(created.requirement_id, true);
+      await loadDetail(taskRun.task_run_id, true);
+    } catch (nextError) {
+      setError(errorText(nextError));
+    } finally {
+      setSubmitting('');
+    }
+  };
+
+  const refreshWorkspace = (keepSelection = true) => {
+    void (async () => {
+      await refreshList(keepSelection);
+      await refreshRequirements(keepSelection);
+    })();
   };
 
   return (
@@ -254,14 +416,14 @@ export function App() {
         <div className="hero-controls">
           <label className="hero-input">
             <span>会话名称查询</span>
-            <input value={sessionQuery} onChange={(event) => setSessionQuery(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && refreshList(false)} placeholder="输入群名或人名关键词" />
+            <input value={sessionQuery} onChange={(event) => setSessionQuery(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && refreshWorkspace(false)} placeholder="输入群名或人名关键词" />
           </label>
-          <button className="hero-button primary" onClick={() => refreshList(false)}>
+          <button className="hero-button primary" onClick={() => refreshWorkspace(false)}>
             <Filter size={17} />应用过滤
           </button>
-          <button className="hero-button ghost" onClick={() => refreshList(true)} disabled={listLoading}>
-            {listLoading ? <Loader2 className="spin" size={17} /> : <RefreshCw size={17} />}
-            {listLoading ? '同步中...' : '刷新任务'}
+          <button className="hero-button ghost" onClick={() => refreshWorkspace(true)} disabled={listLoading || requirementLoading}>
+            {listLoading || requirementLoading ? <Loader2 className="spin" size={17} /> : <RefreshCw size={17} />}
+            {listLoading || requirementLoading ? '同步中...' : '刷新工作区'}
           </button>
           <span className="info-chip"><CheckCircle2 size={16} />{apiBaseUrl}</span>
           <span className="info-chip"><Clock3 size={16} />{lastUpdatedAt ? `最后同步 ${shortTime(lastUpdatedAt.toISOString())}` : '尚未同步'}</span>
@@ -277,9 +439,20 @@ export function App() {
       )}
 
       <section className="workspace-grid">
-        <aside className="run-list-panel">
-          <PanelHeading title="任务运行面板" subtitle="展示当前会话里的任务实例、阶段和运行状态。" />
-          <StatsStrip runs={taskRuns} />
+        <aside className="requirement-panel">
+          <PanelHeading title="需求工作区" subtitle="按需求聚合 IM 对话、文档修改、方案讨论和演示稿产物。" />
+          <RequirementOverview
+            items={requirements}
+            activeRequirementId={selectedRequirementId}
+            detail={requirementDetail}
+            loading={requirementLoading}
+            onSelect={(requirementId) => loadRequirement(requirementId)}
+            onClear={() => {
+              setSelectedRequirementId('');
+              setRequirementDetail(null);
+              void refreshList(true);
+            }}
+          />
 
           <SessionOverview
             items={sessionSummaries}
@@ -287,6 +460,14 @@ export function App() {
             onSelect={(value) => setSessionQuery(value)}
             onClear={() => setSessionQuery('')}
           />
+        </aside>
+
+        <aside className="run-list-panel">
+          <PanelHeading
+            title={selectedRequirementId ? '需求下的任务' : '全部任务运行'}
+            subtitle={requirementDetail ? requirementDetail.title : '选择需求后，这里只展示该需求下面的 taskrun。'}
+          />
+          <StatsStrip runs={activeRuns} />
 
           <div className="filter-row">
             <label className="input-shell">
@@ -309,7 +490,7 @@ export function App() {
 
           <div className="run-list">
             {listLoading && taskRuns.length === 0 ? <EmptyState title="加载任务运行中" /> : null}
-            {!listLoading && visibleRuns.length === 0 ? <EmptyState title="没有匹配的任务" /> : null}
+            {!listLoading && visibleRuns.length === 0 ? <EmptyState title={runEmptyTitle} /> : null}
             {visibleRuns.map((item) => (
               <RunListItem key={item.task_run_id} item={item} selected={item.task_run_id === selectedId} onClick={() => loadDetail(item.task_run_id)} />
             ))}
@@ -317,20 +498,32 @@ export function App() {
         </aside>
 
         <section className="detail-panel">
-          <PanelHeading title="任务详情与产物" subtitle="步骤时间线、生成产物、确认请求都会从这里实时更新。" />
+          <PanelHeading title="需求与任务详情" subtitle="需求级上下文、任务时间线、生成产物和确认请求都会从这里实时更新。" />
+          {requirementDetail && (
+            <RequirementDetailCard
+              detail={requirementDetail}
+              selectedTaskId={selectedId}
+              onSelectTask={(taskRunId) => loadDetail(taskRunId)}
+            />
+          )}
           {detailLoading ? (
             <div className="center-state"><Loader2 className="spin" />加载详情</div>
           ) : detail ? (
             <TaskDetail
               detail={detail}
               recommendations={recommendations}
+              requirements={requirements}
+              selectedRequirementId={selectedRequirementId}
               submitting={submitting}
+              showArtifacts={!requirementDetail}
               onBundle={() => runAction('bundle', () => bundleDelivery(detail.task_run_id))}
               onConfirm={(confirmation, option) => runAction(`confirm:${confirmation.confirmation_id}`, () => confirmTaskRun(detail.task_run_id, confirmation.confirmation_id, option))}
+              onCreateRequirement={(title) => createRequirementFromTask(detail, title)}
+              onReassignRequirement={(requirementId) => reassignRequirement(detail.task_run_id, requirementId)}
               onReviseDocument={(instruction, documentId) => runAction('revise-doc', () => reviseDocument(detail.task_run_id, instruction, documentId))}
               onReviseSlides={(artifactId, instruction) => runAction(`revise-slides:${artifactId}`, () => reviseSlides(detail.task_run_id, instruction, artifactId))}
             />
-          ) : (
+          ) : requirementDetail && requirementDetail.task_runs.length === 0 ? null : (
             <EmptyState title="未选择任务" />
           )}
         </section>
@@ -342,16 +535,28 @@ export function App() {
 function TaskDetail(props: {
   detail: TaskRunDetail;
   recommendations: NextActionBundle | null;
+  requirements: RequirementSummary[];
+  selectedRequirementId: string;
   submitting: string;
+  showArtifacts: boolean;
   onBundle: () => void;
   onConfirm: (confirmation: ConfirmationRequestRecord, option: string) => void;
+  onCreateRequirement: (title: string) => void;
+  onReassignRequirement: (requirementId: string) => void;
   onReviseDocument: (instruction: string, documentId?: string) => void;
   onReviseSlides: (artifactId: string, instruction: string) => void;
 }) {
   const { detail, recommendations } = props;
   const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>({});
+  const [targetRequirementId, setTargetRequirementId] = useState(detail.requirement_id || props.selectedRequirementId || '');
   const deliveryArtifact = detail.artifacts.find((artifact) => artifact.artifact_type === 'delivery_bundle' && artifact.url);
   const deliveryUrl = deliveryArtifact?.url ? artifactUrl(deliveryArtifact.url) : '';
+  const assigningRequirement = props.submitting.startsWith('requirement:');
+  const selectedRequirement = props.requirements.find((item) => item.requirement_id === targetRequirementId);
+  const currentRequirement = props.requirements.find((item) => item.requirement_id === detail.requirement_id);
+  useEffect(() => {
+    setTargetRequirementId(detail.requirement_id || props.selectedRequirementId || '');
+  }, [detail.requirement_id, detail.task_run_id, props.selectedRequirementId]);
   const toggleSection = (key: string) => {
     setCollapsedSections((current) => ({ ...current, [key]: !current[key] }));
   };
@@ -379,6 +584,36 @@ function TaskDetail(props: {
           {detail.latest_summary && <p className="summary-text">{detail.latest_summary}</p>}
         </div>
         <div className="summary-actions">
+          <div className="requirement-assignment">
+            <label className="summary-select">
+              <span>需求归属</span>
+              <select value={targetRequirementId} onChange={(event) => setTargetRequirementId(event.target.value)}>
+                <option value="">未归属需求</option>
+                {props.requirements.map((item) => (
+                  <option key={item.requirement_id} value={item.requirement_id}>{item.title}</option>
+                ))}
+              </select>
+            </label>
+            <button
+              className="line-button"
+              disabled={!targetRequirementId || targetRequirementId === detail.requirement_id || assigningRequirement}
+              onClick={() => props.onReassignRequirement(targetRequirementId)}
+            >
+              {assigningRequirement ? <Loader2 className="spin" size={16} /> : <Layers3 size={16} />}
+              {selectedRequirement ? '归入需求' : '选择需求'}
+            </button>
+            <button
+              className="line-button"
+              disabled={assigningRequirement}
+              onClick={() => {
+                const title = window.prompt('新需求标题', currentRequirement?.title || detail.title);
+                if (title?.trim()) props.onCreateRequirement(title.trim());
+              }}
+            >
+              <SquarePen size={16} />新建需求
+            </button>
+            <small>{currentRequirement ? `当前：${currentRequirement.title}` : '当前任务尚未归属需求'}</small>
+          </div>
           <button className="primary-button" onClick={props.onBundle} disabled={!detail.artifacts.length || props.submitting === 'bundle'}>
             {props.submitting === 'bundle' ? <Loader2 className="spin" size={17} /> : <PackageCheck size={17} />}
             {deliveryArtifact ? '更新交付包' : '生成交付包'}
@@ -408,7 +643,9 @@ function TaskDetail(props: {
       <ContextPackPanel pack={detail.context_pack} toggle={sectionToggle('context-pack')} />
       <ArtifactChecks checks={detail.artifact_checks || []} toggle={sectionToggle('artifact-checks')} />
       <Timeline steps={detail.steps} toggle={sectionToggle('timeline')} />
-      <Artifacts detail={detail} submitting={props.submitting} onReviseDocument={props.onReviseDocument} onReviseSlides={props.onReviseSlides} toggle={sectionToggle('artifacts')} />
+      {props.showArtifacts && (
+        <Artifacts detail={detail} submitting={props.submitting} onReviseDocument={props.onReviseDocument} onReviseSlides={props.onReviseSlides} toggle={sectionToggle('artifacts')} />
+      )}
       <Confirmations detail={detail} submitting={props.submitting} onConfirm={props.onConfirm} toggle={sectionToggle('confirmations')} />
     </div>
   );
@@ -966,6 +1203,274 @@ function Confirmations(props: {
   );
 }
 
+function RequirementOverview(props: {
+  items: RequirementSummary[];
+  activeRequirementId: string;
+  detail: RequirementDetail | null;
+  loading: boolean;
+  onSelect: (requirementId: string) => void;
+  onClear: () => void;
+}) {
+  return (
+    <section className="requirement-overview">
+      <div className="session-overview-head">
+        <h3>需求列表</h3>
+        {props.activeRequirementId && <button className="text-button" onClick={props.onClear}>查看全部任务</button>}
+      </div>
+      {props.loading && props.items.length === 0 ? <EmptyState title="加载需求中" /> : null}
+      {!props.loading && props.items.length === 0 ? <EmptyState title="暂无需求工作区" /> : null}
+      <div className="requirement-row">
+        {props.items.map((item) => (
+          <button
+            key={item.requirement_id}
+            className={`requirement-chip ${props.activeRequirementId === item.requirement_id ? 'active' : ''}`}
+            onClick={() => props.onSelect(item.requirement_id)}
+          >
+            <span className="requirement-chip-head">
+              <strong>{item.title}</strong>
+              <Badge tone={requirementStatusTone(item.status)}>{requirementStatusLabel(item.status)}</Badge>
+            </span>
+            <p>{item.summary || '等待更多讨论和产物沉淀'}</p>
+            <span className="tiny-pills">
+              <span>{sessionLabel(item.primary_session_label, item.primary_session_id)}</span>
+              <span>{item.task_run_count || 0} 个任务</span>
+              <span>{item.source_count || 0} 条来源</span>
+              {item.latest_source_type && <span>{sourceLabel(item.latest_source_type)}</span>}
+              <span>{requirementArtifactCount(item)} 个当前产物</span>
+            </span>
+          </button>
+        ))}
+      </div>
+      {props.detail && (
+        <div className="requirement-current-line">
+          <span>当前需求</span>
+          <b>{props.detail.title}</b>
+          <small>{props.detail.task_runs.length} 个任务 · {props.detail.sources.length} 条来源</small>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function RequirementDetailCard(props: {
+  detail: RequirementDetail;
+  selectedTaskId: string;
+  onSelectTask: (taskRunId: string) => void;
+}) {
+  const { detail } = props;
+  return (
+    <section className="section-block requirement-detail-card">
+      <SectionTitle icon={<Layers3 size={17} />} title="需求产物与上下文" count={detail.task_runs.length} />
+      <div className="requirement-detail-head">
+        <div>
+          <h2>{detail.title}</h2>
+          <div className="meta-row">
+            <span>{sessionLabel(detail.primary_session_label, detail.primary_session_id)}</span>
+            <Dot />
+            <span>{shortTime(detail.updated_at || detail.created_at)}</span>
+          </div>
+        </div>
+        <Badge tone={requirementStatusTone(detail.status)}>{requirementStatusLabel(detail.status)}</Badge>
+      </div>
+      <div className="requirement-metric-row">
+        <span><Route size={15} />{detail.task_runs.length} 个任务运行</span>
+        <span><MessageSquare size={15} />{detail.sources.length} 条来源</span>
+        <span><Boxes size={15} />{requirementArtifactCount(detail)} 个当前产物</span>
+      </div>
+      {detail.summary && <p className="context-summary">{detail.summary}</p>}
+      <RequirementArtifactBoard detail={detail} />
+      <RequirementSourceTrace detail={detail} />
+      <RequirementRecommendations detail={detail} />
+      <RequirementTaskTimeline detail={detail} selectedTaskId={props.selectedTaskId} onSelectTask={props.onSelectTask} />
+    </section>
+  );
+}
+
+function RequirementSourceTrace({ detail }: { detail: RequirementDetail }) {
+  const sources = [...detail.sources].sort((a, b) => timeValue(b.created_at) - timeValue(a.created_at)).slice(0, 6);
+  if (!sources.length) return null;
+  return (
+    <div className="requirement-source-block">
+      <div className="subsection-head">
+        <h3>讨论来源</h3>
+        <span>{detail.sources.length} 条上下文线索</span>
+      </div>
+      <div className="requirement-source-grid">
+        {sources.map((source) => (
+          <div className="requirement-source-card" key={source.source_id}>
+            <div className="row-between">
+              <b>{sourceSessionTypeLabel(source.session_type)} · {sourceLabel(source.source_type)}</b>
+              <Badge tone={source.source_type.startsWith('im_passive') ? 'run' : 'muted'}>
+                {source.source_type.startsWith('im_passive') ? '被动识别' : '主动触发'}
+              </Badge>
+            </div>
+            <span>会话：{sessionLabel(source.session_label || (source.session_id === detail.primary_session_id ? detail.primary_session_label : null), source.session_id)}</span>
+            <span>发送人：{source.sender_label || source.sender_id || '未知'}</span>
+            <p>{source.message_text || '没有记录到消息正文'}</p>
+            <small>
+              {source.message_id ? `消息 ${source.message_id}` : '没有消息引用'}
+              {source.message_status && ` · ${sourceMessageStatusLabel(source.message_status)}`}
+              {' · '}
+              {shortTime(source.created_at)}
+            </small>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function RequirementArtifactBoard({ detail }: { detail: RequirementDetail }) {
+  const artifacts = [
+    detail.current_slides,
+    detail.current_canvas,
+    detail.current_delivery,
+  ].filter(Boolean) as ArtifactRecord[];
+  const hasProducts = Boolean(detail.current_document || artifacts.length);
+  return (
+    <div className="requirement-product-area">
+      <div className="subsection-head">
+        <h3>当前产物</h3>
+        <span>需求级入口</span>
+      </div>
+      {!hasProducts ? (
+        <EmptyState title="这个需求还没有沉淀当前产物" />
+      ) : (
+        <div className="requirement-product-grid">
+          {detail.current_document && <RequirementDocumentProductCard document={detail.current_document} />}
+          {artifacts.map((artifact) => <RequirementArtifactProductCard key={artifact.artifact_id} artifact={artifact} />)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RequirementDocumentProductCard({ document }: { document: SessionDocumentRecord }) {
+  const url = document.url ? artifactUrl(document.url) : '';
+  return (
+    <article className="requirement-product-card">
+      <div className="row-between">
+        <div className="artifact-title">
+          <FileText size={17} />
+          <b>{document.title || '当前文档'}</b>
+        </div>
+        <Badge tone={document.is_current ? 'ok' : 'muted'}>{document.is_current ? '当前' : '历史'}</Badge>
+      </div>
+      <div className="meta-row">
+        <span>飞书文档</span>
+        <Dot />
+        <span>v{document.version}</span>
+        <Dot />
+        <span>{shortTime(document.updated_at)}</span>
+      </div>
+      <p className="muted-text">{document.sync_mode || '已同步到需求工作区'}</p>
+      <div className="button-row">
+        {url && <a className="line-button" href={url} target="_blank" rel="noreferrer"><PlayCircle size={16} />打开</a>}
+        {url && <button className="line-button" onClick={() => navigator.clipboard.writeText(url)}><Clipboard size={16} />复制</button>}
+      </div>
+    </article>
+  );
+}
+
+function RequirementArtifactProductCard({ artifact }: { artifact: ArtifactRecord }) {
+  const preview = parseJsonMap(artifact.preview_json);
+  const exportsMap = asMap(preview?.exports);
+  const htmlUrl = artifactUrl((exportsMap?.html as string | undefined) || artifact.url);
+  const pptxUrl = artifactUrl(exportsMap?.pptx as string | undefined);
+  const pdfUrl = artifactUrl(exportsMap?.pdf as string | undefined);
+  return (
+    <article className="requirement-product-card">
+      <div className="row-between">
+        <div className="artifact-title">
+          {artifactIcon(artifact.artifact_type)}
+          <b>{artifact.title || artifactLabel(artifact.artifact_type)}</b>
+        </div>
+        <Badge tone={statusTone(artifact.status)}>{artifactLabel(artifact.artifact_type)}</Badge>
+      </div>
+      <div className="meta-row">
+        <span>{providerLabel(artifact.provider)}</span>
+        <Dot />
+        <span>v{artifact.version}</span>
+        <Dot />
+        <span>{shortTime(artifact.updated_at || artifact.created_at)}</span>
+      </div>
+      <ArtifactPreview artifact={artifact} preview={preview} />
+      <div className="button-row">
+        {htmlUrl && <a className="line-button" href={htmlUrl} target="_blank" rel="noreferrer"><PlayCircle size={16} />预览</a>}
+        {pptxUrl && <a className="line-button" href={pptxUrl} target="_blank" rel="noreferrer"><Download size={16} />PPT</a>}
+        {pdfUrl && <a className="line-button" href={pdfUrl} target="_blank" rel="noreferrer"><Download size={16} />PDF</a>}
+        {artifact.url && <button className="line-button" onClick={() => navigator.clipboard.writeText(artifactUrl(artifact.url))}><Clipboard size={16} />复制</button>}
+      </div>
+    </article>
+  );
+}
+
+function RequirementRecommendations({ detail }: { detail: RequirementDetail }) {
+  const items = detail.recommendations?.recommendations || [];
+  if (!items.length) return null;
+  return (
+    <div className="requirement-recommendations">
+      <div className="subsection-head">
+        <h3>需求下一步</h3>
+        <span>{items.length} 条建议</span>
+      </div>
+      <div className="requirement-recommendation-list">
+        {items.slice(0, 3).map((item) => (
+          <div className="requirement-recommendation" key={item.action_id}>
+            <b>{item.title}</b>
+            {item.reason && <span>{item.reason}</span>}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function RequirementTaskTimeline(props: {
+  detail: RequirementDetail;
+  selectedTaskId: string;
+  onSelectTask: (taskRunId: string) => void;
+}) {
+  const timeline = props.detail.timeline.slice(0, 8);
+  if (!timeline.length) {
+    return (
+      <div className="requirement-timeline-block">
+        <div className="subsection-head">
+          <h3>任务推进</h3>
+          <span>等待主动触发</span>
+        </div>
+        <EmptyState title="群聊讨论已归入需求，暂时还没有 @ 机器人触发任务运行" />
+      </div>
+    );
+  }
+  return (
+    <div className="requirement-timeline-block">
+      <div className="subsection-head">
+        <h3>任务推进</h3>
+        <span>最近 {timeline.length} 条</span>
+      </div>
+      <div className="requirement-timeline">
+        {timeline.map((item) => {
+          const taskRunId = String(item.metadata?.task_run_id || item.item_id || '');
+          return (
+            <button
+              key={`${item.item_type}-${item.item_id}`}
+              className={`requirement-timeline-row ${taskRunId === props.selectedTaskId ? 'active' : ''}`}
+              onClick={() => taskRunId && props.onSelectTask(taskRunId)}
+            >
+              <span className={`step-dot tone-${statusTone(item.status)}`} />
+              <span>
+                <b>{item.title}</b>
+                <small>{stageLabel(item.stage)} · {statusLabel(item.status)} · {shortTime(item.updated_at || item.created_at)}</small>
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function SessionOverview(props: {
   items: SessionSummary[];
   activeSession: string;
@@ -1014,6 +1519,7 @@ function RunListItem({ item, selected, onClick }: { item: TaskRunSummary; select
         <Badge tone="muted">{stageLabel(item.stage)}</Badge>
         <Badge tone="wait">{sourceLabel(item.source_type)}</Badge>
         {item.intent && <Badge tone="run">{intentLabel(item.intent)}</Badge>}
+        {item.requirement_id && <Badge tone="ok">已归属需求</Badge>}
       </div>
       <div className="meta-row">
         <span>{shortTime(item.updated_at || item.created_at)}</span>
@@ -1037,6 +1543,45 @@ function StatsStrip({ runs }: { runs: TaskRunSummary[] }) {
       <Stat label="已完成" value={completed} />
     </div>
   );
+}
+
+function requirementArtifactCount(item: RequirementSummary): number {
+  return [
+    item.current_document_id,
+    item.current_slides_artifact_id,
+    item.current_canvas_artifact_id,
+    item.current_delivery_artifact_id,
+  ].filter(Boolean).length;
+}
+
+function requirementStatusLabel(value?: string | null): string {
+  const map: Record<string, string> = {
+    active: '进行中',
+    paused: '已暂停',
+    completed: '已完成',
+    archived: '已归档',
+  };
+  return map[value || ''] || statusLabel(value);
+}
+
+function requirementStatusTone(value?: string | null): string {
+  if (value === 'active') return 'run';
+  if (value === 'paused') return 'wait';
+  if (value === 'completed') return 'ok';
+  if (value === 'archived') return 'muted';
+  return statusTone(value);
+}
+
+function sourceSessionTypeLabel(value?: string | null): string {
+  if (value === 'group') return '群聊';
+  if (value === 'p2p') return '单聊';
+  return '会话';
+}
+
+function sourceMessageStatusLabel(value?: string | null): string {
+  if (value === 'active') return '有效消息';
+  if (value === 'recalled') return '已撤回';
+  return value || '未知状态';
 }
 
 function SectionTitle({
@@ -1200,9 +1745,10 @@ function buildSessionSummaries(runs: TaskRunSummary[]): SessionSummary[] {
   }
   return [...groups.entries()].map(([sessionId, items]) => {
     const sorted = [...items].sort(compareRunTime);
+    const displayLabel = sorted.find((item) => item.session_label?.trim())?.session_label;
     return {
       sessionId,
-      label: sessionLabel(sorted[0]?.session_label, sessionId),
+      label: sessionLabel(displayLabel, sessionId),
       total: items.length,
       running: items.filter((item) => item.status === 'running').length,
       waiting: items.filter((item) => item.status === 'waiting_confirmation').length,
@@ -1227,7 +1773,27 @@ function summaryFromDetail(detail: TaskRunDetail): TaskRunSummary {
   return summary;
 }
 
+function summaryFromRequirementDetail(detail: RequirementDetail): RequirementSummary {
+  const {
+    sources,
+    task_runs,
+    timeline,
+    current_document,
+    current_slides,
+    current_canvas,
+    current_delivery,
+    recommendations,
+    ...summary
+  } = detail;
+  void sources; void task_runs; void timeline; void current_document; void current_slides; void current_canvas; void current_delivery; void recommendations;
+  return summary;
+}
+
 function compareRunTime(a: TaskRunSummary, b: TaskRunSummary) {
+  return timeValue(b.updated_at || b.created_at) - timeValue(a.updated_at || a.created_at);
+}
+
+function compareRequirementTime(a: RequirementSummary, b: RequirementSummary) {
   return timeValue(b.updated_at || b.created_at) - timeValue(a.updated_at || a.created_at);
 }
 

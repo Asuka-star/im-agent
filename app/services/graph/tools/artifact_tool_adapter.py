@@ -245,10 +245,10 @@ class ArtifactWorkerAdapter:
         return merged
 
     def _target_document_for_step(self, state: WorkflowGraphState, command: WorkspaceCommand) -> dict | None:
-        if command.operation not in {"revise", "update"}:
-            return None
         if state.context and isinstance(state.context.current_document, dict):
             return state.context.current_document
+        if command.operation not in {"revise", "update"}:
+            return None
         return None
 
     @staticmethod
@@ -279,23 +279,33 @@ def _artifact_workspace_context(workflow: Any, state: WorkflowGraphState, worker
     excerpt = context.excerpt if context else ""
     if worker not in {"doc", "slides", "canvas", "delivery"}:
         return excerpt
-    memory_service = getattr(workflow, "memory_service", None)
-    build_workspace_context = getattr(memory_service, "build_workspace_context", None)
-    if callable(build_workspace_context):
+    requirement_context = ""
+    requirement_context_loader = getattr(workflow, "_requirement_workspace_context_for_task_run", None)
+    if callable(requirement_context_loader):
         try:
-            lifecycle_excerpt = build_workspace_context(
-                state.message.session_id,
-                profile="lifecycle",
-                include_pending=True,
-                exclude_message_id=state.message.message_id,
-                query_text=state.message.text,
-                include_semantic_search=False,
-                episode_id=state.active_episode_id,
-            )
-            if lifecycle_excerpt:
-                excerpt = lifecycle_excerpt
+            requirement_context = requirement_context_loader(state.task_run_id)
         except Exception:  # pragma: no cover - context fallback must stay best effort
-            pass
+            requirement_context = ""
+    if requirement_context:
+        excerpt = requirement_context
+    else:
+        memory_service = getattr(workflow, "memory_service", None)
+        build_workspace_context = getattr(memory_service, "build_workspace_context", None)
+        if callable(build_workspace_context):
+            try:
+                lifecycle_excerpt = build_workspace_context(
+                    state.message.session_id,
+                    profile="lifecycle",
+                    include_pending=True,
+                    exclude_message_id=state.message.message_id,
+                    query_text=state.message.text,
+                    include_semantic_search=False,
+                    episode_id=state.active_episode_id,
+                )
+                if lifecycle_excerpt:
+                    excerpt = lifecycle_excerpt
+            except Exception:  # pragma: no cover - context fallback must stay best effort
+                pass
     if worker == "doc":
         return excerpt
     current_document = context.current_document if context else None

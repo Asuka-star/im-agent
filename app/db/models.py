@@ -120,11 +120,43 @@ class MemoryChunk(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
+class Requirement(Base):
+    __tablename__ = "requirements"
+
+    id = Column(Integer, primary_key=True, index=True)
+    requirement_id = Column(String(64), unique=True, nullable=False, index=True)
+    title = Column(String(255), nullable=False)
+    status = Column(String(64), nullable=False, default="active", index=True)
+    summary = Column(Text, nullable=True)
+    primary_session_id = Column(String(128), nullable=False, index=True)
+    current_document_id = Column(String(128), nullable=True, index=True)
+    current_slides_artifact_id = Column(String(64), nullable=True, index=True)
+    current_canvas_artifact_id = Column(String(64), nullable=True, index=True)
+    current_delivery_artifact_id = Column(String(64), nullable=True, index=True)
+    created_by = Column(String(128), nullable=True, index=True)
+    metadata_json = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class RequirementSource(Base):
+    __tablename__ = "requirement_sources"
+
+    id = Column(Integer, primary_key=True, index=True)
+    source_id = Column(String(64), unique=True, nullable=False, index=True)
+    requirement_id = Column(String(64), nullable=False, index=True)
+    session_id = Column(String(128), nullable=False, index=True)
+    message_id = Column(String(128), nullable=True, index=True)
+    source_type = Column(String(64), nullable=False, default="im")
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
 class TaskRun(Base):
     __tablename__ = "task_runs"
 
     id = Column(Integer, primary_key=True, index=True)
     task_run_id = Column(String(64), unique=True, nullable=False, index=True)
+    requirement_id = Column(String(64), nullable=True, index=True)
     session_id = Column(String(128), nullable=False, index=True)
     source_type = Column(String(32), nullable=False, default="group", index=True)
     source_ref = Column(String(128), nullable=True, index=True)

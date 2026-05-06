@@ -56,6 +56,35 @@ class ArtifactTitleServiceTests(unittest.TestCase):
 
         self.assertEqual(title, "汇报演示稿")
 
+    def test_presentation_title_uses_requirement_subject_from_instruction_when_llm_theme_is_date_fallback(self) -> None:
+        title = ArtifactTitleService.presentation_title(
+            current_title="统计至2026-05-06-19-44答辩演示稿",
+            instruction="基于校园活动报名与审核系统这份需求方案文档，生成正式答辩 PPT",
+            workspace_context="",
+        )
+
+        self.assertEqual(title, "校园活动报名与审核系统答辩演示稿")
+
+    def test_canvas_title_uses_requirement_subject_from_instruction_when_llm_title_is_date_fallback(self) -> None:
+        title = ArtifactTitleService.canvas_title(
+            current_title="统计至2026-05-06-19-44流程图",
+            instruction="基于校园活动报名与审核系统这份需求方案文档，生成产品流程图",
+            workspace_context="",
+            template="flow",
+        )
+
+        self.assertEqual(title, "校园活动报名与审核系统需求流程图")
+
+    def test_canvas_title_replaces_date_fallback_when_subject_missing(self) -> None:
+        title = ArtifactTitleService.canvas_title(
+            current_title="统计至2026-05-06-19-44流程图",
+            instruction="生成产品流程图",
+            workspace_context="",
+            template="flow",
+        )
+
+        self.assertEqual(title, "需求流程图")
+
 
 if __name__ == "__main__":
     unittest.main()

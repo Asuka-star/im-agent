@@ -35,11 +35,13 @@ class WorkbenchRevisionTool:
         step_title: str,
         input_payload: dict,
         stage: str,
+        requirement_id: str | None = None,
     ) -> WorkbenchRevisionStart:
         task_run = self.task_run_service.create_task_run(
             session_id=session_id,
             title=title,
             source_type="workbench",
+            requirement_id=requirement_id,
             source_ref=source_task_run_id,
             created_by=requested_by,
             intent=intent,

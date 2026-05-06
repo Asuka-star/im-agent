@@ -157,6 +157,64 @@ class CanvasArtifactTests(unittest.TestCase):
         self.assertIn("学院老师查看统计结果和风险提醒", joined)
         self.assertNotIn("应对：明确负责人、截止时间和可验证结果", joined)
 
+    def test_canvas_service_discards_llm_risk_shapes_for_explicit_product_flow(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = CanvasArtifactService(root_dir=Path(tmpdir))
+            context = "\n".join(
+                [
+                    "[当前协作文档]",
+                    "- 产品流程",
+                    "  - 1. 学生查看活动列表，选择活动并提交报名信息。",
+                    "  - 2. 社团负责人审核报名申请，通过后生成正式名单。",
+                    "  - 3. 负责人导出名单，学院老师查看统计结果和风险提醒。",
+                    "- 风险与约束",
+                    "  - 报名高峰期接口压力较大。",
+                ]
+            )
+
+            artifact = service.generate_flow(
+                title="产品流程图",
+                instruction="根据刚才的需求画一张产品流程图",
+                llm_result={
+                    "canvas": {
+                        "template": "risk",
+                        "shapes": [
+                            {
+                                "id": "r1",
+                                "type": "sticky",
+                                "text": "风险：学生要快速报名",
+                                "x": 80,
+                                "y": 88,
+                                "group": "风险",
+                            },
+                            {
+                                "id": "m1",
+                                "type": "node",
+                                "text": "应对：明确负责人、截止时间和可验证结果",
+                                "x": 380,
+                                "y": 88,
+                                "group": "应对",
+                            },
+                            {"id": "a1", "type": "arrow", "from": "r1", "to": "m1", "label": "缓解"},
+                        ],
+                    }
+                },
+                workspace_context=context,
+                task_run_id="run_flow_override",
+                session_id="s1",
+            )
+
+        preview = artifact["preview"]
+        self.assertEqual(preview["template"], "flow")
+        groups = {shape.get("group") for shape in preview["shapes"] if shape["type"] != "arrow"}
+        self.assertNotIn("风险", groups)
+        self.assertNotIn("应对", groups)
+        labels = [shape["text"] for shape in preview["shapes"] if shape["type"] == "node"]
+        joined = " ".join(labels)
+        self.assertIn("学生查看活动列表", joined)
+        self.assertIn("负责人导出名单", joined)
+        self.assertNotIn("应对：明确负责人、截止时间和可验证结果", joined)
+
     def test_canvas_svg_wraps_long_node_text_inside_card(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             service = CanvasArtifactService(root_dir=Path(tmpdir))

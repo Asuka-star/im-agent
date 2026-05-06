@@ -1,5 +1,6 @@
 export type TaskRunSummary = {
   task_run_id: string;
+  requirement_id?: string | null;
   session_id: string;
   session_label?: string | null;
   source_type: string;
@@ -12,6 +13,9 @@ export type TaskRunSummary = {
   latest_summary?: string | null;
   latest_reply_preview?: string | null;
   latest_error?: string | null;
+  run_kind?: string | null;
+  primary_object?: string | null;
+  lifecycle_stage?: string | null;
   created_by?: string | null;
   created_at?: string | null;
   updated_at?: string | null;
@@ -102,6 +106,63 @@ export type TaskRunDetail = TaskRunSummary & {
   session_documents: SessionDocumentRecord[];
 };
 
+export type RequirementSourceRecord = {
+  source_id: string;
+  requirement_id: string;
+  session_id: string;
+  session_label?: string | null;
+  session_type?: string | null;
+  message_id?: string | null;
+  sender_id?: string | null;
+  sender_label?: string | null;
+  message_text?: string | null;
+  message_status?: string | null;
+  source_type: string;
+  created_at?: string | null;
+};
+
+export type RequirementTimelineItem = {
+  item_id: string;
+  item_type: string;
+  title: string;
+  status: string;
+  stage?: string | null;
+  summary?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+  metadata?: Record<string, unknown>;
+};
+
+export type RequirementSummary = {
+  requirement_id: string;
+  title: string;
+  status: string;
+  summary?: string | null;
+  primary_session_id: string;
+  primary_session_label?: string | null;
+  source_count?: number;
+  task_run_count?: number;
+  latest_source_type?: string | null;
+  current_document_id?: string | null;
+  current_slides_artifact_id?: string | null;
+  current_canvas_artifact_id?: string | null;
+  current_delivery_artifact_id?: string | null;
+  created_by?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
+export type RequirementDetail = RequirementSummary & {
+  sources: RequirementSourceRecord[];
+  task_runs: TaskRunSummary[];
+  timeline: RequirementTimelineItem[];
+  current_document?: SessionDocumentRecord | null;
+  current_slides?: ArtifactRecord | null;
+  current_canvas?: ArtifactRecord | null;
+  current_delivery?: ArtifactRecord | null;
+  recommendations?: NextActionBundle | null;
+};
+
 export type NextActionRecommendation = {
   action_id: string;
   title: string;
@@ -128,6 +189,8 @@ export type NextActionBundle = {
 
 export type RealtimeEvent = {
   type?: string;
+  requirement?: RequirementDetail | RequirementSummary | null;
+  requirements?: RequirementSummary[];
   task_run_id?: string;
   session_id?: string;
   task_run?: TaskRunDetail | TaskRunSummary | null;

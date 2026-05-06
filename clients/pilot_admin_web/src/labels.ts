@@ -49,6 +49,12 @@ export function sourceLabel(value?: string | null): string {
     group: '群聊',
     p2p: '私聊',
     workbench: '工作台',
+    im: 'IM',
+    im_passive: '群聊讨论',
+    im_passive_group: '群聊讨论',
+    task_run: '任务运行',
+    manual: '手动创建',
+    manual_reassign: '手动归属',
     unknown: '未知来源',
   };
   return map[value || ''] || '来源';

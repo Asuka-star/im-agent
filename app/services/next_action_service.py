@@ -155,17 +155,17 @@ class ContextualNextActionService:
                 )
             )
 
-        if signals.get("has_slides") and not signals.get("has_delivery"):
+        if signals.get("has_doc") and (signals.get("has_slides") or signals.get("has_canvas")) and not signals.get("has_delivery"):
             candidates.append(
                 self._recommendation(
                     "bundle_delivery",
-                    "打包交付并回发 IM",
+                    "生成最终归档清单",
                     action_type="bundle_delivery",
-                    priority="high",
-                    confidence=0.86,
-                    reason="已经有演示稿，下一步适合把文档、PPT 和画布汇总成可分享的交付入口。",
-                    command="打包交付并回发 IM",
-                    score=75,
+                    priority="medium",
+                    confidence=0.72,
+                    reason="当前已经具备文档和至少一种展示产物，可以在最终归档时生成一个统一入口；日常协作中不必提前生成。",
+                    command="生成最终归档清单",
+                    score=52,
                 )
             )
             candidates.append(

@@ -40,6 +40,8 @@ class LLMPromptTests(unittest.TestCase):
         self.assertIn("IM discussion block as primary requirement evidence", prompt)
         self.assertIn("Do not write placeholder content", prompt)
         self.assertIn("do not invent dates, date ranges, owners, teams, or assignees", prompt)
+        self.assertIn("Do not invent technology stacks", prompt)
+        self.assertIn("frameworks, databases", prompt)
 
     def test_requirement_brief_prompt_separates_requirement_facts_from_tasks(self) -> None:
         prompt = LLMPromptBuilder().requirement_brief()
@@ -220,6 +222,85 @@ class LLMPromptTests(unittest.TestCase):
         self.assertNotIn("2026-05-15", content)
         self.assertNotIn("Zeleous", content)
         self.assertNotIn("开发团队", content)
+
+    def test_resolve_doc_request_removes_ungrounded_tech_stack(self) -> None:
+        service = LLMService()
+        service.api_key = "test-key"
+        service.base_url = "https://example.test"
+        service.model = "demo-model"
+        workspace_context = "\n".join(
+            [
+                "[当前需求工作区]",
+                "- 标题: 校园活动报名与审核系统",
+                "[当前需求讨论事实]",
+                "- 学生要快速报名，负责人要审核名单，老师要查看活动数据和风险。",
+                "- 核心流程是学生报名、负责人审核、老师查看统计结果。",
+            ]
+        )
+
+        with patch.object(
+            service,
+            "_chat_json",
+            return_value={
+                "doc": {
+                    "title": "校园活动报名与审核系统需求方案",
+                    "sections": [
+                        {
+                            "heading": "技术方案",
+                            "paragraphs": [
+                                "整体采用前后端分离架构，前端使用 Vue.js 或 React，后端使用 Spring Boot 或 Node.js，数据库采用 MySQL 或 PostgreSQL。",
+                                "报名审核模块需要支持报名提交、审核流转和统计结果查看。",
+                            ],
+                        }
+                    ],
+                }
+            },
+        ):
+            result = service.resolve_doc_request(workspace_context, "整理成正式需求方案文档")
+
+        content = "\n".join(result["doc"]["sections"][0]["paragraphs"])
+        self.assertIn("技术栈、数据库、部署方式和系统集成方案尚未", content)
+        self.assertIn("报名审核模块", content)
+        self.assertNotIn("Vue.js", content)
+        self.assertNotIn("Spring Boot", content)
+        self.assertNotIn("MySQL", content)
+
+    def test_resolve_doc_request_keeps_tech_stack_grounded_in_current_document(self) -> None:
+        service = LLMService()
+        service.api_key = "test-key"
+        service.base_url = "https://example.test"
+        service.model = "demo-model"
+        workspace_context = "\n".join(
+            [
+                "[当前协作文档]",
+                "标题：校园活动报名与审核系统需求方案",
+                "章节快照：",
+                "- 技术方案",
+                "  - 前端使用 Vue.js，数据库采用 MySQL。",
+            ]
+        )
+
+        with patch.object(
+            service,
+            "_chat_json",
+            return_value={
+                "doc": {
+                    "title": "校园活动报名与审核系统需求方案",
+                    "sections": [
+                        {
+                            "heading": "技术方案",
+                            "paragraphs": ["前端使用 Vue.js，数据库采用 MySQL。"],
+                        }
+                    ],
+                }
+            },
+        ):
+            result = service.resolve_doc_request(workspace_context, "更新当前需求方案文档")
+
+        content = "\n".join(result["doc"]["sections"][0]["paragraphs"])
+        self.assertIn("Vue.js", content)
+        self.assertIn("MySQL", content)
+        self.assertNotIn("尚未在当前需求讨论或文档中明确", content)
 
     def test_next_action_rerank_prompt_is_dedicated_and_bounded(self) -> None:
         prompt = LLMPromptBuilder().next_action_rerank()

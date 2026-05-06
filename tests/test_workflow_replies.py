@@ -177,6 +177,44 @@ class WorkflowReplySenderTests(unittest.TestCase):
         action = next(item for item in message_api.card_calls[0]["card"]["elements"] if item.get("tag") == "action")
         self.assertEqual(action["actions"][0]["value"]["action"], "select_clarification_option")
 
+    def test_requirement_clarification_card_lists_recent_requirements_and_keeps_other_action(self) -> None:
+        message_api = _FakeMessageAPI()
+        workflow = SimpleNamespace(message_api=message_api)
+        sender = WorkflowReplySender(workflow)
+        message = SimpleNamespace(session_id="session_1", chat_id="chat_1", message_id="om_1")
+
+        sent = sender.send_clarification_card(
+            message,
+            intent="requirement",
+            clarification={
+                "question": "我需要确认这次操作属于以下哪个需求，还是其他新需求。",
+                "reason": "LLM 判断存在多个可能归属。",
+                "options": [
+                    "1. 校园活动报名系统",
+                    "2. 社团审核后台",
+                    "3. 学院老师数据看板",
+                    "4. 活动流程图优化",
+                    "5. 跨会话演示稿需求",
+                    "6. 其他 / 新建一个需求",
+                ],
+            },
+            task_run_id="run_1",
+            confirmation_id="confirm_1",
+        )
+
+        self.assertTrue(sent)
+        card = message_api.card_calls[0]["card"]
+        body = "\n".join(
+            item.get("text", {}).get("content", "")
+            for item in card["elements"]
+            if item.get("tag") == "div"
+        )
+        self.assertIn("3. 学院老师数据看板", body)
+        self.assertIn("6. 其他 / 新建一个需求", body)
+        action = next(item for item in card["elements"] if item.get("tag") == "action")
+        self.assertEqual(len(action["actions"]), 3)
+        self.assertEqual(action["actions"][-1]["value"]["payload"]["option"], "6. 其他 / 新建一个需求")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -40,6 +40,12 @@ class FeishuCardActionService:
         key = event.action.idempotency_key
         if not self.dedup_service.accept(key):
             previous = self.dedup_service.get_result(key) or {"duplicate": True}
+            self._patch_card_status(
+                event,
+                title="选择已收到",
+                content="这个按钮已经点过了，系统正在处理或已经处理完成，无需重复点击。",
+                template="grey",
+            )
             self._reply(event, "这个卡片操作已经处理过了，无需重复确认。")
             return {"code": 0, "msg": "duplicate_ignored", "data": previous}
 
@@ -271,6 +277,14 @@ class FeishuCardActionService:
 
     def _select_clarification_option(self, event: FeishuCardActionEvent) -> dict[str, Any]:
         option = str(event.action.payload.get("option") or "").strip()
+        display_option = option or "未命名选项"
+        self._patch_card_status(
+            event,
+            title="已收到选择",
+            content=f"已选择：{display_option}\n\n系统正在继续处理，请不要重复点击。完成后我会在群里回复结果。",
+            template="blue",
+        )
+        self._reply(event, f"已收到你的选择：{display_option}。我正在继续处理，完成后会把结果发到这里。")
         confirmation = self._resolve_confirmation_if_needed(event, answer_value=option)
         if getattr(confirmation, "already_answered", False):
             self._patch_card_status(event, title="确认已处理", content="这个确认已经被处理过了，无需重复点击。")

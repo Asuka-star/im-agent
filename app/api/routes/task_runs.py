@@ -28,12 +28,14 @@ next_action_service = ContextualNextActionService()
 @router.get("/", response_model=list[TaskRunSummary])
 async def list_task_runs(
     session_id: str | None = Query(default=None),
+    requirement_id: str | None = Query(default=None),
     session_query: str | None = Query(default=None),
     status: str | None = Query(default=None),
     limit: int = Query(default=20, ge=1, le=100),
 ) -> list[TaskRunSummary]:
     return task_run_service.list_task_runs(
         session_id=session_id,
+        requirement_id=requirement_id,
         session_query=session_query,
         status=status,
         limit=limit,
