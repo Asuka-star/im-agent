@@ -85,14 +85,11 @@ class RequirementService:
         self,
         *,
         session_id: str | None = None,
-        status: str | None = "active",
         query: str | None = None,
         limit: int = 20,
     ) -> list[RequirementSummary]:
         with SessionLocal() as session:
             statement = select(Requirement).order_by(desc(Requirement.updated_at), desc(Requirement.id))
-            if status:
-                statement = statement.where(Requirement.status == status)
             if session_id:
                 source_requirement_ids = (
                     select(RequirementSource.requirement_id)
@@ -275,6 +272,35 @@ class RequirementService:
         except Exception as exc:  # noqa: BLE001
             logger.debug("Skipped requirement artifact pointer update: task_run_id=%s error=%s", task_run_id, exc)
 
+    def requirement_ids_for_document(self, document_id: str) -> list[str]:
+        normalized = str(document_id or "").strip()
+        if not normalized:
+            return []
+        with SessionLocal() as session:
+            ids: list[str] = []
+            rows = session.execute(
+                select(Requirement.requirement_id).where(Requirement.current_document_id == normalized)
+            ).scalars().all()
+            ids.extend(str(item) for item in rows if str(item or "").strip())
+            artifact_rows = session.execute(
+                select(TaskRun.requirement_id, Artifact.preview_json)
+                .join(TaskRun, Artifact.task_run_id == TaskRun.task_run_id)
+                .where(Artifact.artifact_type.in_(["document", "doc", "feishu_doc"]))
+            ).all()
+            for requirement_id, preview_json in artifact_rows:
+                req_id = str(requirement_id or "").strip()
+                if not req_id:
+                    continue
+                preview = _decode_json_object(preview_json)
+                sync = preview.get("sync") if isinstance(preview.get("sync"), dict) else {}
+                if str(sync.get("document_id") or "").strip() == normalized:
+                    ids.append(req_id)
+        result: list[str] = []
+        for req_id in ids:
+            if req_id and req_id not in result:
+                result.append(req_id)
+        return result
+
     def _add_source_row(
         self,
         session,
@@ -358,7 +384,6 @@ class RequirementService:
         return RequirementSummary(
             requirement_id=row.requirement_id,
             title=row.title,
-            status=row.status,
             summary=row.summary,
             primary_session_id=row.primary_session_id,
             primary_session_label=self.session_display_service.resolve_session_label(

@@ -86,6 +86,68 @@ class DeliveryArtifactServiceTests(unittest.TestCase):
             self.assertEqual(artifact["version"], 1)
             self.assertEqual(artifact["preview"]["version"], 1)
 
+    def test_delivery_service_preserves_feishu_doc_export(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = DeliveryArtifactService(root_dir=Path(tmpdir))
+
+            artifact = service.persist_bundle(
+                {
+                    "title": "交付清单",
+                    "feishu_delivery": {
+                        "status": "ready",
+                        "document_id": "doc_123",
+                        "url": "https://feishu.example/doc_123",
+                    },
+                },
+                task_run_id="run_123",
+                session_id="s1",
+            )
+
+            payload = json.loads((Path(tmpdir) / "run_123.json").read_text(encoding="utf-8"))
+            self.assertEqual(payload["feishu_delivery"]["document_id"], "doc_123")
+            self.assertEqual(payload["exports"]["feishu_doc"], "https://feishu.example/doc_123")
+            self.assertEqual(artifact["preview"]["exports"]["feishu_doc"], "https://feishu.example/doc_123")
+
+    def test_delivery_link_index_renders_feishu_sync_media_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = DeliveryArtifactService(root_dir=Path(tmpdir))
+
+            service.persist_bundle(
+                {
+                    "title": "交付清单",
+                    "summary": "已同步到飞书。",
+                    "deliverables": [
+                        {
+                            "key": "slides",
+                            "label": "答辩 PPT",
+                            "status": "ready",
+                            "title": "演示稿",
+                            "url": "/api/artifacts/slides/run_123.html",
+                            "links": [{"label": "PPTX", "url": "/api/artifacts/slides/run_123.pptx"}],
+                            "feishu_sync": {
+                                "status": "ready",
+                                "document_url": "https://feishu.example/doc_123",
+                                "media_items": [
+                                    {
+                                        "kind": "slides_pptx",
+                                        "status": "ready",
+                                        "file_token": "pptx_token_123",
+                                    }
+                                ],
+                            },
+                        }
+                    ],
+                },
+                task_run_id="run_123",
+                session_id="s1",
+            )
+
+            html_text = (Path(tmpdir) / "run_123.html").read_text(encoding="utf-8")
+            self.assertIn("飞书同步", html_text)
+            self.assertIn("飞书交付文档", html_text)
+            self.assertIn("PPTX 附件", html_text)
+            self.assertIn("pptx_tok", html_text)
+
 
 if __name__ == "__main__":
     unittest.main()

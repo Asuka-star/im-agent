@@ -245,6 +245,44 @@ class RequirementServiceTests(unittest.TestCase):
         self.assertEqual(detail.current_document.session_id, "ou_personal")
         self.assertEqual(detail.current_document.document_id, "doc_p2p")
 
+    def test_requirement_ids_for_document_includes_pointers_and_artifacts(self) -> None:
+        pointer_requirement = self.service.create_requirement(
+            title="Pointer Requirement",
+            primary_session_id="oc_pointer",
+            summary="Uses a current document pointer.",
+        )
+        artifact_requirement = self.service.create_requirement(
+            title="Artifact Requirement",
+            primary_session_id="oc_artifact",
+            summary="Has a document artifact.",
+        )
+        with self.test_session_local() as session:
+            row = session.query(Requirement).filter_by(requirement_id=pointer_requirement.requirement_id).one_or_none()
+            assert row is not None
+            row.current_document_id = "doc_shared"
+            session.commit()
+        with patch("app.services.task_run_service.realtime_hub.emit_room"):
+            task_run = self.task_run_service.create_task_run(
+                session_id="oc_artifact",
+                title="Generate requirement doc",
+                source_type="group",
+                requirement_id=artifact_requirement.requirement_id,
+            )
+        self.task_run_service.create_artifact(
+            task_run.task_run_id,
+            artifact_type="document",
+            title="Artifact doc",
+            provider="feishu_doc",
+            preview={"sync": {"document_id": "doc_shared"}},
+        )
+
+        ids = self.service.requirement_ids_for_document("doc_shared")
+
+        self.assertEqual(
+            ids,
+            [pointer_requirement.requirement_id, artifact_requirement.requirement_id],
+        )
+
     def test_passive_requirement_is_visible_without_task_runs(self) -> None:
         with self.test_session_local() as session:
             session.add(UserAlias(session_id="oc_passive_visible", user_id="user_1", display_name="李同学"))
@@ -298,6 +336,29 @@ class RequirementServiceTests(unittest.TestCase):
         self.assertEqual(detail.sources[0].session_label, "session oc_passive_visible")
         self.assertEqual(detail.sources[0].sender_label, "李同学")
         self.assertEqual(detail.sources[0].message_text, "我们先讨论第一个需求：校园活动报名与审核系统。")
+
+    def test_requirement_list_ignores_legacy_status_column(self) -> None:
+        archived = self.service.create_requirement(
+            title="历史需求也应可见",
+            primary_session_id="oc_requirement_status",
+            summary="需求工作区不再按状态过滤。",
+        )
+        current = self.service.create_requirement(
+            title="当前讨论需求",
+            primary_session_id="oc_requirement_status",
+            summary="同一会话里的另一个需求。",
+        )
+        with self.test_session_local() as session:
+            row = session.query(Requirement).filter_by(requirement_id=archived.requirement_id).one()
+            row.status = "archived"
+            session.commit()
+
+        listed = self.service.list_requirements(session_id="oc_requirement_status")
+
+        self.assertEqual(
+            {item.requirement_id for item in listed},
+            {archived.requirement_id, current.requirement_id},
+        )
 
     def test_bind_task_run_touches_requirement_even_without_artifact_changes(self) -> None:
         requirement = self.service.create_requirement(

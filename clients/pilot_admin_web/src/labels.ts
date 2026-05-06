@@ -85,6 +85,7 @@ export function providerLabel(value?: string | null): string {
 
 export function stepTypeLabel(value?: string | null): string {
   const map: Record<string, string> = {
+    input: '输入',
     context: '上下文',
     artifact: '产物',
     confirm: '确认',
@@ -94,9 +95,112 @@ export function stepTypeLabel(value?: string | null): string {
     route: '路由',
     planner: '规划',
     reviewer: '复核',
+    workflow: '工作流',
+    graph: '流程编排',
+    graph_worker: '子任务',
     generate_canvas: '画布生成',
   };
   return map[value || ''] || '步骤';
+}
+
+export function stepTitleLabel(step: {
+  step_key?: string | null;
+  title?: string | null;
+  step_type?: string | null;
+  output_json?: string | null;
+}): string {
+  const title = String(step.title || '').trim();
+  const graphTitle = graphStepTitle(title, step);
+  if (graphTitle) return graphTitle;
+  if (title && !isInternalStepText(title)) return title;
+  return stepKeyTitle(step.step_key) || stepTypeLabel(step.step_type);
+}
+
+function graphStepTitle(title: string, step: { step_key?: string | null; output_json?: string | null }): string {
+  if (/^LangGraph execution$/i.test(title) || step.step_key === 'graph.execution') {
+    return '流程编排完成';
+  }
+  const workerFromTitle = title.match(/^LangGraph worker\s+(.+)$/i)?.[1];
+  const parsed = parseGraphWorker(step.step_key) || parseGraphWorkerPayload(step.output_json);
+  const worker = workerFromTitle || parsed?.worker;
+  if (!worker) return '';
+  return workerActionLabel(worker, parsed?.operation);
+}
+
+function stepKeyTitle(value?: string | null): string {
+  const key = String(value || '').trim();
+  const map: Record<string, string> = {
+    request_received: '接收用户请求',
+    workspace_context: '构建协作上下文',
+    response_generated: '生成处理结果',
+    artifact_persisted: '记录协作产物',
+    delivery_bundle: '生成交付包',
+  };
+  if (map[key]) return map[key];
+  if (key === 'graph.execution') return '流程编排完成';
+  const parsed = parseGraphWorker(key);
+  return parsed ? workerActionLabel(parsed.worker, parsed.operation) : '';
+}
+
+function parseGraphWorker(value?: string | null): { worker: string; operation?: string } | null {
+  const key = String(value || '').trim();
+  const match = key.match(/^graph\.worker\.([a-z]+)(?:_(.+))?$/i);
+  if (!match) return null;
+  return { worker: match[1], operation: match[2] };
+}
+
+function parseGraphWorkerPayload(value?: string | null): { worker: string; operation?: string } | null {
+  try {
+    const payload = JSON.parse(String(value || '{}')) as { worker?: unknown; operation?: unknown };
+    const worker = String(payload.worker || '').trim();
+    if (!worker) return null;
+    return { worker, operation: String(payload.operation || '').trim() || undefined };
+  } catch {
+    return null;
+  }
+}
+
+function workerActionLabel(workerValue: string, operationValue?: string): string {
+  const worker = workerValue.toLowerCase();
+  const operation = String(operationValue || '').toLowerCase();
+  const generateMap: Record<string, string> = {
+    doc: '生成文档',
+    slides: '生成演示稿',
+    canvas: '生成画布',
+    delivery: '整理交付包',
+    reply: '生成回复',
+  };
+  const reviseMap: Record<string, string> = {
+    doc: '修订文档',
+    slides: '修订演示稿',
+    canvas: '修订画布',
+  };
+  if (operation === 'generate' && generateMap[worker]) return generateMap[worker];
+  if ((operation === 'revise' || operation === 'update') && reviseMap[worker]) return reviseMap[worker];
+  if (operation === 'read' && worker === 'task') return '读取任务状态';
+  if (operation === 'analyze' || worker === 'analysis') return '分析协作需求';
+  if (worker === 'review') return '复核结果质量';
+  if (worker === 'help') return '生成帮助说明';
+  return workerLabel(worker);
+}
+
+function workerLabel(worker: string): string {
+  const map: Record<string, string> = {
+    task: '任务处理',
+    analysis: '需求分析',
+    doc: '文档处理',
+    slides: '演示稿处理',
+    canvas: '画布处理',
+    delivery: '交付整理',
+    review: '质量复核',
+    reply: '回复处理',
+    help: '帮助说明',
+  };
+  return map[worker] || '子任务处理';
+}
+
+function isInternalStepText(value: string): boolean {
+  return /^(LangGraph|graph\.|[a-z]+[_-][a-z0-9_.-]+$)/i.test(value);
 }
 
 export function priorityLabel(value?: string | null): string {

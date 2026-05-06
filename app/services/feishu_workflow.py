@@ -7,6 +7,8 @@ from typing import Any
 from app.agents.orchestrator import AgentOrchestrator
 from app.core.config import settings
 from app.feishu.doc_api import FeishuDocAPI
+from app.feishu.import_api import FeishuImportAPI
+from app.feishu.media_api import FeishuMediaAPI
 from app.feishu.message_api import FeishuMessageAPI
 from app.feishu.user_api import FeishuUserAPI
 from app.schemas.analyze import AgentTrace, AnalyzeResponse
@@ -17,6 +19,7 @@ from app.services.interaction import InteractionService
 from app.services.canvas_artifact_service import CanvasArtifactService
 from app.services.tools.canvas_tool import CanvasTool
 from app.services.delivery_artifact_service import DeliveryArtifactService
+from app.services.feishu_artifact_integrator import FeishuArtifactIntegrator
 from app.services.tools.delivery_tool import DeliveryTool
 from app.services.document_package_builder import DocumentPackageBuilder
 from app.services.tools.doc_tool import DocTool
@@ -76,6 +79,8 @@ class FeishuWorkflowService:
         self.delivery_artifact_service = DeliveryArtifactService()
         self.document_package_builder = DocumentPackageBuilder()
         self.doc_api = FeishuDocAPI()
+        self.import_api = FeishuImportAPI()
+        self.media_api = FeishuMediaAPI()
         self.user_api = FeishuUserAPI()
         self.memory_service = MemoryService()
         self.office_artifact_service = OfficeArtifactService()
@@ -92,10 +97,18 @@ class FeishuWorkflowService:
             next_action_service=self.next_action_service,
         )
         self.requirement_resolver = RequirementResolver(self.requirement_service, llm_service=self.llm_service)
+        self.feishu_artifact_integrator = FeishuArtifactIntegrator(
+            doc_api=self.doc_api,
+            media_api=self.media_api,
+            import_api=self.import_api,
+            session_document_service=self.session_document_service,
+            requirement_service=self.requirement_service,
+        )
         self.delivery_tool = DeliveryTool(
             delivery_artifact_service=self.delivery_artifact_service,
             task_run_service=self.task_run_service,
             message_api=self.message_api,
+            feishu_artifact_integrator=self.feishu_artifact_integrator,
         )
         self.workbench_revision_tool = WorkbenchRevisionTool(
             task_run_service=self.task_run_service,
@@ -573,8 +586,41 @@ class FeishuWorkflowService:
             return {}
         if hasattr(current_document, "model_dump"):
             payload = current_document.model_dump(mode="json")
-            return payload if isinstance(payload, dict) else {}
-        return dict(current_document) if isinstance(current_document, dict) else {}
+            payload = payload if isinstance(payload, dict) else {}
+        else:
+            payload = dict(current_document) if isinstance(current_document, dict) else {}
+        document_id = str(payload.get("document_id") or "").strip()
+        if document_id and not self._requirement_owns_document_target(document_id, requirement_id):
+            logger.warning(
+                "Ignoring requirement document target because it is linked to another requirement: "
+                "task_run_id=%s requirement_id=%s document_id=%s",
+                task_run_id,
+                requirement_id,
+                document_id,
+            )
+            return {}
+        return payload
+
+    def _requirement_owns_document_target(self, document_id: str, requirement_id: str) -> bool:
+        target_document_id = str(document_id or "").strip()
+        target_requirement_id = str(requirement_id or "").strip()
+        if not target_document_id or not target_requirement_id:
+            return False
+        finder = getattr(self.requirement_service, "requirement_ids_for_document", None)
+        if not callable(finder):
+            return True
+        try:
+            owners = [str(item or "").strip() for item in finder(target_document_id)]
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "Failed to verify requirement document ownership: requirement_id=%s document_id=%s error=%s",
+                target_requirement_id,
+                target_document_id,
+                exc,
+            )
+            return True
+        owners = [item for item in owners if item]
+        return not owners or owners == [target_requirement_id]
 
     def _run_graph_task_command(
         self,
@@ -602,13 +648,12 @@ class FeishuWorkflowService:
         graph_clarification = None
         legacy_route = None
         if route_decision is not None and route_decision.route == "doc":
-            explicit_document = self._resolve_target_document_for_instruction(message.session_id, message.text)
-            if explicit_document is not None:
-                current_document = explicit_document
-            graph_clarification = self._build_document_selection_clarification(
+            current_document, graph_clarification = self._resolve_document_target_for_route(
                 message,
                 route_decision,
-                target_document=current_document,
+                task_run_id=task_run_id,
+                requirement_document=requirement_document,
+                workspace_context=graph_workspace_context,
             )
             if graph_clarification is None:
                 graph_workspace_context = self._workspace_context_for_route(
@@ -647,6 +692,205 @@ class FeishuWorkflowService:
                 exc,
             )
             return None
+
+    def _document_target_allowed_for_requirement(self, document: dict, requirement_id: str) -> bool:
+        document_id = str((document or {}).get("document_id") or "").strip()
+        requirement_id = str(requirement_id or "").strip()
+        if not document_id or not requirement_id:
+            return True
+        if self._requirement_owns_document_target(document_id, requirement_id):
+            return True
+        logger.warning(
+            "Ignoring explicit document target because it belongs to another requirement: "
+            "requirement_id=%s document_id=%s",
+            requirement_id,
+            document_id,
+        )
+        return False
+
+    def _resolve_document_target_for_route(
+        self,
+        message: FeishuMessageContext,
+        route_decision: RouteDecision,
+        *,
+        task_run_id: str | None,
+        requirement_document: dict | None,
+        workspace_context: str,
+    ) -> tuple[dict | None, dict | None]:
+        if route_decision.route != "doc":
+            return requirement_document, None
+        requirement_id = self._requirement_id_for_task_run(task_run_id)
+        candidates = self._document_target_candidates(
+            message.session_id,
+            requirement_document=requirement_document,
+            requirement_id=requirement_id,
+        )
+        if candidates and self.llm_service.is_configured():
+            try:
+                selection = self.llm_service.resolve_document_target(
+                    {
+                        "instruction": message.text,
+                        "requirement_id": requirement_id or None,
+                        "route": route_decision.route,
+                        "route_reason": route_decision.reason,
+                        "workspace_context": self._compact_document_target_context(workspace_context),
+                        "current_requirement_document_id": (
+                            str((requirement_document or {}).get("document_id") or "").strip() or None
+                        )
+                        if isinstance(requirement_document, dict)
+                        else None,
+                        "candidates": [item["llm"] for item in candidates],
+                    }
+                )
+                target_document, clarification = self._apply_document_target_selection(
+                    selection,
+                    candidates,
+                    requirement_id=requirement_id,
+                )
+                if target_document is not None or clarification is not None:
+                    return target_document, clarification
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("LLM document target resolution failed, using safe fallback: %s", exc)
+
+        fallback_document = self._fallback_document_target_for_route(
+            message,
+            requirement_document=requirement_document,
+            requirement_id=requirement_id,
+        )
+        clarification = self._build_document_selection_clarification(
+            message,
+            route_decision,
+            target_document=fallback_document,
+        )
+        return fallback_document, clarification
+
+    def _document_target_candidates(
+        self,
+        session_id: str,
+        *,
+        requirement_document: dict | None,
+        requirement_id: str,
+    ) -> list[dict[str, Any]]:
+        raw_documents: list[dict] = []
+        if isinstance(requirement_document, dict) and requirement_document.get("document_id"):
+            raw_documents.append(dict(requirement_document))
+        try:
+            raw_documents.extend(self.session_document_service.list_documents(session_id))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to load session documents for LLM target selection: %s", exc)
+
+        candidates: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        requirement_document_id = (
+            str((requirement_document or {}).get("document_id") or "").strip()
+            if isinstance(requirement_document, dict)
+            else ""
+        )
+        for document in raw_documents:
+            if not isinstance(document, dict):
+                continue
+            document_id = str(document.get("document_id") or "").strip()
+            if not document_id or document_id in seen:
+                continue
+            seen.add(document_id)
+            owners = self._requirement_ids_for_document_safely(document_id)
+            belongs_to_current = bool(requirement_id) and (not owners or owners == [requirement_id])
+            conflicts_with_other_requirements = bool(requirement_id and owners and owners != [requirement_id])
+            relation = "requirement_current" if document_id == requirement_document_id else "session_candidate"
+            llm_payload = {
+                "document_id": document_id,
+                "title": str(document.get("title") or "").strip(),
+                "version": document.get("version"),
+                "is_current": bool(document.get("is_current")),
+                "relation": relation,
+                "belongs_to_current_requirement": belongs_to_current,
+                "safe_to_update": belongs_to_current,
+                "conflicts_with_other_requirements": conflicts_with_other_requirements,
+                "linked_requirement_ids": owners,
+            }
+            candidates.append({"document": document, "llm": llm_payload})
+        return candidates[:8]
+
+    def _requirement_ids_for_document_safely(self, document_id: str) -> list[str]:
+        finder = getattr(self.requirement_service, "requirement_ids_for_document", None)
+        if not callable(finder):
+            return []
+        try:
+            return [str(item or "").strip() for item in finder(document_id) if str(item or "").strip()]
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Failed to load requirement owners for document target selection: document_id=%s error=%s", document_id, exc)
+            return []
+
+    @staticmethod
+    def _compact_document_target_context(workspace_context: str) -> str:
+        text = str(workspace_context or "").strip()
+        if len(text) <= 1800:
+            return text
+        return text[:1800]
+
+    def _apply_document_target_selection(
+        self,
+        selection: dict[str, Any],
+        candidates: list[dict[str, Any]],
+        *,
+        requirement_id: str,
+    ) -> tuple[dict | None, dict | None]:
+        action = str(selection.get("action") or "").strip().lower()
+        document_id = str(selection.get("document_id") or "").strip()
+        by_id = {str(item["llm"].get("document_id") or ""): item for item in candidates}
+        if action == "create":
+            return {}, None
+        if action == "clarify":
+            return None, self._document_target_clarification(selection, candidates)
+        if action == "update" and document_id:
+            candidate = by_id.get(document_id)
+            if candidate is None:
+                return None, self._document_target_clarification(selection, candidates)
+            document = candidate["document"]
+            if self._document_target_allowed_for_requirement(document, requirement_id):
+                return document, None
+            return None, self._document_target_clarification(
+                {
+                    **selection,
+                    "reason": selection.get("reason")
+                    or "候选文档似乎属于另一个需求，不能直接修改。",
+                },
+                candidates,
+            )
+        return None, None
+
+    def _document_target_clarification(self, selection: dict[str, Any], candidates: list[dict[str, Any]]) -> dict:
+        clarification = selection.get("clarification") if isinstance(selection.get("clarification"), dict) else {}
+        options = clarification.get("options") if isinstance(clarification.get("options"), list) else []
+        option_texts = [str(item).strip() for item in options if str(item).strip()]
+        if not option_texts:
+            option_texts = [self._document_option_label(item["document"]) for item in candidates[:4]]
+            option_texts = [item for item in option_texts if item]
+            option_texts.append("新建一份需求文档")
+        question = str(clarification.get("question") or "").strip()
+        return {
+            "question": question or "这次要更新哪一份需求文档？",
+            "reason": str(selection.get("reason") or "LLM 无法唯一确定目标文档。").strip(),
+            "options": option_texts[:5],
+            "blocking": True,
+        }
+
+    def _fallback_document_target_for_route(
+        self,
+        message: FeishuMessageContext,
+        *,
+        requirement_document: dict | None,
+        requirement_id: str,
+    ) -> dict | None:
+        if isinstance(requirement_document, dict):
+            return requirement_document
+        explicit_document = self._resolve_target_document_for_instruction(message.session_id, message.text)
+        if explicit_document is not None and self._document_target_allowed_for_requirement(
+            explicit_document,
+            requirement_id,
+        ):
+            return explicit_document
+        return requirement_document
 
     @staticmethod
     def _graph_primary_supports_route(route_decision: RouteDecision) -> bool:
@@ -1571,6 +1815,7 @@ class FeishuWorkflowService:
         self.delivery_tool.delivery_artifact_service = self.delivery_artifact_service
         self.delivery_tool.task_run_service = self.task_run_service
         self.delivery_tool.message_api = self.message_api
+        self.delivery_tool.feishu_artifact_integrator = self.feishu_artifact_integrator
         return self.delivery_tool
 
     def _presentation_tool(self) -> PresentationTool:

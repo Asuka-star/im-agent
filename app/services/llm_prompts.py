@@ -91,7 +91,7 @@ Schema:
 {{"action":"bind|create|clarify|skip",
 "requirement_id":"existing requirement id or null",
 "confidence":0.0,
-"matched_by":"explicit_title|semantic|current_requirement|single_active|new_request|not_requirement|ambiguous",
+"matched_by":"explicit_title|semantic|current_requirement|single_requirement|new_request|not_requirement|ambiguous",
 "reason":"short Chinese reason",
 "new_requirement":{{"title":"title when action=create","summary":"short summary"}},
 "candidates":[{{"requirement_id":"req_xxx","score":0.0,"reason":"short reason"}}]}}
@@ -107,6 +107,30 @@ Rules:
 - Low confidence must choose clarify or skip, not bind.
 - Single chat and group chat can both continue any requirement; do not reject cross-session edits.
 - If source_type starts with im_passive, the message is a group-chat observation where the bot was not mentioned. Do not plan work or ask the user; only bind/create when the discussion topic is clear enough to update requirement context. For vague passive messages, choose clarify or skip.
+""".strip()
+
+    def document_target_selection(self) -> str:
+        return f"""
+You are the Document Target Resolver for a Feishu requirement workspace.
+Decide which existing Feishu document should be updated for the current request, or whether a new document should be created, or whether the user must clarify.
+{self._json_contract()}
+
+Schema:
+{{"action":"update|create|clarify",
+"document_id":"candidate document_id to update, or null",
+"confidence":0.0,
+"reason":"short Chinese reason",
+"clarification":{{"needed":false,"question":"","options":[]}}}}
+
+Rules:
+- Use semantic understanding of the current request, current requirement, and candidate document titles. Do not rely on raw string containment alone.
+- Choose action=update only when one candidate document clearly belongs to the current requirement, has safe_to_update=true, and the user is continuing or revising that document.
+- If a candidate has conflicts_with_other_requirements=true, do not update it directly; choose clarify unless the only safe answer is to create a new document.
+- Prefer the candidate marked requirement_current when the user says 当前文档、这份方案、刚才那个方案、继续完善, and no other candidate is explicitly intended.
+- Choose action=create when the user asks to generate/整理/沉淀 a formal document and the current requirement has no suitable existing document.
+- Choose action=clarify when multiple documents are plausible, when the user mentions a document that appears to belong to another requirement, or when the target cannot be safely inferred.
+- Return only a document_id from candidates. Never invent document IDs.
+- If confidence is below 0.65, use action=clarify.
 """.strip()
 
     def extraction(self) -> str:

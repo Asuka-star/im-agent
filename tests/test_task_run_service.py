@@ -239,6 +239,105 @@ class TaskRunServiceTests(unittest.TestCase):
         self.assertEqual(lab_checks["canvas"], "ready")
         self.assertEqual(lab_checks["slides"], "missing")
 
+    def test_requirement_task_run_detail_exposes_only_current_slides_artifact(self) -> None:
+        with self.test_session_local() as session:
+            session.add(
+                Requirement(
+                    requirement_id="req_current_slides",
+                    title="校园活动报名系统",
+                    primary_session_id="oc_lifecycle",
+                )
+            )
+            session.commit()
+        first_run = self.service.create_task_run(
+            session_id="oc_lifecycle",
+            requirement_id="req_current_slides",
+            title="生成答辩 PPT",
+            source_type="group",
+        )
+        first_artifact = self.service.create_artifact(
+            first_run.task_run_id,
+            artifact_type="slides_package",
+            title="答辩 PPT v1",
+            url="/api/artifacts/slides/v1.html",
+            preview={"version": 1, "exports": {"html": "v1", "pptx": "v1.pptx"}},
+            version=1,
+        )
+        second_run = self.service.create_task_run(
+            session_id="oc_lifecycle",
+            requirement_id="req_current_slides",
+            title="更新答辩 PPT",
+            source_type="group",
+        )
+        second_artifact = self.service.create_artifact(
+            second_run.task_run_id,
+            artifact_type="slides_package",
+            title="答辩 PPT v2",
+            url="/api/artifacts/slides/v2.html",
+            preview={"version": 2, "exports": {"html": "v2", "pptx": "v2.pptx"}},
+            version=2,
+        )
+        with self.test_session_local() as session:
+            requirement = session.query(Requirement).filter_by(requirement_id="req_current_slides").one()
+            requirement.current_slides_artifact_id = second_artifact.artifact_id
+            session.commit()
+
+        detail = self.service.get_task_run(first_run.task_run_id)
+
+        self.assertIsNotNone(detail)
+        assert detail is not None
+        slides = [artifact for artifact in detail.artifacts if artifact.artifact_type == "slides_package"]
+        self.assertEqual([artifact.artifact_id for artifact in slides], [second_artifact.artifact_id])
+        self.assertNotIn(first_artifact.artifact_id, [artifact.artifact_id for artifact in detail.artifacts])
+        self.assertEqual(slides[0].version, 2)
+
+    def test_requirement_task_run_detail_falls_back_to_latest_artifact_when_current_pointer_missing(self) -> None:
+        with self.test_session_local() as session:
+            session.add(
+                Requirement(
+                    requirement_id="req_latest_canvas",
+                    title="实验室预约系统",
+                    primary_session_id="oc_lifecycle",
+                )
+            )
+            session.commit()
+        first_run = self.service.create_task_run(
+            session_id="oc_lifecycle",
+            requirement_id="req_latest_canvas",
+            title="生成 Canvas",
+            source_type="group",
+        )
+        first_artifact = self.service.create_artifact(
+            first_run.task_run_id,
+            artifact_type="canvas",
+            title="流程图 v1",
+            url="/api/artifacts/canvas/v1.html",
+            preview={"version": 1, "exports": {"html": "v1", "svg": "v1.svg"}},
+            version=1,
+        )
+        second_run = self.service.create_task_run(
+            session_id="oc_lifecycle",
+            requirement_id="req_latest_canvas",
+            title="更新 Canvas",
+            source_type="group",
+        )
+        second_artifact = self.service.create_artifact(
+            second_run.task_run_id,
+            artifact_type="canvas",
+            title="流程图 v2",
+            url="/api/artifacts/canvas/v2.html",
+            preview={"version": 2, "exports": {"html": "v2", "svg": "v2.svg"}},
+            version=2,
+        )
+
+        detail = self.service.get_task_run(first_run.task_run_id)
+
+        self.assertIsNotNone(detail)
+        assert detail is not None
+        canvas = [artifact for artifact in detail.artifacts if artifact.artifact_type == "canvas"]
+        self.assertEqual([artifact.artifact_id for artifact in canvas], [second_artifact.artifact_id])
+        self.assertNotIn(first_artifact.artifact_id, [artifact.artifact_id for artifact in detail.artifacts])
+
     def test_requirement_task_run_detail_can_use_document_from_other_bound_session(self) -> None:
         self.service.session_document_service = _MappedSessionDocumentService(
             {

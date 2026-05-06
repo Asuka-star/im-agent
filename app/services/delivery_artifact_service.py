@@ -26,6 +26,11 @@ class DeliveryArtifactService:
             "json": f"/api/artifacts/delivery/{stem}.json",
             "html": f"/api/artifacts/delivery/{stem}.html",
         }
+        feishu_delivery = normalized.get("feishu_delivery")
+        if isinstance(feishu_delivery, dict):
+            feishu_url = str(feishu_delivery.get("url") or feishu_delivery.get("document_url") or "").strip()
+            if feishu_url:
+                normalized["exports"]["feishu_doc"] = feishu_url
         json_path.write_text(json.dumps(normalized, ensure_ascii=False, indent=2), encoding="utf-8")
         html_path.write_text(self._render_html(normalized), encoding="utf-8")
         return {
@@ -62,6 +67,11 @@ class DeliveryArtifactService:
             "artifacts": [item for item in items if isinstance(item, dict)],
             "artifact_summaries": [item for item in artifact_summaries if isinstance(item, dict)],
             "deliverables": [item for item in deliverables if isinstance(item, dict)],
+            "feishu_delivery": (
+                manifest.get("feishu_delivery")
+                if isinstance(manifest.get("feishu_delivery"), dict)
+                else None
+            ),
             "context_pack": manifest.get("context_pack") if isinstance(manifest.get("context_pack"), dict) else {},
             "highlights": [
                 str(item).strip()
@@ -175,6 +185,9 @@ class DeliveryArtifactService:
     .missing {{ color: #9a5b12; font-weight: 700; }}
     .links {{ display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }}
     .links a {{ background: #eaf3f5; border-radius: 999px; color: #116a7b; padding: 6px 10px; text-decoration: none; }}
+    .feishu {{ margin-top: 12px; border-top: 1px solid #edf2f4; padding-top: 10px; color: #31515e; font-size: 13px; }}
+    .feishu a {{ color: #116a7b; }}
+    .sync-chip {{ display: inline-block; margin: 4px 6px 0 0; background: #eef6f2; border-radius: 999px; padding: 3px 8px; }}
     a {{ color: #116a7b; }}
   </style>
 </head>
@@ -212,6 +225,7 @@ class DeliveryArtifactService:
         if not links_html:
             url = str(item.get("url") or "").strip()
             links_html = self._render_named_link({"label": "打开", "url": url}) if url else ""
+        feishu_sync_html = self._render_feishu_sync(item.get("feishu_sync"))
         return (
             '<article class="card">'
             f'<div class="label">{label}</div>'
@@ -219,8 +233,39 @@ class DeliveryArtifactService:
             f'<strong>{title}</strong>'
             f'<p>{detail}</p>'
             f'<div class="links">{links_html}</div>'
+            f'{feishu_sync_html}'
             '</article>'
         )
+
+    def _render_feishu_sync(self, sync: Any) -> str:
+        if not isinstance(sync, dict):
+            return ""
+        document_url = str(sync.get("document_url") or "").strip()
+        status = html.escape(str(sync.get("status") or "linked"))
+        media_items = sync.get("media_items") if isinstance(sync.get("media_items"), list) else []
+        media_html = "".join(
+            self._render_sync_media_item(item)
+            for item in media_items
+            if isinstance(item, dict)
+        )
+        link_html = (
+            f'<a href="{html.escape(document_url)}">飞书交付文档</a>'
+            if document_url
+            else "飞书交付文档"
+        )
+        return f'<div class="feishu">飞书同步：{status} · {link_html}<div>{media_html}</div></div>'
+
+    def _render_sync_media_item(self, item: dict[str, Any]) -> str:
+        label = {
+            "canvas_image": "Canvas 图片",
+            "slides_pptx": "PPTX 附件",
+        }.get(str(item.get("kind") or ""), str(item.get("kind") or "媒体"))
+        status = str(item.get("status") or "").strip()
+        token = str(item.get("file_token") or "").strip()
+        detail = f"{label}: {status or 'ready'}"
+        if token:
+            detail = f"{detail} · token {token[:8]}"
+        return f'<span class="sync-chip">{html.escape(detail)}</span>'
 
     def _render_named_link(self, link: dict[str, Any]) -> str:
         label = html.escape(str(link.get("label") or "打开"))

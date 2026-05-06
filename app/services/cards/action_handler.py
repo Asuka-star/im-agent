@@ -50,7 +50,7 @@ class FeishuCardActionService:
             return {"code": 0, "msg": "duplicate_ignored", "data": previous}
 
         try:
-            if self._confirmation_already_answered(event):
+            if self._confirmation_already_answered(event) and not self._is_informational_clarification_event(event):
                 result = {
                     "ok": True,
                     "action": event.action.action,
@@ -278,6 +278,9 @@ class FeishuCardActionService:
     def _select_clarification_option(self, event: FeishuCardActionEvent) -> dict[str, Any]:
         option = str(event.action.payload.get("option") or "").strip()
         display_option = option or "未命名选项"
+        informational = self._handle_informational_clarification_option(event, option=option)
+        if informational is not None:
+            return informational
         self._patch_card_status(
             event,
             title="已收到选择",
@@ -316,6 +319,101 @@ class FeishuCardActionService:
         )
         self._reply(event, reply or status_content)
         return {"ok": True, "action": event.action.action, "option": option, "resumed": resumed_ok}
+
+    def _handle_informational_clarification_option(
+        self,
+        event: FeishuCardActionEvent,
+        *,
+        option: str,
+    ) -> dict[str, Any] | None:
+        normalized = _normalized(option)
+        if not normalized:
+            return None
+        if self._is_canvas_view_option(normalized):
+            link_text = self._latest_artifact_link_text(event, artifact_types={"canvas"})
+            if link_text:
+                content = f"已收到选择：{option}\n\n当前画布：{link_text}\n\n如果还要继续修订，请直接回复具体节点名称/编号和修改内容。"
+                reply = f"当前画布：{link_text}\n\n如果还要继续修订，请直接回复具体节点名称/编号和修改内容。"
+            else:
+                content = f"已收到选择：{option}\n\n我没有在当前任务里找到可打开的画布链接。请在工作台查看当前任务，或直接回复具体节点名称/编号和修改内容。"
+                reply = "我没有在当前任务里找到可打开的画布链接。请在工作台查看当前任务，或直接回复具体节点名称/编号和修改内容。"
+            self._patch_card_status(event, title="已发送当前画布", content=content, template="blue")
+            self._reply(event, reply)
+            return {
+                "ok": True,
+                "action": event.action.action,
+                "option": option,
+                "resumed": False,
+                "informational": True,
+                "kind": "view_canvas",
+            }
+        if self._is_rephrase_option(normalized):
+            content = (
+                f"已收到选择：{option}\n\n"
+                "这个选项需要你补充具体内容，系统不会直接继续修订。请直接回复节点名称/编号和修改内容，"
+                "例如：把「学生提交预约」改成「学生提交设备预约」。"
+            )
+            self._patch_card_status(event, title="请补充具体节点", content=content, template="orange")
+            self._reply(
+                event,
+                "请直接回复具体节点名称/编号和修改内容，例如：把「学生提交预约」改成「学生提交设备预约」。",
+            )
+            return {
+                "ok": True,
+                "action": event.action.action,
+                "option": option,
+                "resumed": False,
+                "informational": True,
+                "kind": "needs_free_text",
+            }
+        return None
+
+    def _is_informational_clarification_event(self, event: FeishuCardActionEvent) -> bool:
+        if event.action.action != "select_clarification_option":
+            return False
+        option = str(event.action.payload.get("option") or "").strip()
+        normalized = _normalized(option)
+        return self._is_canvas_view_option(normalized) or self._is_rephrase_option(normalized)
+
+    @staticmethod
+    def _is_canvas_view_option(normalized_option: str) -> bool:
+        return "查看" in normalized_option and "画布" in normalized_option
+
+    @staticmethod
+    def _is_rephrase_option(normalized_option: str) -> bool:
+        return normalized_option.startswith("重新说明")
+
+    def _latest_artifact_link_text(self, event: FeishuCardActionEvent, *, artifact_types: set[str]) -> str | None:
+        task_run_id = event.action.task_run_id
+        if not task_run_id:
+            return None
+        get_task_run = getattr(self.workflow.task_run_service, "get_task_run", None)
+        if not callable(get_task_run):
+            return None
+        try:
+            detail = get_task_run(task_run_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to load task run artifacts for card action: %s", exc)
+            return None
+        artifacts = list(getattr(detail, "artifacts", []) or []) if detail is not None else []
+        for artifact in reversed(artifacts):
+            artifact_type = self._field_value(artifact, "artifact_type")
+            if artifact_type not in artifact_types:
+                continue
+            url = self._field_value(artifact, "url")
+            title = self._field_value(artifact, "title") or "当前画布"
+            if url:
+                return f"[{title}]({url})"
+            return title
+        return None
+
+    @staticmethod
+    def _field_value(value: Any, field: str) -> str:
+        if isinstance(value, dict):
+            raw = value.get(field)
+        else:
+            raw = getattr(value, field, None)
+        return str(raw or "").strip()
 
     def _current_tasks_for_session(self, session_id: str, *, chat_id: str | None = None) -> list[TaskItem]:
         pseudo_message = FeishuMessageContext(

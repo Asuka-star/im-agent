@@ -104,7 +104,7 @@ class RequirementRouteTests(unittest.TestCase):
             task_run.task_run_id,
             RequirementReassignRequest(requirement_id=created.requirement_id),
         ))
-        listed = asyncio.run(list_requirements(session_id="oc_route", status="active", query="报名", limit=20))
+        listed = asyncio.run(list_requirements(session_id="oc_route", query="报名", limit=20))
         detail = asyncio.run(get_requirement(created.requirement_id))
         task_runs = asyncio.run(list_requirement_task_runs(created.requirement_id))
 

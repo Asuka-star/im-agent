@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     app_host: str = Field(default="0.0.0.0", alias="APP_HOST")
     app_port: int = Field(default=8000, alias="APP_PORT")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
+    suppress_frontend_access_logs: bool = Field(default=True, alias="SUPPRESS_FRONTEND_ACCESS_LOGS")
     artifact_public_base_url: str = Field(
         default="http://science.topviewclub.cn",
         alias="ARTIFACT_PUBLIC_BASE_URL",
@@ -37,6 +38,28 @@ class Settings(BaseSettings):
     feishu_doc_folder_token: str = Field(default="", alias="FEISHU_DOC_FOLDER_TOKEN")
     feishu_doc_title_prefix: str = Field(default="协同产出", alias="FEISHU_DOC_TITLE_PREFIX")
     feishu_doc_auto_folder_name: str = Field(default="AI协作产出", alias="FEISHU_DOC_AUTO_FOLDER_NAME")
+    feishu_artifact_sync_enabled: bool = Field(default=False, alias="FEISHU_ARTIFACT_SYNC_ENABLED")
+    feishu_artifact_sync_on_delivery: bool = Field(default=True, alias="FEISHU_ARTIFACT_SYNC_ON_DELIVERY")
+    feishu_artifact_delivery_doc_title_prefix: str = Field(
+        default="AI协作交付包",
+        alias="FEISHU_ARTIFACT_DELIVERY_DOC_TITLE_PREFIX",
+    )
+    feishu_artifact_canvas_image_enabled: bool = Field(default=False, alias="FEISHU_ARTIFACT_CANVAS_IMAGE_ENABLED")
+    feishu_artifact_slides_upload_enabled: bool = Field(default=False, alias="FEISHU_ARTIFACT_SLIDES_UPLOAD_ENABLED")
+    feishu_artifact_slides_import_enabled: bool = Field(default=False, alias="FEISHU_ARTIFACT_SLIDES_IMPORT_ENABLED")
+    feishu_artifact_slides_import_type: str = Field(default="slides", alias="FEISHU_ARTIFACT_SLIDES_IMPORT_TYPE")
+    feishu_artifact_slides_import_poll_seconds: float = Field(
+        default=2.0,
+        alias="FEISHU_ARTIFACT_SLIDES_IMPORT_POLL_SECONDS",
+    )
+    feishu_artifact_slides_import_timeout_seconds: float = Field(
+        default=30.0,
+        alias="FEISHU_ARTIFACT_SLIDES_IMPORT_TIMEOUT_SECONDS",
+    )
+    feishu_artifact_upload_timeout_seconds: float = Field(
+        default=30.0,
+        alias="FEISHU_ARTIFACT_UPLOAD_TIMEOUT_SECONDS",
+    )
 
     feishu_bitable_enabled: bool = Field(default=False, alias="FEISHU_BITABLE_ENABLED")
     feishu_bitable_app_token: str = Field(default="", alias="FEISHU_BITABLE_APP_TOKEN")

@@ -486,7 +486,58 @@ class TaskRunService:
                 continue
             seen.add(artifact_id)
             deduped.append(artifact)
+        if row.requirement_id:
+            return self._requirement_current_artifact_view(session, row, deduped)
         return deduped
+
+    def _requirement_current_artifact_view(self, session, row: TaskRun, artifacts: list[Artifact]) -> list[Artifact]:
+        requirement = session.execute(
+            select(Requirement).where(Requirement.requirement_id == row.requirement_id)
+        ).scalar_one_or_none()
+        current_by_group = {
+            group: artifact_id
+            for group, artifact_id in {
+                "slides": str(getattr(requirement, "current_slides_artifact_id", None) or "").strip(),
+                "canvas": str(getattr(requirement, "current_canvas_artifact_id", None) or "").strip(),
+                "delivery": str(getattr(requirement, "current_delivery_artifact_id", None) or "").strip(),
+            }.items()
+            if artifact_id
+        }
+        latest_by_group: dict[str, Artifact] = {}
+        passthrough: list[Artifact] = []
+        for artifact in artifacts:
+            group = self._singleton_artifact_group(str(artifact.artifact_type or ""))
+            if not group:
+                passthrough.append(artifact)
+                continue
+            current_id = current_by_group.get(group)
+            if current_id and artifact.artifact_id != current_id:
+                continue
+            current = latest_by_group.get(group)
+            if current is None or self._artifact_sort_key(artifact) >= self._artifact_sort_key(current):
+                latest_by_group[group] = artifact
+        selected = list(latest_by_group.values()) + passthrough
+        selected.sort(key=lambda item: item.id)
+        return selected
+
+    @staticmethod
+    def _singleton_artifact_group(artifact_type: str) -> str:
+        normalized = artifact_type.strip()
+        if normalized in {"slides", "slides_package"}:
+            return "slides"
+        if normalized == "canvas":
+            return "canvas"
+        if normalized == "delivery_bundle":
+            return "delivery"
+        return ""
+
+    @staticmethod
+    def _artifact_sort_key(artifact: Artifact) -> tuple:
+        return (
+            artifact.updated_at or artifact.created_at,
+            coerce_positive_int(artifact.version),
+            artifact.id,
+        )
 
     def _context_task_run_ids(self, session, row: TaskRun) -> list[str]:
         if row.requirement_id:

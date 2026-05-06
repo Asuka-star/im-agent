@@ -12,7 +12,6 @@ from app.schemas.task_run import ArtifactRecord, SessionDocumentRecord, TaskRunS
 class RequirementSummary(BaseModel):
     requirement_id: str
     title: str
-    status: str = "active"
     summary: str | None = None
     primary_session_id: str
     primary_session_label: str | None = None

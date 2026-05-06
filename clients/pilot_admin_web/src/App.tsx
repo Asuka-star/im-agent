@@ -30,13 +30,11 @@ import {
   bundleDelivery,
   confirmTaskRun,
   connectSocket,
-  createRequirement,
   getRequirement,
   getRecommendations,
   getTaskRun,
   listRequirements,
   listTaskRuns,
-  reassignTaskRunRequirement,
   reviseDocument,
   reviseSlides,
 } from './api';
@@ -49,6 +47,7 @@ import {
   shortTime,
   sourceLabel,
   stageLabel,
+  stepTitleLabel,
   stepTypeLabel,
   statusLabel,
   statusTone,
@@ -57,6 +56,7 @@ import type {
   ArtifactRecord,
   ArtifactCheckRecord,
   ConfirmationRequestRecord,
+  ContextPackItemRecord,
   ContextPackRecord,
   JsonMap,
   NextActionBundle,
@@ -86,6 +86,24 @@ type SectionToggleProps = {
   onToggle: () => void;
 };
 
+type WorkspaceMode = 'requirement' | 'task';
+
+const DEFAULT_TASK_COLLAPSED: Record<string, boolean> = {
+  'next-actions': true,
+  'reply-preview': true,
+  timeline: true,
+  artifacts: true,
+  confirmations: true,
+};
+
+const DEFAULT_REQUIREMENT_COLLAPSED: Record<string, boolean> = {
+  sources: true,
+  'context-pack': true,
+  products: true,
+  acceptance: true,
+  recommendations: true,
+};
+
 export function App() {
   const [taskRuns, setTaskRuns] = useState<TaskRunSummary[]>([]);
   const [requirements, setRequirements] = useState<RequirementSummary[]>([]);
@@ -104,6 +122,7 @@ export function App() {
   const [error, setError] = useState('');
   const [feedState, setFeedState] = useState<ConnectionState>('idle');
   const [taskState, setTaskState] = useState<ConnectionState>('idle');
+  const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>('requirement');
   const [lastUpdatedAt, setLastUpdatedAt] = useState<Date | null>(null);
 
   const mergeSummary = useCallback((incoming: TaskRunSummary) => {
@@ -210,7 +229,6 @@ export function App() {
     try {
       const items = await listRequirements({
         query: sessionQuery.trim() || undefined,
-        status: 'active',
         limit: 80,
       });
       const sorted = items.sort(compareRequirementTime);
@@ -298,11 +316,10 @@ export function App() {
       : taskRuns;
   }, [requirementDetail, selectedRequirementId, taskRuns]);
 
-  const visibleRuns = useMemo(() => {
+  const searchFilteredRuns = useMemo(() => {
     const keyword = searchText.trim().toLowerCase();
     const sessionKeyword = sessionQuery.trim().toLowerCase();
     return activeRuns.filter((item) => {
-      if (statusFilter !== 'all' && item.status !== statusFilter) return false;
       if (sessionKeyword) {
         const sessionHaystack = [
           item.session_id,
@@ -325,10 +342,15 @@ export function App() {
         item.latest_reply_preview || '',
       ].join(' ').toLowerCase().includes(keyword);
     });
-  }, [activeRuns, searchText, sessionQuery, statusFilter]);
+  }, [activeRuns, searchText, sessionQuery]);
+
+  const visibleRuns = useMemo(() => {
+    if (statusFilter === 'all') return searchFilteredRuns;
+    return searchFilteredRuns.filter((item) => item.status === statusFilter);
+  }, [searchFilteredRuns, statusFilter]);
 
   const sessionSummaries = useMemo(() => buildSessionSummaries(taskRuns), [taskRuns]);
-  const statusOptions = useMemo(() => buildStatusOptions(activeRuns), [activeRuns]);
+  const statusOptions = useMemo(() => buildStatusOptions(searchFilteredRuns), [searchFilteredRuns]);
   const runEmptyTitle = selectedRequirementId && requirementDetail && activeRuns.length === 0
     ? '这个需求还没有任务运行'
     : '没有匹配的任务';
@@ -346,45 +368,6 @@ export function App() {
       }
       await refreshList(true);
       await refreshRequirements(true);
-    } catch (nextError) {
-      setError(errorText(nextError));
-    } finally {
-      setSubmitting('');
-    }
-  };
-
-  const reassignRequirement = async (taskRunId: string, requirementId: string) => {
-    setSubmitting(`requirement:${taskRunId}`);
-    setError('');
-    try {
-      await reassignTaskRunRequirement(requirementId, taskRunId);
-      await refreshList(true);
-      await refreshRequirements(true);
-      await loadRequirement(requirementId, true);
-      await loadDetail(taskRunId, true);
-    } catch (nextError) {
-      setError(errorText(nextError));
-    } finally {
-      setSubmitting('');
-    }
-  };
-
-  const createRequirementFromTask = async (taskRun: TaskRunDetail, title: string) => {
-    setSubmitting(`requirement:create:${taskRun.task_run_id}`);
-    setError('');
-    try {
-      const created = await createRequirement({
-        title,
-        summary: taskRun.latest_summary || taskRun.latest_reply_preview || null,
-        primarySessionId: taskRun.session_id,
-        createdBy: 'pilot_admin_web',
-      });
-      mergeRequirementSummary(created);
-      await reassignTaskRunRequirement(created.requirement_id, taskRun.task_run_id);
-      await refreshList(true);
-      await refreshRequirements(true);
-      await loadRequirement(created.requirement_id, true);
-      await loadDetail(taskRun.task_run_id, true);
     } catch (nextError) {
       setError(errorText(nextError));
     } finally {
@@ -414,13 +397,6 @@ export function App() {
           <ConnectionPill state={feedState} label="会话流" />
         </div>
         <div className="hero-controls">
-          <label className="hero-input">
-            <span>会话名称查询</span>
-            <input value={sessionQuery} onChange={(event) => setSessionQuery(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && refreshWorkspace(false)} placeholder="输入群名或人名关键词" />
-          </label>
-          <button className="hero-button primary" onClick={() => refreshWorkspace(false)}>
-            <Filter size={17} />应用过滤
-          </button>
           <button className="hero-button ghost" onClick={() => refreshWorkspace(true)} disabled={listLoading || requirementLoading}>
             {listLoading || requirementLoading ? <Loader2 className="spin" size={17} /> : <RefreshCw size={17} />}
             {listLoading || requirementLoading ? '同步中...' : '刷新工作区'}
@@ -462,69 +438,92 @@ export function App() {
           />
         </aside>
 
-        <aside className="run-list-panel">
-          <PanelHeading
-            title={selectedRequirementId ? '需求下的任务' : '全部任务运行'}
-            subtitle={requirementDetail ? requirementDetail.title : '选择需求后，这里只展示该需求下面的 taskrun。'}
-          />
-          <StatsStrip runs={activeRuns} />
-
-          <div className="filter-row">
-            <label className="input-shell">
-              <Search size={16} />
-              <input value={searchText} onChange={(event) => setSearchText(event.target.value)} placeholder="搜索标题、会话名称、意图或摘要" />
-            </label>
-            <div className="status-chip-row" aria-label="任务状态筛选">
-              {statusOptions.map((item) => (
-                <button
-                  key={item.key}
-                  className={`status-choice ${statusFilter === item.key ? 'active' : ''}`}
-                  onClick={() => setStatusFilter(item.key)}
-                >
-                  <Filter size={14} />
-                  {item.label} {item.count}
-                </button>
-              ))}
+        <section className="workspace-main section-block">
+          <div className="workspace-view-head">
+            <div>
+              <h2>{workspaceMode === 'requirement' ? '需求信息' : '任务运行'}</h2>
+              <p>{workspaceMode === 'requirement' ? '默认查看需求级上下文、当前产物和建议动作。' : '查看该需求下的 taskrun 列表与单次运行详情。'}</p>
+            </div>
+            <div className="workspace-mode-switch" aria-label="工作区视图切换">
+              <button className={workspaceMode === 'requirement' ? 'active' : ''} onClick={() => setWorkspaceMode('requirement')}>
+                <Layers3 size={16} />需求信息
+              </button>
+              <button className={workspaceMode === 'task' ? 'active' : ''} onClick={() => setWorkspaceMode('task')}>
+                <Route size={16} />任务运行
+              </button>
             </div>
           </div>
 
-          <div className="run-list">
-            {listLoading && taskRuns.length === 0 ? <EmptyState title="加载任务运行中" /> : null}
-            {!listLoading && visibleRuns.length === 0 ? <EmptyState title={runEmptyTitle} /> : null}
-            {visibleRuns.map((item) => (
-              <RunListItem key={item.task_run_id} item={item} selected={item.task_run_id === selectedId} onClick={() => loadDetail(item.task_run_id)} />
-            ))}
-          </div>
-        </aside>
+          {workspaceMode === 'requirement' ? (
+            <div className="workspace-view-body">
+              {requirementDetail ? (
+                <RequirementDetailCard
+                  detail={requirementDetail}
+                  fallbackContextPack={detail?.requirement_id === requirementDetail.requirement_id ? detail.context_pack : null}
+                />
+              ) : (
+                <section className="requirement-empty-panel">
+                  <SectionTitle icon={<Layers3 size={17} />} title="先选择一个需求" />
+                  <p className="muted-text">左侧选择需求后，这里会展示需求级产物、来源和推进概览。</p>
+                </section>
+              )}
+            </div>
+          ) : (
+            <div className="workspace-view-body task-workspace-grid">
+              <aside className="run-list-panel">
+                <PanelHeading
+                  title={selectedRequirementId ? '需求下的任务' : '全部任务运行'}
+                  subtitle={requirementDetail ? requirementDetail.title : '选择需求后，这里只展示该需求下面的 taskrun。'}
+                />
 
-        <section className="detail-panel">
-          <PanelHeading title="需求与任务详情" subtitle="需求级上下文、任务时间线、生成产物和确认请求都会从这里实时更新。" />
-          {requirementDetail && (
-            <RequirementDetailCard
-              detail={requirementDetail}
-              selectedTaskId={selectedId}
-              onSelectTask={(taskRunId) => loadDetail(taskRunId)}
-            />
-          )}
-          {detailLoading ? (
-            <div className="center-state"><Loader2 className="spin" />加载详情</div>
-          ) : detail ? (
-            <TaskDetail
-              detail={detail}
-              recommendations={recommendations}
-              requirements={requirements}
-              selectedRequirementId={selectedRequirementId}
-              submitting={submitting}
-              showArtifacts={!requirementDetail}
-              onBundle={() => runAction('bundle', () => bundleDelivery(detail.task_run_id))}
-              onConfirm={(confirmation, option) => runAction(`confirm:${confirmation.confirmation_id}`, () => confirmTaskRun(detail.task_run_id, confirmation.confirmation_id, option))}
-              onCreateRequirement={(title) => createRequirementFromTask(detail, title)}
-              onReassignRequirement={(requirementId) => reassignRequirement(detail.task_run_id, requirementId)}
-              onReviseDocument={(instruction, documentId) => runAction('revise-doc', () => reviseDocument(detail.task_run_id, instruction, documentId))}
-              onReviseSlides={(artifactId, instruction) => runAction(`revise-slides:${artifactId}`, () => reviseSlides(detail.task_run_id, instruction, artifactId))}
-            />
-          ) : requirementDetail && requirementDetail.task_runs.length === 0 ? null : (
-            <EmptyState title="未选择任务" />
+                <div className="filter-row">
+                  <label className="input-shell">
+                    <Search size={16} />
+                    <input value={searchText} onChange={(event) => setSearchText(event.target.value)} placeholder="搜索标题、会话名称、意图或摘要" />
+                  </label>
+                  <div className="status-chip-row" aria-label="任务状态筛选">
+                    {statusOptions.map((item) => (
+                      <button
+                        key={item.key}
+                        className={`status-choice ${statusFilter === item.key ? 'active' : ''}`}
+                        onClick={() => setStatusFilter(item.key)}
+                      >
+                        <Filter size={14} />
+                        {item.label} {item.count}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="run-list">
+                  {listLoading && taskRuns.length === 0 ? <EmptyState title="加载任务运行中" /> : null}
+                  {!listLoading && visibleRuns.length === 0 ? <EmptyState title={runEmptyTitle} /> : null}
+                  {visibleRuns.map((item) => (
+                    <RunListItem key={item.task_run_id} item={item} selected={item.task_run_id === selectedId} onClick={() => loadDetail(item.task_run_id)} />
+                  ))}
+                </div>
+              </aside>
+
+              <section className="detail-panel">
+                <PanelHeading title="任务详情" subtitle="这里聚焦单次 taskrun 的执行过程、确认请求和运行日志。" />
+                {detailLoading ? (
+                  <div className="center-state"><Loader2 className="spin" />加载详情</div>
+                ) : detail ? (
+                  <TaskDetail
+                    detail={detail}
+                    recommendations={recommendations}
+                    submitting={submitting}
+                    showArtifacts={!requirementDetail}
+                    onBundle={() => runAction('bundle', () => bundleDelivery(detail.task_run_id))}
+                    onConfirm={(confirmation, option) => runAction(`confirm:${confirmation.confirmation_id}`, () => confirmTaskRun(detail.task_run_id, confirmation.confirmation_id, option))}
+                    onReviseDocument={(instruction, documentId) => runAction('revise-doc', () => reviseDocument(detail.task_run_id, instruction, documentId))}
+                    onReviseSlides={(artifactId, instruction) => runAction(`revise-slides:${artifactId}`, () => reviseSlides(detail.task_run_id, instruction, artifactId))}
+                  />
+                ) : requirementDetail && requirementDetail.task_runs.length === 0 ? null : (
+                  <EmptyState title="未选择任务" />
+                )}
+              </section>
+            </div>
           )}
         </section>
       </section>
@@ -535,28 +534,20 @@ export function App() {
 function TaskDetail(props: {
   detail: TaskRunDetail;
   recommendations: NextActionBundle | null;
-  requirements: RequirementSummary[];
-  selectedRequirementId: string;
   submitting: string;
   showArtifacts: boolean;
   onBundle: () => void;
   onConfirm: (confirmation: ConfirmationRequestRecord, option: string) => void;
-  onCreateRequirement: (title: string) => void;
-  onReassignRequirement: (requirementId: string) => void;
   onReviseDocument: (instruction: string, documentId?: string) => void;
   onReviseSlides: (artifactId: string, instruction: string) => void;
 }) {
   const { detail, recommendations } = props;
-  const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>({});
-  const [targetRequirementId, setTargetRequirementId] = useState(detail.requirement_id || props.selectedRequirementId || '');
+  const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>(DEFAULT_TASK_COLLAPSED);
   const deliveryArtifact = detail.artifacts.find((artifact) => artifact.artifact_type === 'delivery_bundle' && artifact.url);
   const deliveryUrl = deliveryArtifact?.url ? artifactUrl(deliveryArtifact.url) : '';
-  const assigningRequirement = props.submitting.startsWith('requirement:');
-  const selectedRequirement = props.requirements.find((item) => item.requirement_id === targetRequirementId);
-  const currentRequirement = props.requirements.find((item) => item.requirement_id === detail.requirement_id);
   useEffect(() => {
-    setTargetRequirementId(detail.requirement_id || props.selectedRequirementId || '');
-  }, [detail.requirement_id, detail.task_run_id, props.selectedRequirementId]);
+    setCollapsedSections(DEFAULT_TASK_COLLAPSED);
+  }, [detail.task_run_id]);
   const toggleSection = (key: string) => {
     setCollapsedSections((current) => ({ ...current, [key]: !current[key] }));
   };
@@ -584,36 +575,6 @@ function TaskDetail(props: {
           {detail.latest_summary && <p className="summary-text">{detail.latest_summary}</p>}
         </div>
         <div className="summary-actions">
-          <div className="requirement-assignment">
-            <label className="summary-select">
-              <span>需求归属</span>
-              <select value={targetRequirementId} onChange={(event) => setTargetRequirementId(event.target.value)}>
-                <option value="">未归属需求</option>
-                {props.requirements.map((item) => (
-                  <option key={item.requirement_id} value={item.requirement_id}>{item.title}</option>
-                ))}
-              </select>
-            </label>
-            <button
-              className="line-button"
-              disabled={!targetRequirementId || targetRequirementId === detail.requirement_id || assigningRequirement}
-              onClick={() => props.onReassignRequirement(targetRequirementId)}
-            >
-              {assigningRequirement ? <Loader2 className="spin" size={16} /> : <Layers3 size={16} />}
-              {selectedRequirement ? '归入需求' : '选择需求'}
-            </button>
-            <button
-              className="line-button"
-              disabled={assigningRequirement}
-              onClick={() => {
-                const title = window.prompt('新需求标题', currentRequirement?.title || detail.title);
-                if (title?.trim()) props.onCreateRequirement(title.trim());
-              }}
-            >
-              <SquarePen size={16} />新建需求
-            </button>
-            <small>{currentRequirement ? `当前：${currentRequirement.title}` : '当前任务尚未归属需求'}</small>
-          </div>
           <button className="primary-button" onClick={props.onBundle} disabled={!detail.artifacts.length || props.submitting === 'bundle'}>
             {props.submitting === 'bundle' ? <Loader2 className="spin" size={17} /> : <PackageCheck size={17} />}
             {deliveryArtifact ? '更新交付包' : '生成交付包'}
@@ -623,9 +584,7 @@ function TaskDetail(props: {
               <a className="line-button" href={deliveryUrl} target="_blank" rel="noreferrer">
                 <PlayCircle size={16} />打开交付包
               </a>
-              <button className="line-button" onClick={() => navigator.clipboard.writeText(deliveryUrl)}>
-                <Clipboard size={16} />复制链接
-              </button>
+              <CopyButton text={deliveryUrl} label="复制链接" />
             </>
           )}
         </div>
@@ -640,8 +599,6 @@ function TaskDetail(props: {
         toggle={sectionToggle('next-actions')}
       />
       <ReplyPreview text={detail.latest_reply_preview} error={detail.latest_error} toggle={sectionToggle('reply-preview')} />
-      <ContextPackPanel pack={detail.context_pack} toggle={sectionToggle('context-pack')} />
-      <ArtifactChecks checks={detail.artifact_checks || []} toggle={sectionToggle('artifact-checks')} />
       <Timeline steps={detail.steps} toggle={sectionToggle('timeline')} />
       {props.showArtifacts && (
         <Artifacts detail={detail} submitting={props.submitting} onReviseDocument={props.onReviseDocument} onReviseSlides={props.onReviseSlides} toggle={sectionToggle('artifacts')} />
@@ -703,9 +660,7 @@ function NextActions({
                   </button>
                 )}
                 {command && (
-                  <button className="line-button" onClick={() => navigator.clipboard.writeText(command)}>
-                    <Clipboard size={15} />复制指令
-                  </button>
+                  <CopyButton text={command} label="复制指令" iconSize={15} />
                 )}
               </div>
             </div>
@@ -777,34 +732,42 @@ function ContextPackColumn({
   );
 }
 
-function ArtifactChecks({ checks, toggle }: { checks: ArtifactCheckRecord[]; toggle: SectionToggleProps }) {
-  if (!checks.length) return null;
-  const ready = checks.filter((item) => item.status === 'ready').length;
-  const sceneChecks = checks.filter((item) => item.category === 'scene_c' || item.category === 'scene_d' || item.category === 'scene_cd');
+function ContextPackLane({
+  title,
+  items,
+  empty,
+}: {
+  title: string;
+  items: Array<{ kind: string; label: string; detail: string; status: string; url?: string | null }>;
+  empty: string;
+}) {
   return (
-    <section className="section-block">
-      <SectionTitle icon={<CheckCircle2 size={17} />} title="验收检查" count={checks.length} collapsed={toggle.collapsed} onToggle={toggle.onToggle} />
-      {!toggle.collapsed && (
-        <>
-          <div className="check-summary-row">
-            <Badge tone={ready === checks.length ? 'ok' : 'wait'}>{ready}/{checks.length} 已满足</Badge>
-            <span>场景 C/D：{sceneChecks.filter((item) => item.status === 'ready').length}/{sceneChecks.length} 已满足</span>
-          </div>
-          <div className="check-grid">
-            {checks.map((check) => (
-              <article className={`check-card tone-${artifactCheckTone(check.status)}`} key={check.key}>
-                <div className="check-card-head">
-                  {artifactCheckIcon(check.status)}
-                  <b>{check.label}</b>
-                  <Badge tone={artifactCheckTone(check.status)}>{artifactCheckLabel(check.status)}</Badge>
-                </div>
-                <p>{check.detail || '等待检查结果'}</p>
-              </article>
-            ))}
-          </div>
-        </>
-      )}
-    </section>
+    <div className="context-lane">
+      <h4>{title}</h4>
+      <div className="context-lane-list">
+        {items.length === 0 ? (
+          <article className="context-item context-lane-item tone-ok">
+            <div>
+              <b>{empty}</b>
+              <span>当前状态</span>
+            </div>
+            <p>没有需要补充的上下文内容。</p>
+          </article>
+        ) : items.slice(0, 8).map((item, index) => {
+          const url = item.url ? artifactUrl(item.url) : '';
+          return (
+            <article className={`context-item context-lane-item tone-${artifactCheckTone(item.status)}`} key={`${item.kind}-${index}`}>
+              <div>
+                <b>{item.label}</b>
+                <span>{contextKindLabel(item.kind)} · {artifactCheckLabel(item.status)}</span>
+              </div>
+              <p>{item.detail}</p>
+              {url && <a href={url} target="_blank" rel="noreferrer">打开</a>}
+            </article>
+          );
+        })}
+      </div>
+    </div>
   );
 }
 
@@ -834,7 +797,7 @@ function Timeline({ steps, toggle }: { steps: TaskRunStepRecord[]; toggle: Secti
               <div className={`step-dot tone-${statusTone(step.status)}`} />
               <div>
                 <div className="row-between">
-                  <b>{step.title || step.step_key}</b>
+                  <b>{stepTitleLabel(step)}</b>
                   <Badge tone={statusTone(step.status)}>{statusLabel(step.status)}</Badge>
                 </div>
                 <div className="meta-row">
@@ -933,7 +896,7 @@ function ArtifactCard(props: {
             <Presentation size={16} />修订
           </button>
         )}
-        {artifact.url && <button className="line-button" onClick={() => navigator.clipboard.writeText(artifactUrl(artifact.url))}><Clipboard size={16} />复制</button>}
+        {artifact.url && <CopyButton text={artifactUrl(artifact.url)} label="复制" />}
       </div>
     </article>
   );
@@ -1228,7 +1191,6 @@ function RequirementOverview(props: {
           >
             <span className="requirement-chip-head">
               <strong>{item.title}</strong>
-              <Badge tone={requirementStatusTone(item.status)}>{requirementStatusLabel(item.status)}</Badge>
             </span>
             <p>{item.summary || '等待更多讨论和产物沉淀'}</p>
             <span className="tiny-pills">
@@ -1254,73 +1216,167 @@ function RequirementOverview(props: {
 
 function RequirementDetailCard(props: {
   detail: RequirementDetail;
-  selectedTaskId: string;
-  onSelectTask: (taskRunId: string) => void;
+  fallbackContextPack?: ContextPackRecord | null;
 }) {
-  const { detail } = props;
+  const { detail, fallbackContextPack } = props;
+  const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>(DEFAULT_REQUIREMENT_COLLAPSED);
+  useEffect(() => {
+    setCollapsedSections(DEFAULT_REQUIREMENT_COLLAPSED);
+  }, [detail.requirement_id]);
+  const toggleSection = (key: string) => {
+    setCollapsedSections((current) => ({ ...current, [key]: !current[key] }));
+  };
+  const sectionToggle = (key: string): SectionToggleProps => ({
+    collapsed: Boolean(collapsedSections[key]),
+    onToggle: () => toggleSection(key),
+  });
   return (
-    <section className="section-block requirement-detail-card">
-      <SectionTitle icon={<Layers3 size={17} />} title="需求产物与上下文" count={detail.task_runs.length} />
-      <div className="requirement-detail-head">
-        <div>
-          <h2>{detail.title}</h2>
-          <div className="meta-row">
-            <span>{sessionLabel(detail.primary_session_label, detail.primary_session_id)}</span>
-            <Dot />
-            <span>{shortTime(detail.updated_at || detail.created_at)}</span>
+    <div className="requirement-detail-stack">
+      <section className="section-block requirement-detail-card">
+        <SectionTitle icon={<Layers3 size={17} />} title="需求产物与上下文" count={detail.task_runs.length} />
+        <div className="requirement-detail-head">
+          <div>
+            <h2>{detail.title}</h2>
+            <div className="meta-row">
+              <span>{sessionLabel(detail.primary_session_label, detail.primary_session_id)}</span>
+              <Dot />
+              <span>{shortTime(detail.updated_at || detail.created_at)}</span>
+            </div>
           </div>
         </div>
-        <Badge tone={requirementStatusTone(detail.status)}>{requirementStatusLabel(detail.status)}</Badge>
-      </div>
-      <div className="requirement-metric-row">
-        <span><Route size={15} />{detail.task_runs.length} 个任务运行</span>
-        <span><MessageSquare size={15} />{detail.sources.length} 条来源</span>
-        <span><Boxes size={15} />{requirementArtifactCount(detail)} 个当前产物</span>
-      </div>
-      {detail.summary && <p className="context-summary">{detail.summary}</p>}
-      <RequirementArtifactBoard detail={detail} />
-      <RequirementSourceTrace detail={detail} />
-      <RequirementRecommendations detail={detail} />
-      <RequirementTaskTimeline detail={detail} selectedTaskId={props.selectedTaskId} onSelectTask={props.onSelectTask} />
-    </section>
-  );
-}
-
-function RequirementSourceTrace({ detail }: { detail: RequirementDetail }) {
-  const sources = [...detail.sources].sort((a, b) => timeValue(b.created_at) - timeValue(a.created_at)).slice(0, 6);
-  if (!sources.length) return null;
-  return (
-    <div className="requirement-source-block">
-      <div className="subsection-head">
-        <h3>讨论来源</h3>
-        <span>{detail.sources.length} 条上下文线索</span>
-      </div>
-      <div className="requirement-source-grid">
-        {sources.map((source) => (
-          <div className="requirement-source-card" key={source.source_id}>
-            <div className="row-between">
-              <b>{sourceSessionTypeLabel(source.session_type)} · {sourceLabel(source.source_type)}</b>
-              <Badge tone={source.source_type.startsWith('im_passive') ? 'run' : 'muted'}>
-                {source.source_type.startsWith('im_passive') ? '被动识别' : '主动触发'}
-              </Badge>
-            </div>
-            <span>会话：{sessionLabel(source.session_label || (source.session_id === detail.primary_session_id ? detail.primary_session_label : null), source.session_id)}</span>
-            <span>发送人：{source.sender_label || source.sender_id || '未知'}</span>
-            <p>{source.message_text || '没有记录到消息正文'}</p>
-            <small>
-              {source.message_id ? `消息 ${source.message_id}` : '没有消息引用'}
-              {source.message_status && ` · ${sourceMessageStatusLabel(source.message_status)}`}
-              {' · '}
-              {shortTime(source.created_at)}
-            </small>
-          </div>
-        ))}
-      </div>
+        <div className="requirement-metric-row">
+          <span><Route size={15} />{detail.task_runs.length} 个任务运行</span>
+          <span><MessageSquare size={15} />{detail.sources.length} 条来源</span>
+          <span><Boxes size={15} />{requirementArtifactCount(detail)} 个当前产物</span>
+        </div>
+        {detail.summary && <p className="context-summary">{detail.summary}</p>}
+      </section>
+      <RequirementSourceTrace detail={detail} toggle={sectionToggle('sources')} />
+      <RequirementContextPack detail={detail} fallbackPack={fallbackContextPack} toggle={sectionToggle('context-pack')} />
+      <RequirementArtifactBoard detail={detail} toggle={sectionToggle('products')} />
+      <RequirementAcceptanceChecks detail={detail} toggle={sectionToggle('acceptance')} />
+      <RequirementRecommendations detail={detail} toggle={sectionToggle('recommendations')} />
     </div>
   );
 }
 
-function RequirementArtifactBoard({ detail }: { detail: RequirementDetail }) {
+function RequirementContextPack({
+  detail,
+  fallbackPack,
+  toggle,
+}: {
+  detail: RequirementDetail;
+  fallbackPack?: ContextPackRecord | null;
+  toggle: SectionToggleProps;
+}) {
+  const pack = requirementContextPack(detail) || fallbackPack || null;
+  if (!pack) {
+    return (
+      <section className="section-block requirement-context-block">
+        <SectionTitle icon={<Gauge size={17} />} title="上下文依据" collapsed={toggle.collapsed} onToggle={toggle.onToggle} />
+        {!toggle.collapsed && <EmptyState title="生成交付包后，这里会汇总需求级上下文依据。" />}
+      </section>
+    );
+  }
+  const usedSources = pack.used_sources || [];
+  const missingItems = pack.missing_items || [];
+  const suggestions = pack.suggested_inputs || [];
+  return (
+    <section className="section-block requirement-context-block">
+      <SectionTitle icon={<Gauge size={17} />} title="上下文依据" count={usedSources.length + missingItems.length} collapsed={toggle.collapsed} onToggle={toggle.onToggle} />
+      {!toggle.collapsed && (
+        <>
+          {pack.summary && <p className="context-summary">{pack.summary}</p>}
+          <div className="requirement-context-lanes">
+            <ContextPackLane title="已使用材料" items={usedSources} empty="暂无可追溯材料" />
+            <ContextPackLane title="建议补充" items={missingItems} empty="上下文较完整" />
+          </div>
+          {suggestions.length > 0 && (
+            <div className="context-suggestions">
+              {suggestions.slice(0, 4).map((item, index) => (
+                <span key={index}>{item}</span>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
+function RequirementSourceTrace({ detail, toggle }: { detail: RequirementDetail; toggle: SectionToggleProps }) {
+  const sources = [...detail.sources].sort((a, b) => timeValue(b.created_at) - timeValue(a.created_at)).slice(0, 6);
+  if (!sources.length) return null;
+  return (
+    <section className="section-block requirement-source-block">
+      <SectionTitle icon={<MessageSquare size={17} />} title="需求来源" count={detail.sources.length} collapsed={toggle.collapsed} onToggle={toggle.onToggle} />
+      {!toggle.collapsed && (
+        <div className="requirement-source-grid">
+          {sources.map((source) => (
+            <div className="requirement-source-card" key={source.source_id}>
+              <div className="row-between">
+                <b>{sourceSessionTypeLabel(source.session_type)} · {sourceLabel(source.source_type)}</b>
+                <Badge tone={source.source_type.startsWith('im_passive') ? 'run' : 'muted'}>
+                  {source.source_type.startsWith('im_passive') ? '被动识别' : '主动触发'}
+                </Badge>
+              </div>
+              <span>会话：{sessionLabel(source.session_label || (source.session_id === detail.primary_session_id ? detail.primary_session_label : null), source.session_id)}</span>
+              <span>发送人：{source.sender_label || source.sender_id || '未知'}</span>
+              <p>{source.message_text || '没有记录到消息正文'}</p>
+              <small>
+                {source.message_id ? `消息 ${source.message_id}` : '没有消息引用'}
+                {source.message_status && ` · ${sourceMessageStatusLabel(source.message_status)}`}
+                {' · '}
+                {shortTime(source.created_at)}
+              </small>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function RequirementAcceptanceChecks({ detail, toggle }: { detail: RequirementDetail; toggle: SectionToggleProps }) {
+  const checks = requirementAcceptanceChecks(detail);
+  if (!checks.length) {
+    return (
+      <section className="section-block requirement-check-block">
+        <SectionTitle icon={<CheckCircle2 size={17} />} title="需求验收" collapsed={toggle.collapsed} onToggle={toggle.onToggle} />
+        {!toggle.collapsed && <EmptyState title="生成交付包后，这里会汇总需求级验收状态" />}
+      </section>
+    );
+  }
+  const ready = checks.filter((item) => item.status === 'ready').length;
+  const sceneChecks = checks.filter((item) => item.category === 'scene_c' || item.category === 'scene_d' || item.category === 'scene_cd');
+  return (
+    <section className="section-block requirement-check-block">
+      <SectionTitle icon={<CheckCircle2 size={17} />} title="需求验收" count={checks.length} collapsed={toggle.collapsed} onToggle={toggle.onToggle} />
+      {!toggle.collapsed && (
+        <>
+          <div className="check-summary-row">
+            <Badge tone={ready === checks.length ? 'ok' : 'wait'}>{ready}/{checks.length} 已满足</Badge>
+            <span>场景 C/D：{sceneChecks.filter((item) => item.status === 'ready').length}/{sceneChecks.length} 已满足</span>
+          </div>
+          <div className="check-grid requirement-check-grid">
+            {checks.map((check) => (
+              <article className={`check-card tone-${artifactCheckTone(check.status)}`} key={check.key}>
+                <div className="check-card-head">
+                  {artifactCheckIcon(check.status)}
+                  <b>{check.label}</b>
+                  <Badge tone={artifactCheckTone(check.status)}>{artifactCheckLabel(check.status)}</Badge>
+                </div>
+                <p>{check.detail || '等待检查结果'}</p>
+              </article>
+            ))}
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+
+function RequirementArtifactBoard({ detail, toggle }: { detail: RequirementDetail; toggle: SectionToggleProps }) {
   const artifacts = [
     detail.current_slides,
     detail.current_canvas,
@@ -1328,20 +1384,19 @@ function RequirementArtifactBoard({ detail }: { detail: RequirementDetail }) {
   ].filter(Boolean) as ArtifactRecord[];
   const hasProducts = Boolean(detail.current_document || artifacts.length);
   return (
-    <div className="requirement-product-area">
-      <div className="subsection-head">
-        <h3>当前产物</h3>
-        <span>需求级入口</span>
-      </div>
-      {!hasProducts ? (
-        <EmptyState title="这个需求还没有沉淀当前产物" />
-      ) : (
-        <div className="requirement-product-grid">
-          {detail.current_document && <RequirementDocumentProductCard document={detail.current_document} />}
-          {artifacts.map((artifact) => <RequirementArtifactProductCard key={artifact.artifact_id} artifact={artifact} />)}
-        </div>
+    <section className="section-block requirement-product-area">
+      <SectionTitle icon={<Boxes size={17} />} title="当前产物" count={requirementArtifactCount(detail)} collapsed={toggle.collapsed} onToggle={toggle.onToggle} />
+      {!toggle.collapsed && (
+        !hasProducts ? (
+          <EmptyState title="这个需求还没有沉淀当前产物" />
+        ) : (
+          <div className="requirement-product-grid">
+            {detail.current_document && <RequirementDocumentProductCard document={detail.current_document} />}
+            {artifacts.map((artifact) => <RequirementArtifactProductCard key={artifact.artifact_id} artifact={artifact} />)}
+          </div>
+        )
       )}
-    </div>
+    </section>
   );
 }
 
@@ -1366,7 +1421,7 @@ function RequirementDocumentProductCard({ document }: { document: SessionDocumen
       <p className="muted-text">{document.sync_mode || '已同步到需求工作区'}</p>
       <div className="button-row">
         {url && <a className="line-button" href={url} target="_blank" rel="noreferrer"><PlayCircle size={16} />打开</a>}
-        {url && <button className="line-button" onClick={() => navigator.clipboard.writeText(url)}><Clipboard size={16} />复制</button>}
+        {url && <CopyButton text={url} label="复制" />}
       </div>
     </article>
   );
@@ -1394,80 +1449,71 @@ function RequirementArtifactProductCard({ artifact }: { artifact: ArtifactRecord
         <Dot />
         <span>{shortTime(artifact.updated_at || artifact.created_at)}</span>
       </div>
-      <ArtifactPreview artifact={artifact} preview={preview} />
+      <RequirementArtifactCompactPreview artifact={artifact} preview={preview} />
       <div className="button-row">
         {htmlUrl && <a className="line-button" href={htmlUrl} target="_blank" rel="noreferrer"><PlayCircle size={16} />预览</a>}
         {pptxUrl && <a className="line-button" href={pptxUrl} target="_blank" rel="noreferrer"><Download size={16} />PPT</a>}
         {pdfUrl && <a className="line-button" href={pdfUrl} target="_blank" rel="noreferrer"><Download size={16} />PDF</a>}
-        {artifact.url && <button className="line-button" onClick={() => navigator.clipboard.writeText(artifactUrl(artifact.url))}><Clipboard size={16} />复制</button>}
+        {artifact.url && <CopyButton text={artifactUrl(artifact.url)} label="复制" />}
       </div>
     </article>
   );
 }
 
-function RequirementRecommendations({ detail }: { detail: RequirementDetail }) {
-  const items = detail.recommendations?.recommendations || [];
-  if (!items.length) return null;
-  return (
-    <div className="requirement-recommendations">
-      <div className="subsection-head">
-        <h3>需求下一步</h3>
-        <span>{items.length} 条建议</span>
-      </div>
-      <div className="requirement-recommendation-list">
-        {items.slice(0, 3).map((item) => (
-          <div className="requirement-recommendation" key={item.action_id}>
-            <b>{item.title}</b>
-            {item.reason && <span>{item.reason}</span>}
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function RequirementTaskTimeline(props: {
-  detail: RequirementDetail;
-  selectedTaskId: string;
-  onSelectTask: (taskRunId: string) => void;
-}) {
-  const timeline = props.detail.timeline.slice(0, 8);
-  if (!timeline.length) {
+function RequirementArtifactCompactPreview({ artifact, preview }: { artifact: ArtifactRecord; preview: JsonMap | null }) {
+  if (!preview) return <p className="muted-text">{artifact.url || '暂无结构化摘要'}</p>;
+  if (artifact.artifact_type === 'slides_package') {
+    const slides = Array.isArray(preview.slides) ? preview.slides : [];
+    const checks = asMap(preview.rehearsal)?.checks;
+    const totalChecks = Array.isArray(checks) ? checks.length : 0;
     return (
-      <div className="requirement-timeline-block">
-        <div className="subsection-head">
-          <h3>任务推进</h3>
-          <span>等待主动触发</span>
-        </div>
-        <EmptyState title="群聊讨论已归入需求，暂时还没有 @ 机器人触发任务运行" />
+      <div className="compact-artifact-summary">
+        <span><Presentation size={15} />{slides.length || '多'} 页演示</span>
+        {totalChecks > 0 && <span><CheckCircle2 size={15} />{totalChecks} 项检查</span>}
       </div>
     );
   }
+  if (artifact.artifact_type === 'canvas') {
+    const summary = asMap(preview.summary);
+    const nodeCount = numberValue(summary?.node_count);
+    const arrowCount = numberValue(summary?.arrow_count);
+    return (
+      <div className="compact-artifact-summary">
+        <span><Layers3 size={15} />{nodeCount || 0} 个节点</span>
+        <span><Route size={15} />{arrowCount || 0} 条连线</span>
+      </div>
+    );
+  }
+  if (artifact.artifact_type === 'delivery_bundle') {
+    const checks = Array.isArray(preview.checks) ? preview.checks : [];
+    const summaries = Array.isArray(preview.artifact_summaries) ? preview.artifact_summaries : [];
+    return (
+      <div className="compact-artifact-summary">
+        <span><PackageCheck size={15} />{checks.length} 项验收</span>
+        <span><Boxes size={15} />{summaries.length} 个交付物</span>
+      </div>
+    );
+  }
+  return <p className="muted-text">{artifactLabel(artifact.artifact_type)} 已沉淀到需求工作区</p>;
+}
+
+function RequirementRecommendations({ detail, toggle }: { detail: RequirementDetail; toggle: SectionToggleProps }) {
+  const items = detail.recommendations?.recommendations || [];
+  if (!items.length) return null;
   return (
-    <div className="requirement-timeline-block">
-      <div className="subsection-head">
-        <h3>任务推进</h3>
-        <span>最近 {timeline.length} 条</span>
-      </div>
-      <div className="requirement-timeline">
-        {timeline.map((item) => {
-          const taskRunId = String(item.metadata?.task_run_id || item.item_id || '');
-          return (
-            <button
-              key={`${item.item_type}-${item.item_id}`}
-              className={`requirement-timeline-row ${taskRunId === props.selectedTaskId ? 'active' : ''}`}
-              onClick={() => taskRunId && props.onSelectTask(taskRunId)}
-            >
-              <span className={`step-dot tone-${statusTone(item.status)}`} />
-              <span>
-                <b>{item.title}</b>
-                <small>{stageLabel(item.stage)} · {statusLabel(item.status)} · {shortTime(item.updated_at || item.created_at)}</small>
-              </span>
-            </button>
-          );
-        })}
-      </div>
-    </div>
+    <section className="section-block requirement-recommendations">
+      <SectionTitle icon={<Sparkles size={17} />} title="需求下一步" count={items.length} collapsed={toggle.collapsed} onToggle={toggle.onToggle} />
+      {!toggle.collapsed && (
+        <div className="requirement-recommendation-list">
+          {items.slice(0, 3).map((item) => (
+            <div className="requirement-recommendation" key={item.action_id}>
+              <b>{item.title}</b>
+              {item.reason && <span>{item.reason}</span>}
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -1531,20 +1577,6 @@ function RunListItem({ item, selected, onClick }: { item: TaskRunSummary; select
   );
 }
 
-function StatsStrip({ runs }: { runs: TaskRunSummary[] }) {
-  const running = runs.filter((item) => item.status === 'running').length;
-  const waiting = runs.filter((item) => item.status === 'waiting_confirmation').length;
-  const completed = runs.filter((item) => item.status === 'completed').length;
-  return (
-    <div className="stats-strip">
-      <Stat label="全部任务" value={runs.length} />
-      <Stat label="运行中" value={running} />
-      <Stat label="待确认" value={waiting} />
-      <Stat label="已完成" value={completed} />
-    </div>
-  );
-}
-
 function requirementArtifactCount(item: RequirementSummary): number {
   return [
     item.current_document_id,
@@ -1554,22 +1586,58 @@ function requirementArtifactCount(item: RequirementSummary): number {
   ].filter(Boolean).length;
 }
 
-function requirementStatusLabel(value?: string | null): string {
-  const map: Record<string, string> = {
-    active: '进行中',
-    paused: '已暂停',
-    completed: '已完成',
-    archived: '已归档',
-  };
-  return map[value || ''] || statusLabel(value);
+function requirementAcceptanceChecks(detail: RequirementDetail): ArtifactCheckRecord[] {
+  const preview = parseJsonMap(detail.current_delivery?.preview_json);
+  const checks = Array.isArray(preview?.checks) ? preview.checks : [];
+  return checks
+    .map((item, index) => {
+      const source = asMap(item);
+      if (!source) return null;
+      const key = stringValue(source.key) || stringValue(source.id) || `requirement-check-${index}`;
+      const label = stringValue(source.label) || stringValue(source.title) || `验收项 ${index + 1}`;
+      const status = stringValue(source.status) || 'missing';
+      const detailText = stringValue(source.detail) || stringValue(source.message) || stringValue(source.reason);
+      const category = stringValue(source.category);
+      return {
+        key,
+        label,
+        status,
+        detail: detailText,
+        category,
+      };
+    })
+    .filter((item): item is ArtifactCheckRecord => Boolean(item));
 }
 
-function requirementStatusTone(value?: string | null): string {
-  if (value === 'active') return 'run';
-  if (value === 'paused') return 'wait';
-  if (value === 'completed') return 'ok';
-  if (value === 'archived') return 'muted';
-  return statusTone(value);
+function requirementContextPack(detail: RequirementDetail): ContextPackRecord | null {
+  const preview = parseJsonMap(detail.current_delivery?.preview_json);
+  const source = asMap(preview?.context_pack);
+  if (!source) return null;
+  return {
+    summary: stringValue(source.summary) || '已根据当前交付包汇总需求上下文。',
+    used_sources: contextPackItems(source.used_sources),
+    missing_items: contextPackItems(source.missing_items),
+    suggested_inputs: Array.isArray(source.suggested_inputs)
+      ? source.suggested_inputs.map(String).map((item) => item.trim()).filter(Boolean)
+      : [],
+  };
+}
+
+function contextPackItems(value: unknown): ContextPackItemRecord[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item, index): ContextPackItemRecord | null => {
+      const source = asMap(item);
+      if (!source) return null;
+      return {
+        kind: stringValue(source.kind) || 'note',
+        label: stringValue(source.label) || stringValue(source.title) || `依据 ${index + 1}`,
+        detail: stringValue(source.detail) || stringValue(source.summary) || stringValue(source.reason),
+        status: stringValue(source.status) || 'ready',
+        url: stringValue(source.url) || null,
+      };
+    })
+    .filter((item): item is ContextPackItemRecord => Boolean(item));
 }
 
 function sourceSessionTypeLabel(value?: string | null): string {
@@ -1599,10 +1667,10 @@ function SectionTitle({
 }) {
   const content = (
     <>
+      {onToggle && (collapsed ? <ChevronRight className="collapse-icon" size={16} /> : <ChevronDown className="collapse-icon" size={16} />)}
       {icon}
       <h3>{title}</h3>
       {typeof count === 'number' && <span>{count}</span>}
-      {onToggle && (collapsed ? <ChevronRight className="collapse-icon" size={16} /> : <ChevronDown className="collapse-icon" size={16} />)}
     </>
   );
   if (onToggle) {
@@ -1624,8 +1692,23 @@ function PanelHeading({ title, subtitle }: { title: string; subtitle: string }) 
   );
 }
 
-function Stat({ label, value }: { label: string; value: number }) {
-  return <div className="stat"><b>{value}</b><span>{label}</span></div>;
+function CopyButton({ text, label, iconSize = 16 }: { text: string; label: string; iconSize?: number }) {
+  const [state, setState] = useState<'idle' | 'copied' | 'failed'>('idle');
+  const buttonLabel = state === 'copied' ? '已复制' : state === 'failed' ? '复制失败' : label;
+  return (
+    <button
+      className={`line-button copy-button ${state}`}
+      disabled={!text}
+      onClick={() => {
+        void copyText(text).then((ok) => {
+          setState(ok ? 'copied' : 'failed');
+          window.setTimeout(() => setState('idle'), 1400);
+        });
+      }}
+    >
+      <Clipboard size={iconSize} />{buttonLabel}
+    </button>
+  );
 }
 
 function Badge({ children, tone }: { children: React.ReactNode; tone: string }) {
@@ -1761,9 +1844,19 @@ function buildSessionSummaries(runs: TaskRunSummary[]): SessionSummary[] {
 function buildStatusOptions(runs: TaskRunSummary[]) {
   const counts = new Map<string, number>();
   for (const run of runs) counts.set(run.status, (counts.get(run.status) || 0) + 1);
-  return [
+  const fixed = [
     { key: 'all', label: '全部', count: runs.length },
-    ...[...counts.entries()].sort((a, b) => b[1] - a[1]).map(([key, count]) => ({ key, label: statusLabel(key), count })),
+    { key: 'running', label: '运行中', count: counts.get('running') || 0 },
+    { key: 'waiting_confirmation', label: '待确认', count: counts.get('waiting_confirmation') || 0 },
+    { key: 'completed', label: '已完成', count: counts.get('completed') || 0 },
+  ];
+  const fixedKeys = new Set(fixed.map((item) => item.key));
+  return [
+    ...fixed,
+    ...[...counts.entries()]
+      .filter(([key]) => !fixedKeys.has(key))
+      .sort((a, b) => b[1] - a[1])
+      .map(([key, count]) => ({ key, label: statusLabel(key), count })),
   ];
 }
 
@@ -1903,4 +1996,32 @@ function confirmationOptions(confirmation: ConfirmationRequestRecord): string[] 
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+async function copyText(value: string): Promise<boolean> {
+  const text = value.trim();
+  if (!text) return false;
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // Some browsers block Clipboard API on plain HTTP; fall back to selection copy.
+  }
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.setAttribute('readonly', '');
+  textarea.style.position = 'fixed';
+  textarea.style.left = '-9999px';
+  textarea.style.top = '0';
+  document.body.appendChild(textarea);
+  textarea.select();
+  try {
+    return document.execCommand('copy');
+  } catch {
+    return false;
+  } finally {
+    document.body.removeChild(textarea);
+  }
 }

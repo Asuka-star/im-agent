@@ -55,13 +55,11 @@ export function listTaskRuns(options: {
 export function listRequirements(options: {
   query?: string;
   sessionId?: string;
-  status?: string;
   limit?: number;
 } = {}): Promise<RequirementSummary[]> {
   return requestJson<RequirementSummary[]>('/requirements/', undefined, {
     query: options.query,
     session_id: options.sessionId,
-    status: options.status === 'all' ? undefined : options.status,
     limit: String(options.limit || 50),
   });
 }

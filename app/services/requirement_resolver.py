@@ -86,10 +86,9 @@ class RequirementResolver:
             return RequirementResolveResult(action="skip", reason="缺少会话或文本，跳过需求归属。")
 
         try:
-            active_requirements = self.requirement_service.list_requirements(status="active", limit=50)
+            active_requirements = self.requirement_service.list_requirements(limit=50)
             related_requirements = self.requirement_service.list_requirements(
                 session_id=session_id,
-                status="active",
                 limit=50,
             )
         except Exception:
@@ -105,7 +104,7 @@ class RequirementResolver:
         lifecycle_like = _is_lifecycle_like(text)
 
         if _compact(text) in {_compact(item) for item in SKIP_COMMANDS} and not session_requirements:
-            return RequirementResolveResult(action="skip", reason="这是纯查询/帮助类短命令，且当前会话没有活跃需求。")
+            return RequirementResolveResult(action="skip", reason="这是纯查询/帮助类短命令，且当前会话没有相关需求。")
 
         llm_result = self._resolve_with_llm(
             session_id=session_id,
@@ -171,7 +170,7 @@ class RequirementResolver:
                 requirement_id=created.requirement_id,
                 confidence=0.95 if new_requested else 0.78,
                 matched_by="new_request" if new_requested else "no_active_requirement",
-                reason="用户明确开启新需求。" if new_requested else "当前没有活跃需求，已为需求类请求创建新需求。",
+                reason="用户明确开启新需求。" if new_requested else "当前没有相关需求，已为需求类请求创建新需求。",
             )
 
         candidates = self._score_candidates(text, active_requirements, session_id=session_id)
@@ -195,10 +194,10 @@ class RequirementResolver:
                 requirement_id=created.requirement_id,
                 confidence=0.76,
                 matched_by="no_session_requirement",
-                reason="当前会话没有活跃需求，已为需求类请求创建新需求。",
+                reason="当前会话没有相关需求，已为需求类请求创建新需求。",
             )
         if not candidates:
-            return RequirementResolveResult(action="skip", reason="没有可匹配的活跃需求，且当前请求不像需求生命周期请求。")
+            return RequirementResolveResult(action="skip", reason="没有可匹配的需求，且当前请求不像需求生命周期请求。")
 
         best = candidates[0]
         second = candidates[1] if len(candidates) > 1 else None
@@ -218,15 +217,15 @@ class RequirementResolver:
                 action="bind",
                 requirement_id=only.requirement_id,
                 confidence=0.72,
-                matched_by="single_active",
-                reason="当前会话只有一个活跃需求，且请求属于需求生命周期动作。",
+                matched_by="single_requirement",
+                reason="当前会话只有一个相关需求，且请求属于需求生命周期动作。",
                 candidates=[
                     RequirementResolveCandidate(
                         requirement_id=only.requirement_id,
                         title=only.title,
                         summary=only.summary,
                         score=0.72,
-                        reason="当前会话唯一活跃需求。",
+                        reason="当前会话唯一相关需求。",
                     )
                 ],
             )
@@ -277,7 +276,6 @@ class RequirementResolver:
                         {
                             "requirement_id": item.requirement_id,
                             "title": item.title,
-                            "status": item.status,
                             "summary": item.summary,
                             "primary_session_id": item.primary_session_id,
                             "current_document_id": item.current_document_id,
@@ -516,7 +514,7 @@ class RequirementResolver:
                 self._candidate_from_requirement(
                     item,
                     score=0.0,
-                    reason="最近活跃需求，等待用户确认。",
+                    reason="最近需求，等待用户确认。",
                 )
             )
             if len(merged) >= 5:

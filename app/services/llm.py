@@ -215,6 +215,27 @@ class LLMService:
         )
         return result
 
+    def resolve_document_target(self, context: dict[str, Any]) -> dict[str, Any]:
+        self._ensure_configured()
+        payload = self._json_payload(
+            system_prompt=self.prompts.document_target_selection(),
+            user_content=json.dumps(context, ensure_ascii=False),
+            temperature=0.0,
+        )
+        result = self._chat_json(
+            payload,
+            request_name="resolve_document_target",
+            timeout_seconds=settings.llm_memory_gate_timeout_seconds,
+        )
+        result = self._sanitize_document_target_result(result, context)
+        logger.info(
+            "LLM document target resolved: action=%s document_id=%s confidence=%s",
+            result.get("action"),
+            result.get("document_id"),
+            result.get("confidence"),
+        )
+        return result
+
     def plan_workspace_request(self, workspace_context: str, instruction: str) -> dict[str, Any]:
         self._ensure_configured()
         cache_key = self._plan_cache_key(workspace_context, instruction)
@@ -603,6 +624,38 @@ class LLMService:
         return self.prompts.memory_gate()
 
     @classmethod
+    def _sanitize_document_target_result(cls, result: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(result, dict):
+            result = {}
+        candidate_ids = {
+            str(item.get("document_id") or "").strip()
+            for item in context.get("candidates", [])
+            if isinstance(item, dict)
+        }
+        action = str(result.get("action") or "").strip().lower()
+        document_id = str(result.get("document_id") or "").strip()
+        if action not in {"update", "create", "clarify"}:
+            action = "update" if document_id else "clarify"
+        if document_id and document_id not in candidate_ids:
+            document_id = ""
+            action = "clarify" if action == "update" else action
+        if action == "update" and not document_id:
+            action = "clarify"
+        confidence = cls._coerce_float(result.get("confidence"), default=0.0)
+        clarification = result.get("clarification") if isinstance(result.get("clarification"), dict) else {}
+        sanitized = {
+            **result,
+            "action": action,
+            "document_id": document_id or None,
+            "confidence": confidence,
+            "reason": str(result.get("reason") or "").strip(),
+            "clarification": clarification,
+        }
+        if confidence < 0.65 and action == "update":
+            sanitized["action"] = "clarify"
+        return sanitized
+
+    @classmethod
     def _sanitize_doc_request_result(cls, result: dict[str, Any], workspace_context: str, instruction: str) -> dict[str, Any]:
         if not isinstance(result, dict):
             return result
@@ -667,6 +720,13 @@ class LLMService:
 
         result = {**result, "doc": {**doc, "sections": sanitized_sections}}
         return result
+
+    @staticmethod
+    def _coerce_float(value: object, *, default: float = 0.0) -> float:
+        try:
+            return max(0.0, min(float(value), 1.0))
+        except (TypeError, ValueError):
+            return default
 
     @staticmethod
     def _is_implementation_section_heading(heading: str) -> bool:

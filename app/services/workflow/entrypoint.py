@@ -429,10 +429,9 @@ class WorkflowEntrypoint:
         try:
             session_requirements = self.workflow.requirement_service.list_requirements(
                 session_id=session_id,
-                status="active",
                 limit=limit,
             )
-            global_requirements = self.workflow.requirement_service.list_requirements(status="active", limit=limit)
+            global_requirements = self.workflow.requirement_service.list_requirements(limit=limit)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to load recent requirements for clarification: %s", exc)
             return merged[:limit]
@@ -447,7 +446,7 @@ class WorkflowEntrypoint:
                     title=item.title,
                     summary=item.summary,
                     score=0.0,
-                    reason="最近活跃需求，供用户确认归属。",
+                    reason="最近需求，供用户确认归属。",
                 )
             )
             if len(merged) >= limit:
@@ -632,16 +631,12 @@ class WorkflowEntrypoint:
             if route_decision.route in {"doc", "slides", "canvas", "delivery"}
             else None
         )
-        explicit_document = (
-            workflow._resolve_target_document_for_instruction(message.session_id, message.text)
-            if route_decision.route == "doc"
-            else None
-        )
-        target_document = explicit_document if explicit_document is not None else requirement_document
-        document_clarification = workflow._build_document_selection_clarification(
+        target_document, document_clarification = workflow._resolve_document_target_for_route(
             message,
             route_decision,
-            target_document=target_document,
+            task_run_id=task_run_id,
+            requirement_document=requirement_document,
+            workspace_context=workspace_context,
         )
         if document_clarification:
             return workflow._pause_for_clarification(

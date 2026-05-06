@@ -1530,12 +1530,12 @@ class LLMTaskOperationTests(unittest.TestCase):
             return_value="[workspace]",
         ), patch.object(
             self.service,
-            "_resolve_target_document_for_instruction",
-            return_value=matched_document,
-        ), patch.object(
-            self.service,
             "_route_request",
             return_value=RouteDecision(route="doc", source="rule", confidence=0.98),
+        ), patch.object(
+            self.service.task_run_service,
+            "get_task_run",
+            return_value=SimpleNamespace(requirement_id="req_1"),
         ), patch.object(
             self.service.session_document_service,
             "list_documents",
@@ -1544,6 +1544,15 @@ class LLMTaskOperationTests(unittest.TestCase):
                 matched_document,
             ],
         ), patch.object(
+            self.service.llm_service,
+            "resolve_document_target",
+            return_value={
+                "action": "update",
+                "document_id": "doc_2",
+                "confidence": 0.92,
+                "reason": "用户明确要更新 Release Review。",
+            },
+        ) as resolve_document_target, patch.object(
             self.service.llm_service,
             "is_configured",
             return_value=True,
@@ -1575,6 +1584,107 @@ class LLMTaskOperationTests(unittest.TestCase):
 
         self.assertEqual(result["mode"], "doc")
         self.assertIs(execute_llm_request.call_args.kwargs["target_document"], matched_document)
+        resolve_document_target.assert_called_once()
+
+    def test_doc_revision_rejects_explicit_document_owned_by_other_requirement(self) -> None:
+        message = type(
+            "FakeMessage",
+            (),
+            {
+                "session_id": "s1",
+                "message_id": "m1",
+                "text": "please update the Other Requirement document",
+                "chat_id": "c1",
+                "chat_type": "group",
+            },
+        )()
+        requirement_document = {"document_id": "doc_req", "title": "Current Requirement Doc", "version": 1}
+        matched_document = {"document_id": "doc_other", "title": "Other Requirement", "version": 1}
+
+        def owners_for_document(document_id: str) -> list[str]:
+            if document_id == "doc_req":
+                return ["req_current"]
+            if document_id == "doc_other":
+                return ["req_other"]
+            return []
+
+        with patch.object(
+            self.service.memory_service,
+            "get_active_episode",
+            return_value=None,
+        ), patch.object(
+            self.service,
+            "_build_workspace_context_for_message",
+            return_value="[workspace]",
+        ), patch.object(
+            self.service,
+            "_route_request",
+            return_value=RouteDecision(route="doc", source="rule", confidence=0.98),
+        ), patch.object(
+            self.service,
+            "_requirement_workspace_context_for_task_run",
+            return_value=None,
+        ), patch.object(
+            self.service.task_run_service,
+            "get_task_run",
+            return_value=SimpleNamespace(requirement_id="req_current"),
+        ), patch.object(
+            self.service.requirement_service,
+            "get_requirement",
+            return_value=SimpleNamespace(current_document=requirement_document),
+        ), patch.object(
+            self.service.requirement_service,
+            "requirement_ids_for_document",
+            side_effect=owners_for_document,
+        ), patch.object(
+            self.service.session_document_service,
+            "list_documents",
+            return_value=[requirement_document, matched_document],
+        ), patch.object(
+            self.service.llm_service,
+            "resolve_document_target",
+            return_value={
+                "action": "update",
+                "document_id": "doc_other",
+                "confidence": 0.9,
+                "reason": "用户提到了另一份文档。",
+            },
+        ), patch.object(
+            self.service.llm_service,
+            "is_configured",
+            return_value=True,
+        ), patch.object(
+            self.service,
+            "_resolve_llm_result_for_route",
+            return_value={"intent": "doc", "reason": "doc route", "doc": {"title": "Current", "sections": []}},
+        ), patch.object(
+            self.service.execution_runner,
+            "execute_llm_request",
+            return_value={
+                "session_id": "s1",
+                "episode_id": None,
+                "mode": "doc",
+                "analysis": None,
+                "reply_preview": "ok",
+                "reply_sent": False,
+                "reply_error": None,
+                "artifacts": [],
+            },
+        ) as execute_llm_request, patch.object(
+            self.service.task_run_service,
+            "upsert_step",
+        ), patch.object(
+            self.service.task_run_service,
+            "update_task_run",
+        ), patch.object(
+            self.service,
+            "_pause_for_clarification",
+            return_value={"mode": "requirement", "reply_sent": True},
+        ):
+            result = self.service._handle_mentioned_request(message, task_run_id="run_doc_target")
+
+        self.assertEqual(result["mode"], "requirement")
+        execute_llm_request.assert_not_called()
 
     def test_requirement_document_target_blocks_session_current_doc_fallback(self) -> None:
         with patch.object(
@@ -1625,6 +1735,70 @@ class LLMTaskOperationTests(unittest.TestCase):
             target = self.service._requirement_document_target_for_task_run("run_1")
 
         self.assertEqual(target, current_document)
+
+    def test_requirement_document_target_ignores_document_owned_by_another_requirement(self) -> None:
+        current_document = {"document_id": "doc_shared", "title": "Shared Doc", "version": 3}
+        with patch.object(
+            self.service.task_run_service,
+            "get_task_run",
+            return_value=SimpleNamespace(requirement_id="req_current"),
+        ), patch.object(
+            self.service.requirement_service,
+            "get_requirement",
+            return_value=SimpleNamespace(current_document=current_document),
+        ), patch.object(
+            self.service.requirement_service,
+            "requirement_ids_for_document",
+            return_value=["req_other", "req_current"],
+        ):
+            target = self.service._requirement_document_target_for_task_run("run_1")
+
+        self.assertEqual(target, {})
+
+    def test_explicit_document_target_ignores_document_owned_by_another_requirement(self) -> None:
+        with patch.object(
+            self.service.requirement_service,
+            "requirement_ids_for_document",
+            return_value=["req_other"],
+        ):
+            allowed = self.service._document_target_allowed_for_requirement(
+                {"document_id": "doc_other", "title": "Other Requirement Doc"},
+                "req_current",
+            )
+
+        self.assertFalse(allowed)
+
+    def test_document_target_candidates_mark_shared_document_as_unsafe(self) -> None:
+        shared_document = {"document_id": "doc_shared", "title": "Shared Requirement Doc", "version": 4}
+        with patch.object(
+            self.service.session_document_service,
+            "list_documents",
+            return_value=[shared_document],
+        ), patch.object(
+            self.service.requirement_service,
+            "requirement_ids_for_document",
+            return_value=["req_current", "req_other"],
+        ):
+            candidates = self.service._document_target_candidates(
+                "s1",
+                requirement_document=None,
+                requirement_id="req_current",
+            )
+
+        payload = candidates[0]["llm"]
+        self.assertFalse(payload["belongs_to_current_requirement"])
+        self.assertFalse(payload["safe_to_update"])
+        self.assertTrue(payload["conflicts_with_other_requirements"])
+        self.assertEqual(payload["linked_requirement_ids"], ["req_current", "req_other"])
+
+    def test_document_target_sanitize_clarifies_update_without_document_id(self) -> None:
+        result = self.service.llm_service._sanitize_document_target_result(
+            {"action": "update", "confidence": 0.9, "reason": "missing id"},
+            {"candidates": [{"document_id": "doc_1"}]},
+        )
+
+        self.assertEqual(result["action"], "clarify")
+        self.assertIsNone(result["document_id"])
 
     def test_resolve_target_document_supports_relative_references(self) -> None:
         documents = [
@@ -3189,9 +3363,18 @@ class LLMTaskOperationTests(unittest.TestCase):
         self.assertEqual({item["key"]: item["status"] for item in preview["checks"]}["canvas"], "missing")
         self.assertEqual(card_calls[0]["receive_id"], "chat_1")
         self.assertEqual(card_calls[0]["card"]["header"]["title"]["content"], "任务交付包已生成")
-        upsert_step.assert_called_once()
-        self.assertEqual(upsert_step.call_args.kwargs["step_key"], "delivery_bundle")
-        self.assertTrue(upsert_step.call_args.kwargs["output_payload"]["im_card_sent"])
+        step_calls = {call.kwargs["step_key"]: call for call in upsert_step.call_args_list}
+        self.assertEqual(step_calls["artifact_feishu_sync"].kwargs["status"], "skipped")
+        self.assertEqual(
+            step_calls["artifact_feishu_sync"].kwargs["output_payload"]["reason"],
+            "feishu_artifact_sync_disabled",
+        )
+        self.assertEqual(step_calls["delivery_bundle"].kwargs["step_key"], "delivery_bundle")
+        self.assertTrue(step_calls["delivery_bundle"].kwargs["output_payload"]["im_card_sent"])
+        self.assertEqual(
+            step_calls["delivery_bundle"].kwargs["output_payload"]["feishu_delivery"]["status"],
+            "skipped",
+        )
         update_task_run.assert_called_once()
         self.assertEqual(update_task_run.call_args.kwargs["stage"], "delivered")
 

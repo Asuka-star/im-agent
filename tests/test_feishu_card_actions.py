@@ -257,6 +257,85 @@ class FeishuCardActionTests(unittest.TestCase):
         self.assertEqual(workflow.task_run_service.updates[-1][1]["stage"], "confirmation_resume_failed")
         self.assertIn("没有自动继续", workflow.message_api.patched_cards[-1]["card"]["elements"][0]["text"]["content"])
 
+    def test_canvas_view_clarification_option_replies_link_without_resuming(self) -> None:
+        workflow = _FakeWorkflow([TaskItem(title="Backend development", owner="Alice", status="draft")])
+        workflow.task_run_service.detail = SimpleNamespace(
+            artifacts=[
+                SimpleNamespace(
+                    artifact_type="canvas",
+                    title="实验室设备预约流程图",
+                    url="http://localhost:9000/api/artifacts/canvas/lab.html",
+                )
+            ],
+            confirmations=[
+                SimpleNamespace(confirmation_id="confirm_1", status="answered"),
+            ],
+        )
+        service = FeishuCardActionService(workflow)
+        value = build_card_action_payload(
+            "select_clarification_option",
+            session_id="oc_1",
+            task_run_id="run_1",
+            source_message_id="om_1",
+            payload={
+                "option": "先查看当前画布",
+                "confirmation_id": "confirm_1",
+            },
+        )
+
+        with patch("app.services.cards.action_handler.settings.feishu_reply_enabled", True):
+            result = service.handle_raw_event(
+                {
+                    "header": {"event_type": "card.action.trigger", "event_id": "evt_view_canvas"},
+                    "event": {
+                        "message": {"message_id": "card_msg_canvas", "chat_id": "oc_1"},
+                        "operator": {"user_id": "ou_1"},
+                        "action": {"value": value},
+                    },
+                }
+            )
+
+        self.assertEqual(result["msg"], "handled")
+        self.assertTrue(result["data"]["informational"])
+        self.assertFalse(result["data"]["resumed"])
+        self.assertFalse(workflow.task_run_service.resolved)
+        self.assertFalse(hasattr(workflow, "resume_request"))
+        self.assertIn("lab.html", workflow.message_api.text_messages[-1]["text"])
+        self.assertEqual(workflow.message_api.patched_cards[-1]["card"]["header"]["template"], "blue")
+
+    def test_rephrase_clarification_option_requests_free_text_without_resuming(self) -> None:
+        workflow = _FakeWorkflow([TaskItem(title="Backend development", owner="Alice", status="draft")])
+        service = FeishuCardActionService(workflow)
+        value = build_card_action_payload(
+            "select_clarification_option",
+            session_id="oc_1",
+            task_run_id="run_1",
+            source_message_id="om_1",
+            payload={
+                "option": "重新说明节点名称",
+                "confirmation_id": "confirm_1",
+            },
+        )
+
+        with patch("app.services.cards.action_handler.settings.feishu_reply_enabled", True):
+            result = service.handle_raw_event(
+                {
+                    "header": {"event_type": "card.action.trigger", "event_id": "evt_rephrase"},
+                    "event": {
+                        "message": {"message_id": "card_msg_rephrase", "chat_id": "oc_1"},
+                        "operator": {"user_id": "ou_1"},
+                        "action": {"value": value},
+                    },
+                }
+            )
+
+        self.assertEqual(result["msg"], "handled")
+        self.assertEqual(result["data"]["kind"], "needs_free_text")
+        self.assertFalse(workflow.task_run_service.resolved)
+        self.assertFalse(hasattr(workflow, "resume_request"))
+        self.assertIn("请直接回复具体节点", workflow.message_api.text_messages[-1]["text"])
+        self.assertEqual(workflow.message_api.patched_cards[-1]["card"]["header"]["template"], "orange")
+
     def test_legacy_top_level_card_callback_payload_is_supported(self) -> None:
         workflow = _FakeWorkflow([TaskItem(title="Backend development", owner="Alice", status="draft")])
         service = FeishuCardActionService(workflow)

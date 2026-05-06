@@ -20,13 +20,11 @@ requirement_service = RequirementService()
 @router.get("/", response_model=list[RequirementSummary])
 async def list_requirements(
     session_id: str | None = Query(default=None),
-    status: str | None = Query(default="active"),
     query: str | None = Query(default=None),
     limit: int = Query(default=20, ge=1, le=100),
 ) -> list[RequirementSummary]:
     return requirement_service.list_requirements(
         session_id=session_id,
-        status=status,
         query=query,
         limit=limit,
     )

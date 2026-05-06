@@ -24,6 +24,7 @@ class DeliveryTool:
         context_pack_builder: TaskContextPackBuilder | None = None,
         message_api: Any | None = None,
         card_builder: FeishuArtifactCardBuilder | None = None,
+        feishu_artifact_integrator: Any | None = None,
     ) -> None:
         self.delivery_artifact_service = delivery_artifact_service
         self.task_run_service = task_run_service
@@ -31,6 +32,7 @@ class DeliveryTool:
         self.context_pack_builder = context_pack_builder or TaskContextPackBuilder()
         self.message_api = message_api
         self.card_builder = card_builder or FeishuArtifactCardBuilder()
+        self.feishu_artifact_integrator = feishu_artifact_integrator
 
     def bundle_from_task_run(self, task_run_id: str, *, requested_by: str = "pilot_workbench"):
         detail = self.task_run_service.get_task_run(task_run_id)
@@ -41,11 +43,17 @@ class DeliveryTool:
             raise ValueError("当前需求下还没有可汇总的文档、PPT 或 Canvas 链接，请先生成至少一个产物。")
 
         manifest = self.build_manifest(detail, requested_by=requested_by)
+        feishu_delivery = self._sync_feishu_delivery(detail, manifest)
+        self._record_feishu_sync_step(task_run_id, feishu_delivery, requested_by=requested_by)
+        if feishu_delivery:
+            manifest["feishu_delivery"] = feishu_delivery
+            self._attach_feishu_sync_to_manifest(manifest, feishu_delivery)
         artifact = self.delivery_artifact_service.persist_bundle(
             manifest,
             task_run_id=task_run_id,
             session_id=detail.session_id,
         )
+        self._prefer_feishu_delivery_url(artifact, feishu_delivery)
         delivery_card = self._send_delivery_card(detail, artifact)
         self.task_run_service.upsert_step(
             task_run_id,
@@ -58,6 +66,7 @@ class DeliveryTool:
                 "url": artifact.get("url"),
                 "artifact_count": len(artifact.get("preview", {}).get("artifacts", [])),
                 "ready_checks": self._count_checks(artifact.get("preview", {}), "ready"),
+                "feishu_delivery": feishu_delivery,
                 "im_card_sent": delivery_card["sent"],
                 "im_card_error": delivery_card["error"],
             },
@@ -78,6 +87,165 @@ class DeliveryTool:
             update_kwargs["status"] = "completed"
         self.task_run_service.update_task_run(task_run_id, **update_kwargs)
         return self.task_run_service.get_task_run(task_run_id)
+
+    def _record_feishu_sync_step(
+        self,
+        task_run_id: str,
+        feishu_delivery: dict[str, Any] | None,
+        *,
+        requested_by: str,
+    ) -> None:
+        if feishu_delivery is None:
+            return
+        status = str(feishu_delivery.get("status") or "").strip().lower()
+        step_status = {
+            "ready": "done",
+            "linked": "done",
+            "partial": "partial",
+            "failed": "failed",
+            "skipped": "skipped",
+        }.get(status, "done")
+        warnings = feishu_delivery.get("warnings") if isinstance(feishu_delivery.get("warnings"), list) else []
+        error = str(warnings[0]).strip() if step_status == "failed" and warnings else None
+        self.task_run_service.upsert_step(
+            task_run_id,
+            step_key="artifact_feishu_sync",
+            title="同步产物到飞书",
+            step_type="artifact_sync",
+            status=step_status,
+            input_payload={
+                "requested_by": requested_by,
+                "trigger": "delivery_bundle",
+            },
+            output_payload=feishu_delivery,
+            error=error,
+        )
+
+    def _attach_feishu_sync_to_manifest(self, manifest: dict[str, Any], feishu_delivery: dict[str, Any]) -> None:
+        if feishu_delivery.get("status") not in {"ready", "partial", "linked"}:
+            return
+        items = feishu_delivery.get("items") if isinstance(feishu_delivery.get("items"), list) else []
+        sync_by_kind = {
+            str(item.get("kind") or "").strip(): item
+            for item in items
+            if isinstance(item, dict) and str(item.get("kind") or "").strip()
+        }
+        media_items = feishu_delivery.get("media_items") if isinstance(feishu_delivery.get("media_items"), list) else []
+        media_by_kind: dict[str, list[dict[str, Any]]] = {}
+        for item in media_items:
+            if not isinstance(item, dict):
+                continue
+            owner_kind = self._feishu_sync_owner_kind(str(item.get("kind") or ""))
+            if not owner_kind:
+                continue
+            media_by_kind.setdefault(owner_kind, []).append(item)
+        if not sync_by_kind:
+            return
+        artifact_syncs = (
+            feishu_delivery.get("artifact_syncs")
+            if isinstance(feishu_delivery.get("artifact_syncs"), dict)
+            else {}
+        )
+        base_sync = {
+            "status": "linked",
+            "document_id": feishu_delivery.get("document_id"),
+            "document_url": feishu_delivery.get("document_url") or feishu_delivery.get("url"),
+            "synced_at": feishu_delivery.get("synced_at"),
+            "sync_mode": feishu_delivery.get("sync_mode"),
+            "warnings": feishu_delivery.get("warnings") if isinstance(feishu_delivery.get("warnings"), list) else [],
+        }
+        for collection_name in ("deliverables", "artifact_summaries", "artifacts"):
+            collection = manifest.get(collection_name)
+            if not isinstance(collection, list):
+                continue
+            for item in collection:
+                if not isinstance(item, dict):
+                    continue
+                kind = self._feishu_sync_kind_for_item(item)
+                sync_item = sync_by_kind.get(kind)
+                if sync_item is None:
+                    continue
+                structured_sync = artifact_syncs.get(kind)
+                if isinstance(structured_sync, dict):
+                    item["feishu_sync"] = {
+                        **structured_sync,
+                        "warnings": (
+                            structured_sync.get("warnings")
+                            if isinstance(structured_sync.get("warnings"), list)
+                            else base_sync["warnings"]
+                        ),
+                    }
+                    continue
+                owned_media = media_by_kind.get(kind, [])
+                sync_items = [sync_item, *owned_media]
+                media_statuses = {
+                    str(media.get("status") or "").strip().lower()
+                    for media in owned_media
+                    if isinstance(media, dict)
+                }
+                sync_status = "ready" if "ready" in media_statuses else "linked"
+                item["feishu_sync"] = {
+                    **base_sync,
+                    "status": sync_status,
+                    "kind": kind,
+                    "source_url": sync_item.get("source_url"),
+                    "items": sync_items,
+                    "media_items": owned_media,
+                }
+
+    @staticmethod
+    def _feishu_sync_owner_kind(media_kind: str) -> str:
+        normalized = media_kind.strip().lower()
+        if normalized == "canvas_image":
+            return "canvas"
+        if normalized in {"slides_pptx", "slides_file", "slides_import"}:
+            return "slides"
+        if normalized in {"document_file", "document_export"}:
+            return "document"
+        return ""
+
+    @staticmethod
+    def _feishu_sync_kind_for_item(item: dict[str, Any]) -> str:
+        key = str(item.get("key") or "").strip()
+        if key:
+            return key
+        artifact_type = str(item.get("artifact_type") or "").strip()
+        if artifact_type in {"slides", "slides_package"}:
+            return "slides"
+        if artifact_type in {"document", "doc", "feishu_doc"}:
+            return "document"
+        if artifact_type == "canvas":
+            return "canvas"
+        return artifact_type
+
+    def _sync_feishu_delivery(self, detail: Any, manifest: dict[str, Any]) -> dict[str, Any] | None:
+        integrator = self.feishu_artifact_integrator
+        if integrator is None:
+            return None
+        try:
+            result = integrator.sync_delivery_manifest(detail, manifest)
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "status": "failed",
+                "sync_mode": "failed",
+                "warnings": [str(exc)],
+            }
+        return result if isinstance(result, dict) else None
+
+    def _prefer_feishu_delivery_url(self, artifact: dict[str, Any], feishu_delivery: dict[str, Any] | None) -> None:
+        if not isinstance(feishu_delivery, dict) or feishu_delivery.get("status") not in {"ready", "partial", "linked"}:
+            return
+        url = str(feishu_delivery.get("url") or feishu_delivery.get("document_url") or "").strip()
+        if not url:
+            return
+        artifact["provider"] = "feishu_doc"
+        artifact["url"] = url
+        preview = artifact.get("preview")
+        if isinstance(preview, dict):
+            exports = preview.get("exports") if isinstance(preview.get("exports"), dict) else {}
+            exports = dict(exports)
+            exports["feishu_doc"] = url
+            preview["exports"] = exports
 
     def _has_delivery_links(self, detail: Any) -> bool:
         return any(item.get("status") == "ready" for item in self._latest_deliverables(detail))

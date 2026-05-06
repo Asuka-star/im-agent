@@ -136,7 +136,6 @@ export type RequirementTimelineItem = {
 export type RequirementSummary = {
   requirement_id: string;
   title: string;
-  status: string;
   summary?: string | null;
   primary_session_id: string;
   primary_session_label?: string | null;
