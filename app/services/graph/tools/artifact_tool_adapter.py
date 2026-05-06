@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 from app.schemas.feishu_event import FeishuMessageContext
 from app.services.graph.state import PlanStep, WorkerResult, WorkflowGraphState, WorkspaceCommand
+from app.services.tools.doc_tool import DocTool
 from app.utils.values import coerce_positive_int
+
+logger = logging.getLogger(__name__)
 
 
 class ArtifactWorkerAdapter:
@@ -18,9 +22,17 @@ class ArtifactWorkerAdapter:
             return self._revise_slides(state, step, command)
         if step.worker == "canvas" and command.operation in {"revise", "update"}:
             return self._revise_canvas(state, step, command)
-        llm_result = self._llm_result_for_step(command, step)
         message = _message_context(state)
-        workspace_context = state.context.excerpt if state.context else ""
+        workspace_context = _artifact_workspace_context(self.workflow, state, step.worker)
+        llm_result = self._llm_result_for_step(command, step)
+        if step.worker == "doc":
+            llm_result = self._doc_llm_result_for_step(
+                command,
+                step,
+                workspace_context=workspace_context,
+                instruction=message.text,
+                fallback=llm_result,
+            )
         if step.worker == "doc":
             result = self.workflow.doc_execution.prepare_doc_execution(
                 message,
@@ -201,6 +213,37 @@ class ArtifactWorkerAdapter:
                 result[key] = raw_payload[key]
         return result
 
+    def _doc_llm_result_for_step(
+        self,
+        command: WorkspaceCommand,
+        step: PlanStep,
+        *,
+        workspace_context: str,
+        instruction: str,
+        fallback: dict[str, Any],
+    ) -> dict[str, Any]:
+        if isinstance(fallback.get("doc"), dict):
+            return fallback
+        llm_service = getattr(self.workflow, "llm_service", None)
+        resolver = getattr(llm_service, "resolve_doc_request", None)
+        if llm_service is None or not getattr(llm_service, "is_configured", lambda: False)() or not callable(resolver):
+            return fallback
+        try:
+            resolved = resolver(workspace_context, instruction)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("LangGraph doc worker specialized drafting failed, using deterministic fallback: %s", exc)
+            return fallback
+        if not isinstance(resolved, dict):
+            return fallback
+        merged = {**fallback, **resolved}
+        merged.setdefault("operation", fallback.get("operation") or ("create" if command.operation == "generate" else command.operation))
+        merged.setdefault("object", "doc")
+        merged.setdefault("route", "doc")
+        merged.setdefault("requested_outputs", step.input.get("requested_outputs") or ["doc"])
+        merged.setdefault("all_requested_outputs", list(command.requested_outputs))
+        merged.setdefault("plan", fallback.get("plan"))
+        return merged
+
     def _target_document_for_step(self, state: WorkflowGraphState, command: WorkspaceCommand) -> dict | None:
         if command.operation not in {"revise", "update"}:
             return None
@@ -229,6 +272,46 @@ def _message_context(state: WorkflowGraphState) -> FeishuMessageContext:
         raw_text=state.message.raw_text or state.message.text,
         is_mentioned=state.message.is_mentioned,
     )
+
+
+def _artifact_workspace_context(workflow: Any, state: WorkflowGraphState, worker: str) -> str:
+    context = state.context
+    excerpt = context.excerpt if context else ""
+    if worker not in {"doc", "slides", "canvas", "delivery"}:
+        return excerpt
+    memory_service = getattr(workflow, "memory_service", None)
+    build_workspace_context = getattr(memory_service, "build_workspace_context", None)
+    if callable(build_workspace_context):
+        try:
+            lifecycle_excerpt = build_workspace_context(
+                state.message.session_id,
+                profile="lifecycle",
+                include_pending=True,
+                exclude_message_id=state.message.message_id,
+                query_text=state.message.text,
+                include_semantic_search=False,
+                episode_id=state.active_episode_id,
+            )
+            if lifecycle_excerpt:
+                excerpt = lifecycle_excerpt
+        except Exception:  # pragma: no cover - context fallback must stay best effort
+            pass
+    if worker == "doc":
+        return excerpt
+    current_document = context.current_document if context else None
+    doc_context = DocTool.format_current_document_context(current_document if isinstance(current_document, dict) else None)
+    if not doc_context:
+        return excerpt
+    guidance = (
+        "[产物生成策略]\n"
+        "- 当前协作文档是正式需求/方案上下文，应优先基于它生成演示稿、流程图和交付包。\n"
+        "- IM 讨论只作为补充材料；不要把产物主线退化成任务分配清单。\n"
+        "- 任务、负责人和截止时间只放入实施计划或交付计划部分。"
+    )
+    join_context_blocks = getattr(workflow, "_join_context_blocks", None)
+    if callable(join_context_blocks):
+        return join_context_blocks(excerpt, doc_context, guidance)
+    return "\n\n".join(block for block in (excerpt, doc_context, guidance) if block)
 
 
 def _latest_artifact(state: WorkflowGraphState, artifact_types: set[str]) -> dict[str, Any] | None:

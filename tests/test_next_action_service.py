@@ -9,6 +9,7 @@ from app.schemas.task_run import (
 )
 from app.services.next_action_service import ContextualNextActionService
 from app.services.response_formatter import ResponseFormatter
+from app.services.workflow.status_execution import WorkflowStatusExecution
 
 
 def _detail(
@@ -148,6 +149,21 @@ class ContextualNextActionServiceTests(unittest.TestCase):
         assert reply is not None
         self.assertIn("我建议下一步可以：", reply)
         self.assertIn("基于当前文档生成汇报 PPT", reply)
+
+    def test_pending_requirement_discussion_recommends_document_first(self) -> None:
+        source_text = "\n".join(
+            [
+                "我们这次想做校园活动报名与审核系统，主要解决报名信息分散的问题。",
+                "目标用户主要是学生、社团负责人和学院老师。",
+                "核心流程是查看活动、提交报名、负责人审核、生成名单。",
+            ]
+        )
+
+        reply = WorkflowStatusExecution.format_lifecycle_discussion_next_action_reply(source_text)
+
+        self.assertIn("整理成正式需求方案文档", reply)
+        self.assertIn("生成汇报 PPT", reply)
+        self.assertTrue(WorkflowStatusExecution.should_recommend_lifecycle_doc_from_discussion(source_text))
 
 
 if __name__ == "__main__":

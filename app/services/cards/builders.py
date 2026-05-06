@@ -27,8 +27,8 @@ class FeishuCardBuilder:
             return None
         ready_count = sum(1 for item in artifact_items if item["status"] == "ready")
         lines = [
-            f"**任务类型**：{self._mode_label(mode)}",
-            f"**交付物**：{len(artifact_items)} 个，{ready_count} 个已就绪",
+            f"**处理类型**：{self._mode_label(mode)}",
+            f"**协作产物**：{len(artifact_items)} 个，{ready_count} 个已就绪",
         ]
         if summary:
             lines.append(f"**摘要**：{self._shorten(summary, 100)}")
@@ -363,4 +363,3 @@ class FeishuCardBuilder:
         if len(text) <= limit:
             return text
         return text[: max(limit - 1, 1)].rstrip() + "…"
-

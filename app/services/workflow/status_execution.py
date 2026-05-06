@@ -88,6 +88,8 @@ class WorkflowStatusExecution:
 
     def next_action_reply_for_pending_discussion(self, message: FeishuMessageContext, source_text: str) -> str | None:
         workflow = self.workflow
+        if self.should_recommend_lifecycle_doc_from_discussion(source_text):
+            return self.format_lifecycle_discussion_next_action_reply(source_text)
         tasks: list[TaskItem] = []
         risks: list[str] = []
         next_actions: list[str] = []
@@ -117,6 +119,65 @@ class WorkflowStatusExecution:
         if not next_actions:
             next_actions = build_next_actions(tasks, risks)
         return self.format_pending_next_action_reply(tasks, risks, next_actions)
+
+    @staticmethod
+    def should_recommend_lifecycle_doc_from_discussion(source_text: str) -> bool:
+        text = str(source_text or "").strip()
+        if not text:
+            return False
+        task_markers = (
+            "任务",
+            "待办",
+            "谁负责",
+            "截止",
+            "完成",
+            "分工",
+            "TODO",
+            "todo",
+        )
+        lifecycle_markers = (
+            "需求",
+            "方案",
+            "系统",
+            "产品",
+            "目标用户",
+            "用户",
+            "痛点",
+            "核心流程",
+            "流程",
+            "范围",
+            "一期",
+            "二期",
+            "风险",
+            "审核",
+            "报名",
+            "数据",
+            "老师",
+            "学生",
+        )
+        lifecycle_hits = sum(1 for marker in lifecycle_markers if marker in text)
+        task_hits = sum(1 for marker in task_markers if marker in text)
+        return lifecycle_hits >= 2 and task_hits == 0
+
+    @staticmethod
+    def format_lifecycle_discussion_next_action_reply(source_text: str) -> str:
+        risks = [
+            line.strip("- 0123456789.、")
+            for line in str(source_text or "").splitlines()
+            if any(marker in line for marker in ("风险", "压力", "待确认", "需要确认", "规则"))
+        ]
+        lines = [
+            "【基于当前讨论的下一步】",
+            "建议优先做：",
+            "1. 把本轮 IM 讨论整理成正式需求方案文档",
+            "2. 在文档中固化背景痛点、目标用户、核心流程、一期范围和待确认风险",
+            "3. 文档确认后继续生成汇报 PPT 或产品流程图",
+        ]
+        if risks:
+            lines.append("需要留意：")
+            for risk in risks[:3]:
+                lines.append(f"- {risk}")
+        return "\n".join(lines)
 
     @staticmethod
     def format_pending_next_action_reply(tasks: list[TaskItem], risks: list[str], next_actions: list[str]) -> str | None:

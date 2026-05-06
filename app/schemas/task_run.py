@@ -92,6 +92,9 @@ class TaskRunSummary(BaseModel):
     latest_summary: str | None = None
     latest_reply_preview: str | None = None
     latest_error: str | None = None
+    run_kind: str | None = None
+    primary_object: str | None = None
+    lifecycle_stage: str | None = None
     created_by: str | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
@@ -120,6 +123,7 @@ class ConfirmationAnswerResponse(BaseModel):
     confirmation_id: str
     status: str
     answer_value: str
+    already_answered: bool = False
 
 
 class DocumentRevisionRequest(BaseModel):

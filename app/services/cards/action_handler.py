@@ -82,6 +82,7 @@ class FeishuCardActionService:
             return None
 
         operator = event.get("operator") if isinstance(event.get("operator"), dict) else {}
+        top_operator = payload.get("operator") if isinstance(payload.get("operator"), dict) else {}
         operator_id = self._first_non_empty(
             operator.get("user_id"),
             operator.get("open_id"),
@@ -89,6 +90,15 @@ class FeishuCardActionService:
             _nested(event, ("operator", "operator_id", "user_id")),
             _nested(event, ("operator", "operator_id", "open_id")),
             _nested(event, ("operator", "operator_id", "union_id")),
+            top_operator.get("user_id"),
+            top_operator.get("open_id"),
+            top_operator.get("union_id"),
+            _nested(payload, ("operator", "operator_id", "user_id")),
+            _nested(payload, ("operator", "operator_id", "open_id")),
+            _nested(payload, ("operator", "operator_id", "union_id")),
+            payload.get("user_id"),
+            payload.get("open_id"),
+            payload.get("union_id"),
         )
         message = event.get("message") if isinstance(event.get("message"), dict) else {}
         context = event.get("context") if isinstance(event.get("context"), dict) else {}
@@ -99,11 +109,15 @@ class FeishuCardActionService:
                 event.get("message_id"),
                 message.get("message_id"),
                 context.get("open_message_id"),
+                payload.get("message_id"),
+                payload.get("open_message_id"),
             ),
             chat_id=self._first_non_empty(
                 event.get("chat_id"),
                 message.get("chat_id"),
                 context.get("open_chat_id"),
+                payload.get("chat_id"),
+                payload.get("open_chat_id"),
                 action.payload.get("chat_id"),
                 action.session_id,
             ),
@@ -142,6 +156,19 @@ class FeishuCardActionService:
         target_index = self._find_task_index(current_tasks, title=target_title, owner=target_owner)
         if target_index is None:
             raise ValueError("没有找到对应任务，请在 Workbench 中确认")
+        confirmation = self._resolve_confirmation_if_needed(
+            event,
+            answer_value=f"{target_owner} - {target_title} -> {target_status}",
+        )
+        if getattr(confirmation, "already_answered", False):
+            self._patch_card_status(event, title="确认已处理", content="这个确认已经被处理过了，无需重复点击。")
+            self._reply(event, "这个确认已经处理过了，无需重复点击。")
+            return {
+                "ok": True,
+                "action": action.action,
+                "duplicate": True,
+                "source": "confirmation_status",
+            }
 
         tasks = [task.model_copy(deep=True) for task in current_tasks]
         target = tasks[target_index]
@@ -166,7 +193,6 @@ class FeishuCardActionService:
             async_embed=True,
             preserve_unmatched_previous=False,
         )
-        self._resolve_confirmation_if_needed(event, answer_value=f"{target_owner} - {target_title} -> {target_status}")
         if action.task_run_id:
             self.workflow.task_run_service.upsert_step(
                 action.task_run_id,
@@ -207,7 +233,11 @@ class FeishuCardActionService:
         }
 
     def _cancel_task_update(self, event: FeishuCardActionEvent) -> dict[str, Any]:
-        self._resolve_confirmation_if_needed(event, answer_value="cancelled")
+        confirmation = self._resolve_confirmation_if_needed(event, answer_value="cancelled")
+        if getattr(confirmation, "already_answered", False):
+            self._patch_card_status(event, title="确认已处理", content="这个确认已经被处理过了，无需重复点击。")
+            self._reply(event, "这个确认已经处理过了，无需重复点击。")
+            return {"ok": True, "action": event.action.action, "duplicate": True}
         if event.action.task_run_id:
             self.workflow.task_run_service.update_task_run(
                 event.action.task_run_id,
@@ -241,17 +271,30 @@ class FeishuCardActionService:
 
     def _select_clarification_option(self, event: FeishuCardActionEvent) -> dict[str, Any]:
         option = str(event.action.payload.get("option") or "").strip()
-        self._resolve_confirmation_if_needed(event, answer_value=option)
+        confirmation = self._resolve_confirmation_if_needed(event, answer_value=option)
+        if getattr(confirmation, "already_answered", False):
+            self._patch_card_status(event, title="确认已处理", content="这个确认已经被处理过了，无需重复点击。")
+            self._reply(event, "这个确认已经处理过了，无需重复点击。")
+            return {"ok": True, "action": event.action.action, "option": option, "duplicate": True, "resumed": False}
         resumed = self._resume_after_confirmation(event, answer_value=option)
         reply = None
         if isinstance(resumed, dict):
             reply = str(resumed.get("reply_preview") or "").strip() or None
         resumed_ok = bool(resumed)
-        status_content = (
-            f"已选择：{option or '未命名选项'}。系统已继续处理后续流程。"
-            if resumed_ok
-            else f"已选择：{option or '未命名选项'}。系统已记录这次确认。"
-        )
+        if resumed_ok:
+            status_content = f"已选择：{option or '未命名选项'}。系统已继续处理后续流程。"
+        else:
+            status_content = f"已选择：{option or '未命名选项'}，但后续流程没有自动继续，请在 Workbench 中重试或重新发起请求。"
+            if event.action.task_run_id:
+                try:
+                    self.workflow.task_run_service.update_task_run(
+                        event.action.task_run_id,
+                        stage="confirmation_resume_failed",
+                        status="failed",
+                        latest_error="Card confirmation was recorded but resume did not produce a result.",
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Failed to mark task run resume failure from card action: %s", exc)
         self._patch_card_status(
             event,
             title="确认已收到",
@@ -333,13 +376,13 @@ class FeishuCardActionService:
             ],
         )
 
-    def _resolve_confirmation_if_needed(self, event: FeishuCardActionEvent, *, answer_value: str) -> None:
+    def _resolve_confirmation_if_needed(self, event: FeishuCardActionEvent, *, answer_value: str) -> Any:
         task_run_id = event.action.task_run_id
         confirmation_id = str(event.action.payload.get("confirmation_id") or "").strip()
         if not task_run_id or not confirmation_id:
-            return
+            return None
         try:
-            self.workflow.task_run_service.resolve_confirmation(
+            return self.workflow.task_run_service.resolve_confirmation(
                 task_run_id,
                 confirmation_id=confirmation_id,
                 answer_value=answer_value,
@@ -347,6 +390,7 @@ class FeishuCardActionService:
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to resolve confirmation from card action: %s", exc)
+            return None
 
     def _resume_after_confirmation(self, event: FeishuCardActionEvent, *, answer_value: str) -> dict | None:
         task_run_id = event.action.task_run_id

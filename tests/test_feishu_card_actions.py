@@ -1,5 +1,6 @@
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from app.schemas.task import TaskItem
 from app.services.cards.action_handler import FeishuCardActionService
@@ -142,16 +143,17 @@ class FeishuCardActionTests(unittest.TestCase):
             },
         )
 
-        result = service.handle_raw_event(
-            {
-                "header": {"event_type": "card.action.trigger", "event_id": "evt_1"},
-                "event": {
-                    "message": {"message_id": "card_msg", "chat_id": "oc_1"},
-                    "operator": {"user_id": "ou_1"},
-                    "action": {"value": value},
-                },
-            }
-        )
+        with patch("app.services.cards.action_handler.settings.feishu_reply_enabled", True):
+            result = service.handle_raw_event(
+                {
+                    "header": {"event_type": "card.action.trigger", "event_id": "evt_1"},
+                    "event": {
+                        "message": {"message_id": "card_msg", "chat_id": "oc_1"},
+                        "operator": {"user_id": "ou_1"},
+                        "action": {"value": value},
+                    },
+                }
+            )
 
         self.assertEqual(result["msg"], "handled")
         statuses = {task.title: task.status for task in workflow.memory_service.tasks}
@@ -216,6 +218,65 @@ class FeishuCardActionTests(unittest.TestCase):
         self.assertEqual(workflow.resume_request["confirmation_id"], "confirm_1")
         self.assertIn("Bob", workflow.resume_request["answer_value"])
         self.assertEqual(workflow.message_api.patched_cards[0]["message_id"], "card_msg_2")
+
+    def test_select_clarification_option_marks_task_run_failed_when_resume_fails(self) -> None:
+        workflow = _FakeWorkflow([TaskItem(title="Backend development", owner="Alice", status="draft")])
+        workflow.resume_task_run_after_confirmation = lambda *args, **kwargs: None
+        service = FeishuCardActionService(workflow)
+        value = build_card_action_payload(
+            "select_clarification_option",
+            session_id="oc_1",
+            task_run_id="run_1",
+            source_message_id="om_1",
+            payload={
+                "option": "继续生成文档",
+                "confirmation_id": "confirm_1",
+            },
+        )
+
+        result = service.handle_raw_event(
+            {
+                "header": {"event_type": "card.action.trigger", "event_id": "evt_resume_failed"},
+                "event": {
+                    "message": {"message_id": "card_msg_failed", "chat_id": "oc_1"},
+                    "operator": {"user_id": "ou_1"},
+                    "action": {"value": value},
+                },
+            }
+        )
+
+        self.assertEqual(result["msg"], "handled")
+        self.assertFalse(result["data"]["resumed"])
+        self.assertEqual(workflow.task_run_service.updates[-1][1]["status"], "failed")
+        self.assertEqual(workflow.task_run_service.updates[-1][1]["stage"], "confirmation_resume_failed")
+        self.assertIn("没有自动继续", workflow.message_api.patched_cards[0]["card"]["elements"][0]["text"]["content"])
+
+    def test_legacy_top_level_card_callback_payload_is_supported(self) -> None:
+        workflow = _FakeWorkflow([TaskItem(title="Backend development", owner="Alice", status="draft")])
+        service = FeishuCardActionService(workflow)
+        value = build_card_action_payload(
+            "select_clarification_option",
+            session_id="oc_1",
+            task_run_id="run_1",
+            source_message_id="om_1",
+            payload={
+                "option": "继续生成文档",
+                "confirmation_id": "confirm_1",
+            },
+        )
+
+        result = service.handle_raw_event(
+            {
+                "open_message_id": "card_msg_legacy",
+                "open_chat_id": "oc_1",
+                "operator": {"open_id": "ou_legacy"},
+                "action": {"value": value},
+            }
+        )
+
+        self.assertEqual(result["msg"], "handled")
+        self.assertEqual(workflow.resume_request["answered_by"], "ou_legacy")
+        self.assertEqual(workflow.message_api.patched_cards[0]["message_id"], "card_msg_legacy")
 
     def test_create_delivery_bundle_patches_card_before_bundling(self) -> None:
         workflow = _FakeWorkflow([])

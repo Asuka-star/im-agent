@@ -14,9 +14,10 @@ from app.services.request_router import RequestRouter, RouteDecision
 
 
 class FakeLLMService:
-    def __init__(self, result: dict | None = None, *, configured: bool = True) -> None:
+    def __init__(self, result: dict | None = None, *, configured: bool = True, doc_result: dict | None = None) -> None:
         self.result = result or {}
         self.configured = configured
+        self.doc_result = doc_result
         self.calls: list[tuple[str, str]] = []
 
     def is_configured(self) -> bool:
@@ -34,6 +35,10 @@ class FakeLLMService:
             "risks": [f"{route} risk"] if route == "risks" else [],
             "next_actions": [f"{route} next action"],
         }
+
+    def resolve_doc_request(self, workspace_context: str, instruction: str) -> dict:
+        self.calls.append((workspace_context, instruction))
+        return dict(self.doc_result or {})
 
 
 class FakeTaskRunService:
@@ -462,6 +467,83 @@ class GraphRunnerTests(unittest.TestCase):
         self.assertEqual(state.plan.steps[0].input["goal"], "整理成项目说明文档")
         self.assertEqual(state.plan.steps[1].input["requested_outputs"], ["slides"])
 
+    def test_slides_worker_uses_current_document_as_lifecycle_context(self) -> None:
+        workflow = ExecutableFakeWorkflow(
+            FakeLLMService(
+                {
+                    "mode": "workspace_action",
+                    "operation": "generate",
+                    "object": "workspace",
+                    "route": "slides",
+                    "requested_outputs": ["slides"],
+                    "confidence": 0.94,
+                    "reason": "基于当前文档生成正式演示稿",
+                }
+            )
+        )
+
+        GraphRunner(workflow).run_task_graph(
+            message("基于当前文档生成正式演示稿"),
+            task_run_id="run_doc_to_slides",
+            workspace_context="IM 讨论摘要",
+            active_episode_id=None,
+            current_document={
+                "document_id": "doc_1",
+                "title": "校园活动报名系统需求方案",
+                "version": 2,
+                "section_snapshot": [
+                    {
+                        "heading": "核心需求与方案范围",
+                        "paragraphs": ["学生可以报名，管理员可以审核，系统需要支持状态通知。"],
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual(len(workflow.slides_execution.calls), 1)
+        context = workflow.slides_execution.calls[0]["kwargs"]["workspace_context"]
+        self.assertIn("校园活动报名系统需求方案", context)
+        self.assertIn("学生可以报名", context)
+        self.assertIn("只放入实施计划或交付计划部分", context)
+
+    def test_doc_worker_uses_specialized_doc_drafting_result(self) -> None:
+        workflow = ExecutableFakeWorkflow(
+            FakeLLMService(
+                {
+                    "mode": "workspace_action",
+                    "operation": "generate",
+                    "object": "workspace",
+                    "route": "doc",
+                    "requested_outputs": ["doc"],
+                    "confidence": 0.95,
+                },
+                doc_result={
+                    "reason": "draft requirement document",
+                    "doc": {
+                        "title": "校园活动报名系统需求方案",
+                        "sections": [
+                            {
+                                "heading": "背景与痛点",
+                                "paragraphs": ["报名信息分散，负责人手动统计效率低。"],
+                            }
+                        ],
+                    },
+                },
+            )
+        )
+
+        GraphRunner(workflow).run_task_graph(
+            message("把刚才这轮讨论整理成一份正式需求方案文档"),
+            task_run_id="run_doc_lifecycle",
+            workspace_context="[近期群聊讨论]\n- 内容: 我们想做校园活动报名与审核系统",
+            active_episode_id=1,
+        )
+
+        self.assertEqual(len(workflow.doc_execution.calls), 1)
+        llm_result = workflow.doc_execution.calls[0]["kwargs"]["llm_result"]
+        self.assertEqual(llm_result["doc"]["title"], "校园活动报名系统需求方案")
+        self.assertIn("报名信息分散", llm_result["doc"]["sections"][0]["paragraphs"][0])
+
     def test_interpreter_preserves_legacy_compound_outputs(self) -> None:
         workflow = FakeWorkflow(
             FakeLLMService(
@@ -580,6 +662,28 @@ class GraphRunnerTests(unittest.TestCase):
         self.assertEqual(context["output_requirements"]["requested_outputs"], ["doc", "slides"])
         self.assertEqual(context["output_requirements"]["artifact_goals"]["doc"], "整理说明文档")
         self.assertEqual(context["missing_fields"], [])
+
+    def test_context_loader_skips_tasks_for_artifact_revision(self) -> None:
+        workflow = ParallelContextWorkflow()
+        state = {
+            "message": message("更新这份文档").model_dump(mode="json"),
+            "task_run_id": "run_1",
+            "active_episode_id": 7,
+            "command": WorkspaceCommand(
+                route="doc",
+                operation="revise",
+                object="doc",
+                confidence=0.95,
+            ).model_dump(mode="json"),
+            "context": {"session_id": "chat_1", "excerpt": "discussion"},
+            "trace": [],
+        }
+
+        result = context_loader_node(workflow)(state)
+        context = result["context"]
+
+        self.assertEqual(context["tasks"], [])
+        self.assertFalse(any(item.get("field") == "tasks" for item in context["loaded_sources"]))
 
     def test_context_loader_marks_missing_doc_target_for_revision(self) -> None:
         workflow = ExecutableFakeWorkflow(FakeLLMService(configured=False))

@@ -5,7 +5,7 @@ import logging
 from typing import Any
 
 from app.schemas.next_action import NextActionBundle, NextActionRecommendation
-from app.schemas.task_run import ArtifactRecord, ConfirmationRequestRecord, SessionDocumentRecord, TaskRunDetail
+from app.schemas.task_run import ArtifactRecord, SessionDocumentRecord, TaskRunDetail
 
 logger = logging.getLogger(__name__)
 
@@ -290,10 +290,10 @@ class ContextualNextActionService:
         if not recommendations:
             return "当前上下文里没有足够明确的下一步建议。"
         if signals.get("status") == "waiting_confirmation":
-            return "当前任务正在等待用户确认。"
+            return "当前协作运行正在等待用户确认。"
         if signals.get("sync_failed"):
             return "当前优先建议恢复文档同步。"
-        return "已根据当前任务状态和产物缺口生成下一步建议。"
+        return "已根据当前协作状态和产物缺口生成下一步建议。"
 
     def _recommendation(
         self,

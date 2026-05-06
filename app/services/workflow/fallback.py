@@ -5,6 +5,7 @@ from typing import Any
 
 from app.schemas.analyze import AnalyzeRequest
 from app.schemas.feishu_event import FeishuMessageContext
+from app.services.artifact_title_service import ArtifactTitleService
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +62,7 @@ class WorkflowFallbackHandler:
             exclude_message_id=message.message_id,
         )
         if not discussion_block:
-            reply = "我已经开始旁听这轮讨论了。你继续聊，等需要的时候再 @我做总结、整理待办或生成汇报大纲。"
+            reply = "我已经开始旁听这轮讨论了。你继续聊，等需要的时候再 @我整理需求方案文档或生成正式演示稿。"
             return workflow.reply_sender.deliver_reply(message, "help", reply, analysis=None)
 
         analysis = workflow.orchestrator.run(
@@ -94,7 +95,7 @@ class WorkflowFallbackHandler:
             include_semantic_search=False,
         )
         if not workspace_context.strip():
-            reply = "我这边还没有拿到可用的讨论素材。先在群里把目标、分工和结论聊出来，再让我生成汇报大纲会更准确。"
+            reply = "我这边还没有拿到可用的讨论素材。先在群里把需求背景、目标用户、核心方案和关键结论聊出来，再让我生成正式演示稿会更准确。"
             return workflow.reply_sender.deliver_reply(message, "slides", reply, analysis=None)
 
         provider = "llm"
@@ -105,6 +106,11 @@ class WorkflowFallbackHandler:
             package = self.build_fallback_presentation_package(message.session_id)
             provider = "fallback"
 
+        package = self._with_semantic_presentation_title(
+            package,
+            instruction=message.text,
+            workspace_context=workspace_context,
+        )
         presentation_tool = workflow._presentation_tool()
         artifact = presentation_tool.persist_artifact(
             package,
@@ -213,6 +219,19 @@ class WorkflowFallbackHandler:
             workflow.memory_service.close_active_episode(message.session_id, title=str(package.get("title") or "doc"))
         return result
 
+    @staticmethod
+    def _with_semantic_presentation_title(package: dict, *, instruction: str, workspace_context: str) -> dict:
+        title = ArtifactTitleService.presentation_title(
+            current_title=str(package.get("theme") or "").strip(),
+            instruction=instruction,
+            workspace_context=workspace_context,
+        )
+        if not title:
+            return package
+        package = dict(package)
+        package["theme"] = title
+        return package
+
     def build_fallback_presentation_package(self, session_id: str) -> dict:
         workflow = self.workflow
         try:
@@ -229,37 +248,47 @@ class WorkflowFallbackHandler:
         task_lines = [
             f"{task.title}（负责人：{task.owner}，截止：{task.due_date}）"
             for task in tasks[:4]
-        ] or ["明确项目目标、角色分工与时间节点"]
+        ] or ["明确项目目标、方案范围与关键里程碑"]
 
         risks = payload.get("risks") if isinstance(payload.get("risks"), list) else []
         next_actions = payload.get("next_actions") if isinstance(payload.get("next_actions"), list) else []
 
         return {
-            "theme": "基于飞书群聊讨论的协作推进方案",
-            "audience": "项目报名、路演准备、团队协同推进",
+            "theme": "基于飞书群聊讨论的需求方案与正式汇报",
+            "audience": "需求评审、项目答辩、路演准备",
             "slides": [
                 {
-                    "title": "项目背景与目标",
+                    "title": "需求背景与核心痛点",
                     "bullets": [
                         "当前要解决的核心问题是什么",
-                        "为什么需要用 AI 协助办公协同",
-                        "这次输出服务于什么汇报或报名场景",
+                        "目标用户在现有流程中遇到什么阻塞",
+                        "这次方案要沉淀为可汇报、可落地的成果",
                     ],
                 },
-                {"title": "讨论中形成的关键结论", "bullets": task_lines[:3]},
-                {"title": "任务拆解与分工", "bullets": task_lines},
                 {
-                    "title": "当前风险与待确认事项",
-                    "bullets": risks[:3] or ["负责人和截止时间仍需进一步确认"],
+                    "title": "核心需求与方案范围",
+                    "bullets": next_actions[:3] or ["明确主要用户、核心功能、边界和二期能力"],
                 },
                 {
-                    "title": "下一步推进计划",
-                    "bullets": next_actions[:3] or ["继续在群里同步进展并更新协作视图"],
+                    "title": "产品流程与技术方案",
+                    "bullets": [
+                        "从 IM 讨论沉淀需求，再进入文档、流程图和演示稿",
+                        "用结构化运行态记录 Agent 的理解、生成、确认和交付过程",
+                        "关键产物可在 Workbench 中预览、修订和打包",
+                    ],
+                },
+                {
+                    "title": "当前风险与待确认事项",
+                    "bullets": risks[:3] or ["需求边界、权限配置和演示稳定性仍需复核"],
+                },
+                {
+                    "title": "实施计划与分工",
+                    "bullets": task_lines,
                 },
             ],
             "emphasis": [
-                "AI 不打断日常讨论，而是在需要时统一整理和输出",
-                "协作结果可以从 IM 继续延展到文档和演示稿",
+                "主线是 IM 需求讨论到正式文档与演示文稿的沉淀",
+                "任务分工只是需求落地计划的一部分，不是整体汇报的主角",
             ],
-            "assets": ["最新任务清单截图", "关键讨论结论摘要", "时间线或里程碑信息"],
+            "assets": ["需求文档截图", "流程图或架构图", "交付包验收清单"],
         }

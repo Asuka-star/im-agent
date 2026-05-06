@@ -1,10 +1,14 @@
 import asyncio
+import json
 import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from fastapi import HTTPException
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
 from app.api.routes.artifacts import (
     get_local_canvas_artifact,
@@ -12,6 +16,7 @@ from app.api.routes.artifacts import (
     get_local_doc_artifact,
     get_local_slides_artifact,
 )
+from app.db.models import Artifact
 
 
 class ArtifactRouteTests(unittest.TestCase):
@@ -88,6 +93,105 @@ class ArtifactRouteTests(unittest.TestCase):
 
         self.assertEqual(Path(response.path).name, "sample.html")
         self.assertEqual(response.media_type, "text/html; charset=utf-8")
+
+    def test_get_local_canvas_artifact_restores_html_from_db_preview_when_file_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            engine = create_engine(f"sqlite:///{Path(tmpdir) / 'artifacts.db'}", connect_args={"check_same_thread": False})
+            session_local = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+            Artifact.__table__.create(bind=engine)
+            preview = {
+                "title": "产品流程图",
+                "version": 1,
+                "schema": "im-agent.canvas.v1",
+                "exports": {
+                    "json": "/api/artifacts/canvas/missing.json",
+                    "svg": "/api/artifacts/canvas/missing.svg",
+                    "html": "/api/artifacts/canvas/missing.html",
+                },
+                "shapes": [
+                    {
+                        "id": "n1",
+                        "type": "node",
+                        "text": "学生查看活动列表",
+                        "x": 80,
+                        "y": 140,
+                        "w": 184,
+                        "h": 72,
+                        "color": "#EAF5FF",
+                        "stroke": "#5A9FD6",
+                        "group": "Input",
+                    }
+                ],
+            }
+            with session_local() as session:
+                session.add(
+                    Artifact(
+                        artifact_id="artifact_canvas",
+                        task_run_id="run_canvas",
+                        artifact_type="canvas",
+                        provider="local",
+                        title="产品流程图",
+                        status="ready",
+                        url="/api/artifacts/canvas/missing.html",
+                        version=1,
+                        preview_json=json.dumps(preview, ensure_ascii=False),
+                    )
+                )
+                session.commit()
+
+            old_cwd = os.getcwd()
+            os.chdir(tmpdir)
+            try:
+                with patch("app.api.routes.artifacts.SessionLocal", session_local):
+                    response = asyncio.run(get_local_canvas_artifact("missing.html"))
+            finally:
+                os.chdir(old_cwd)
+                engine.dispose()
+
+        self.assertEqual(response.media_type, "text/html")
+        self.assertIn("产品流程图", response.body.decode("utf-8"))
+        self.assertIn("学生查看活动列表", response.body.decode("utf-8"))
+
+    def test_get_local_canvas_artifact_restores_svg_from_db_preview_when_file_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            engine = create_engine(f"sqlite:///{Path(tmpdir) / 'artifacts.db'}", connect_args={"check_same_thread": False})
+            session_local = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+            Artifact.__table__.create(bind=engine)
+            preview = {
+                "title": "产品流程图",
+                "version": 1,
+                "schema": "im-agent.canvas.v1",
+                "exports": {"svg": "/api/artifacts/canvas/missing.svg"},
+                "shapes": [{"id": "n1", "type": "node", "text": "学生查看活动列表"}],
+            }
+            with session_local() as session:
+                session.add(
+                    Artifact(
+                        artifact_id="artifact_canvas_svg",
+                        task_run_id="run_canvas",
+                        artifact_type="canvas",
+                        provider="local",
+                        title="产品流程图",
+                        status="ready",
+                        url="/api/artifacts/canvas/missing.html",
+                        version=1,
+                        preview_json=json.dumps(preview, ensure_ascii=False),
+                    )
+                )
+                session.commit()
+
+            old_cwd = os.getcwd()
+            os.chdir(tmpdir)
+            try:
+                with patch("app.api.routes.artifacts.SessionLocal", session_local):
+                    response = asyncio.run(get_local_canvas_artifact("missing.svg"))
+            finally:
+                os.chdir(old_cwd)
+                engine.dispose()
+
+        self.assertEqual(response.media_type, "image/svg+xml")
+        self.assertIn("<svg", response.body.decode("utf-8"))
+        self.assertIn("学生查看活动列表", response.body.decode("utf-8"))
 
     def test_get_local_slides_artifact_returns_html_file(self) -> None:
         old_cwd = os.getcwd()

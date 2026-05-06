@@ -1,3 +1,4 @@
+import json
 import logging
 import re
 from datetime import datetime, timezone
@@ -369,15 +370,21 @@ class FeishuWorkflowService:
         *,
         active_episode_id: int | None,
         include_semantic_search: bool,
+        profile: str = "general",
     ) -> str:
-        context = self.memory_service.build_workspace_context(
-            message.session_id,
-            include_pending=True,
-            exclude_message_id=message.message_id,
-            query_text=message.text,
-            include_semantic_search=include_semantic_search,
-            episode_id=active_episode_id,
-        )
+        build_workspace_context = getattr(self.memory_service, "build_workspace_context", None)
+        if callable(build_workspace_context):
+            context = build_workspace_context(
+                message.session_id,
+                profile=profile,
+                include_pending=True,
+                exclude_message_id=message.message_id,
+                query_text=message.text,
+                include_semantic_search=include_semantic_search,
+                episode_id=active_episode_id,
+            )
+        else:
+            context = ""
         team_context = self._build_team_context_for_message(
             message,
             include_semantic_search=include_semantic_search,
@@ -722,14 +729,43 @@ class FeishuWorkflowService:
         active_episode_id: int | None,
         target_document: dict | None = None,
     ) -> str:
-        if route_decision.route != "doc":
+        lifecycle_context = None
+        if route_decision.route in {"doc", "slides", "canvas", "delivery"}:
+            lifecycle_context = self._build_workspace_context_for_message(
+                message,
+                active_episode_id=active_episode_id,
+                include_semantic_search=False,
+                profile="lifecycle",
+            )
+            if not lifecycle_context:
+                lifecycle_context = workspace_context
+        if route_decision.route == "doc":
+            return self._build_doc_update_context(
+                message,
+                lifecycle_context or workspace_context,
+                active_episode_id=active_episode_id,
+                target_document=target_document,
+            )
+        if route_decision.route in {"slides", "canvas", "delivery"}:
+            return self._build_artifact_lifecycle_context(message, lifecycle_context or workspace_context)
+        return workspace_context
+
+    def _build_artifact_lifecycle_context(self, message: FeishuMessageContext, workspace_context: str) -> str:
+        try:
+            current_doc = self.session_document_service.get_current_document(message.session_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to load current document context for artifact generation: %s", exc)
+            current_doc = None
+        doc_context = DocTool.format_current_document_context(current_doc if isinstance(current_doc, dict) else None)
+        if not doc_context:
             return workspace_context
-        return self._build_doc_update_context(
-            message,
-            workspace_context,
-            active_episode_id=active_episode_id,
-            target_document=target_document,
+        guidance = (
+            "[需求生命周期产物策略]\n"
+            "- 当前协作文档是从 IM 讨论沉淀出的正式需求/方案上下文。\n"
+            "- 生成演示稿、流程图或交付包时优先围绕文档中的背景、痛点、核心需求、产品流程、技术方案、风险与里程碑展开。\n"
+            "- 任务分工只作为实施计划支撑，不作为汇报主线。"
         )
+        return self._join_context_blocks(workspace_context, doc_context, guidance)
 
     def _build_doc_update_context(
         self,
@@ -757,7 +793,7 @@ class FeishuWorkflowService:
                 "- 先比较“当前协作文档”和“本次待同步讨论”，识别新增、修改或删除的信息。\n"
                 "- 对发生变化的章节，输出该章节更新后的完整内容，保留仍然有效的既有条目。\n"
                 "- 不要把普通“更新文档”理解成重新生成一份泛泛总结。\n"
-                "- 如果讨论中出现新的负责人、截止时间、状态或风险，请同步到对应章节。\n"
+                "- 只有当本次讨论明确给出负责人、截止时间、状态或风险时，才同步到对应章节；不要根据今天日期、发言人、通用项目阶段自行补排期或负责人。\n"
                 "- 如果没有实质变化，可以返回与当前文档一致的章节内容。"
             )
 
@@ -944,7 +980,7 @@ class FeishuWorkflowService:
         return {
             "question": "你希望我接下来怎么整理这段内容？",
             "reason": reason,
-            "options": ["整理成飞书文档", "生成汇报 PPT 大纲", "只做讨论总结", "整理任务清单"],
+            "options": ["整理成需求方案文档", "生成正式答辩 PPT", "画产品流程图", "只做讨论总结"],
             "blocking": True,
         }
 
@@ -1189,8 +1225,42 @@ class FeishuWorkflowService:
             if not content:
                 continue
             actor_name = self._actor_name_for_sender_id(message.session_id, getattr(item, "sender_id", None))
-            lines.append(TaskOperationTool.normalize_first_person_task_text(content, actor_name))
+            normalized_content = self._normalize_pending_discussion_message(item, content)
+            lines.append(TaskOperationTool.normalize_first_person_task_text(normalized_content, actor_name))
         return "\n".join(lines)
+
+    def _normalize_pending_discussion_message(self, item: object, content: str) -> str:
+        mentioned_names = self._pending_message_mentioned_names(item)
+        if not mentioned_names:
+            return content
+        target_name = mentioned_names[0]
+        text = content.strip()
+        if re.match(r"^(?:你|请你|麻烦你|需要你|辛苦你|你也|你同时)", text):
+            return f"{target_name}{text}"
+        return text
+
+    @staticmethod
+    def _pending_message_mentioned_names(item: object) -> list[str]:
+        raw_mentions = getattr(item, "mentions_json", None)
+        if not raw_mentions:
+            return []
+        try:
+            payload = json.loads(raw_mentions) if isinstance(raw_mentions, str) else raw_mentions
+        except (TypeError, json.JSONDecodeError):
+            return []
+        if not isinstance(payload, list):
+            return []
+        names: list[str] = []
+        for mention in payload:
+            if not isinstance(mention, dict) or mention.get("is_bot"):
+                continue
+            name = str(mention.get("name") or mention.get("display_name") or "").strip()
+            fallback_id = str(mention.get("user_id") or mention.get("open_id") or "").strip()
+            if name:
+                names.append(name)
+            elif fallback_id:
+                names.append(fallback_id)
+        return names
 
     def _actor_name_for_sender_id(self, session_id: str, sender_id: str | None) -> str | None:
         if not sender_id:
@@ -1494,10 +1564,70 @@ class FeishuWorkflowService:
         if candidate:
             candidate = candidate[:40]
         else:
-            candidate = "协作任务"
+            candidate = "协作运行"
         if mode:
-            return f"{candidate} [{mode}]"
+            return f"{self._task_run_title_prefix(mode)} - {candidate}"
         return candidate
+
+    @staticmethod
+    def _task_run_title_prefix(mode: str | None) -> str:
+        match (mode or "").strip().lower():
+            case "doc":
+                return "文档产出"
+            case "slides":
+                return "演示稿产出"
+            case "canvas":
+                return "画布产出"
+            case "delivery":
+                return "交付包产出"
+            case "tasks":
+                return "任务处理"
+            case "status":
+                return "协作状态"
+            case "summary":
+                return "讨论总结"
+            case "risks":
+                return "风险识别"
+            case "help":
+                return "帮助说明"
+            case _:
+                return "协作运行"
+
+    @staticmethod
+    def _task_run_lifecycle_metadata(mode: str | None, requested_outputs: list[str] | None = None) -> dict[str, str]:
+        normalized_mode = (mode or "").strip().lower()
+        outputs = [str(item).strip().lower() for item in requested_outputs or [] if str(item).strip()]
+        artifact_modes = {"doc", "slides", "canvas", "delivery"}
+        if normalized_mode in {"tasks"}:
+            run_kind = "task_management"
+        elif normalized_mode in {"status", "summary", "risks"}:
+            run_kind = "analysis"
+        elif normalized_mode == "help":
+            run_kind = "help"
+        elif normalized_mode in artifact_modes or any(item in artifact_modes for item in outputs):
+            run_kind = "artifact_lifecycle"
+        else:
+            run_kind = "collaboration"
+
+        primary_object = normalized_mode or (outputs[0] if outputs else "workspace")
+        if primary_object == "workspace" and outputs:
+            primary_object = outputs[0]
+        stage_by_object = {
+            "doc": "document",
+            "slides": "presentation",
+            "canvas": "canvas",
+            "delivery": "delivery",
+            "tasks": "implementation",
+            "status": "discussion",
+            "summary": "discussion",
+            "risks": "discussion",
+            "help": "support",
+        }
+        return {
+            "run_kind": run_kind,
+            "primary_object": primary_object,
+            "lifecycle_stage": stage_by_object.get(primary_object, "discussion"),
+        }
 
     def _condense_text(self, value: str | None) -> str | None:
         candidate = " ".join((value or "").split()).strip()

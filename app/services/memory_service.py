@@ -1041,6 +1041,7 @@ class MemoryService:
         self,
         session_id: str,
         *,
+        profile: str = "general",
         include_pending: bool = True,
         exclude_message_id: str | None = None,
         query_text: str | None = None,
@@ -1069,27 +1070,35 @@ class MemoryService:
         if not tasks and not memories and not task_changes and not pending_block and not retrieved_chunks and not source_dirty_records:
             return ""
 
+        normalized_profile = str(profile or "general").strip().lower()
         lines: list[str] = ["[协作上下文]"]
 
-        if source_dirty_records:
+        def append_source_dirty() -> None:
+            if not source_dirty_records:
+                return
             lines.append("[源消息变更提醒]")
             for record in source_dirty_records[-3:]:
                 reason = str(record.get("reason") or "源消息发生变更，相关任务快照和产物需要复核。")
                 message_id = str(record.get("message_id") or "")
                 lines.append(f"- message_id={message_id} | {reason}")
 
-        if pending_block:
-            lines.append(pending_block)
+        def append_pending() -> None:
+            if pending_block:
+                lines.append(pending_block)
 
-        if tasks:
-            lines.append("[当前任务快照]")
+        def append_tasks(*, heading: str = "[当前任务快照]") -> None:
+            if not tasks:
+                return
+            lines.append(heading)
             for task in tasks:
                 lines.append(
                     f"- {task.title} | 负责人: {task.owner} | 截止: {task.due_date} | 优先级: {task.priority} | 状态: {task.status}"
                 )
 
-        if task_changes:
-            lines.append("[任务变更记录]")
+        def append_task_changes(*, heading: str = "[任务变更记录]") -> None:
+            if not task_changes:
+                return
+            lines.append(heading)
             for change in reversed(task_changes):
                 line = (
                     f"- {change.action}: {change.title} | 负责人: {change.owner} | 截止: {change.due_date} | 优先级: {change.priority}"
@@ -1098,15 +1107,41 @@ class MemoryService:
                     line += f" | 原因: {change.reason}"
                 lines.append(line)
 
-        if memories:
+        def append_memories() -> None:
+            if not memories:
+                return
             lines.append("[最近总结]")
             for memory in reversed(memories):
                 lines.append(f"- {memory.summary}")
 
-        if retrieved_chunks:
+        def append_retrieved_chunks() -> None:
+            if not retrieved_chunks:
+                return
             lines.append("[相关历史记忆]")
             for chunk in retrieved_chunks:
                 lines.append(f"- ({chunk.source_type}) {chunk.content}")
+
+        if normalized_profile == "lifecycle":
+            append_source_dirty()
+            append_pending()
+            append_memories()
+            append_retrieved_chunks()
+            append_tasks(heading="[实施计划参考]")
+            append_task_changes(heading="[实施计划变更参考]")
+        elif normalized_profile == "task":
+            append_source_dirty()
+            append_tasks()
+            append_task_changes()
+            append_pending()
+            append_memories()
+            append_retrieved_chunks()
+        else:
+            append_source_dirty()
+            append_pending()
+            append_tasks()
+            append_task_changes()
+            append_memories()
+            append_retrieved_chunks()
 
         return "\n".join(lines)
 

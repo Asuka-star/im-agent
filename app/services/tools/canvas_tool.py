@@ -10,8 +10,6 @@ from app.services.canvas_artifact_service import CanvasArtifactService
 class CanvasTool:
     """Generates free-canvas artifacts and concise user-facing previews."""
 
-    PUBLIC_PREVIEW_BASE_URL = settings.artifact_public_base_url
-
     def __init__(self, *, artifact_service: CanvasArtifactService) -> None:
         self.artifact_service = artifact_service
 
@@ -54,7 +52,8 @@ class CanvasTool:
             return url
         if not url.startswith("/"):
             url = f"/{url}"
-        return f"{cls.PUBLIC_PREVIEW_BASE_URL.rstrip('/')}{url}"
+        base_url = str(settings.artifact_public_base_url or "").strip().rstrip("/")
+        return f"{base_url}{url}" if base_url else url
 
     def plan_revision(self, scene: dict, instruction: str, llm_result: dict | None = None) -> ArtifactEditPlan:
         shapes = scene.get("shapes") if isinstance(scene.get("shapes"), list) else []

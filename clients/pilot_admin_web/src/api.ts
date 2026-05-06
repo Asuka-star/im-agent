@@ -31,7 +31,7 @@ async function requestJson<T>(path: string, init?: RequestInit, params?: Record<
     },
   });
   if (!response.ok) {
-    throw new Error(`接口请求失败：${response.status} ${response.statusText}`);
+    throw new Error(`接口请求失败：状态码 ${response.status}`);
   }
   return response.json() as Promise<T>;
 }

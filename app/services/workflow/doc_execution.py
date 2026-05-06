@@ -102,6 +102,23 @@ class WorkflowDocExecution:
             session_id,
             episode_id=episode_id,
         ) or workspace_context or instruction
+        requirement_package = self.document_package_from_requirement_brief(
+            session_id=session_id,
+            instruction=instruction,
+            llm_result=llm_result,
+            source_text=source_text,
+            episode_id=episode_id,
+            stats_as_of=stats_as_of,
+        )
+        if requirement_package:
+            return requirement_package
+        discussion_package = workflow.document_package_builder.from_discussion_text(
+            source_text,
+            instruction,
+            stats_as_of=stats_as_of,
+        )
+        if discussion_package:
+            return discussion_package
         analysis = workflow._build_analysis_from_llm(
             session_id=session_id,
             source_text=source_text,
@@ -137,6 +154,24 @@ class WorkflowDocExecution:
             episode_id=episode_id,
             exclude_message_id=source_message_id,
         ) or workspace_context or instruction
+        stats_as_of = self.resolve_doc_stats_as_of(session_id, episode_id=episode_id)
+        requirement_package = self.document_package_from_requirement_brief(
+            session_id=session_id,
+            instruction=instruction,
+            llm_result=llm_result,
+            source_text=source_text,
+            episode_id=episode_id,
+            stats_as_of=stats_as_of,
+        )
+        if requirement_package:
+            return requirement_package, None
+        discussion_package = workflow.document_package_builder.from_discussion_text(
+            source_text,
+            instruction,
+            stats_as_of=stats_as_of,
+        )
+        if discussion_package:
+            return discussion_package, None
         analysis = workflow._build_analysis_from_llm(
             session_id=session_id,
             source_text=source_text,
@@ -152,7 +187,6 @@ class WorkflowDocExecution:
             async_embed=True,
             preserve_unmatched_previous=False,
         )
-        stats_as_of = self.resolve_doc_stats_as_of(session_id, episode_id=episode_id)
         package = self.document_from_analysis(analysis, instruction, stats_as_of=stats_as_of)
         return package, analysis
 
@@ -170,6 +204,35 @@ class WorkflowDocExecution:
         return workflow.document_package_builder.package_from_llm_result(
             instruction=instruction,
             llm_result=llm_result,
+            stats_as_of=resolved_stats_as_of,
+        )
+
+    def document_package_from_requirement_brief(
+        self,
+        *,
+        session_id: str,
+        instruction: str,
+        llm_result: dict,
+        source_text: str,
+        episode_id: int | None,
+        stats_as_of: str | None = None,
+    ) -> dict | None:
+        workflow = self.workflow
+        resolved_stats_as_of = stats_as_of or self.resolve_doc_stats_as_of(session_id, episode_id=episode_id)
+        brief_result = llm_result if isinstance(llm_result, dict) and isinstance(llm_result.get("requirement_brief"), dict) else None
+        if brief_result is None:
+            resolver = getattr(workflow.llm_service, "resolve_requirement_brief", None)
+            if callable(resolver) and workflow.llm_service.is_configured():
+                try:
+                    brief_result = resolver(source_text, instruction)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("LLM requirement brief resolution failed, falling back to discussion text: %s", exc)
+        brief = brief_result.get("requirement_brief") if isinstance(brief_result, dict) else None
+        if not isinstance(brief, dict):
+            return None
+        return workflow.document_package_builder.from_requirement_brief(
+            brief,
+            instruction,
             stats_as_of=resolved_stats_as_of,
         )
 

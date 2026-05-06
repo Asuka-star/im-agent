@@ -31,12 +31,32 @@ class OfficeArtifactService:
         task_run_id: str | None,
         session_id: str,
     ) -> str:
-        title = str(package.get("title") or "collab_doc").strip() or "collab_doc"
-        stem = self._slugify_filename(task_run_id or f"{session_id}-{title}")[:96]
+        title = self._filename_title(str(package.get("title") or "collab_doc").strip() or "collab_doc")
+        stem = self._artifact_stem(title, suffix=task_run_id or session_id)[:96]
         return f"{stem or 'collab_doc'}.md"
 
+    @staticmethod
+    def _filename_title(title: str) -> str:
+        return re.sub(r"\s*[-_]*\s*统计至.+$", "", title).strip() or title
+
+    def _artifact_stem(self, title: str, *, suffix: str | None) -> str:
+        title_stem = self._slugify_filename(title)
+        suffix_stem = self._short_suffix(suffix)
+        if suffix_stem and suffix_stem not in title_stem:
+            return f"{title_stem}-{suffix_stem}"
+        return title_stem or suffix_stem or "collab_doc"
+
+    @staticmethod
+    def _short_suffix(value: str | None) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        if text.startswith("run_") and len(text) > 24:
+            return text[:16]
+        return text[:24]
+
     def _slugify_filename(self, value: str) -> str:
-        slug = re.sub(r"[^A-Za-z0-9._-]+", "-", value.strip()).strip(".-_")
+        slug = re.sub(r"[^\w.-]+", "-", value.strip(), flags=re.UNICODE).strip(".-_")
         return slug or "artifact"
 
     def _render_document_markdown(self, package: dict, *, sync_lines: list[str]) -> str:

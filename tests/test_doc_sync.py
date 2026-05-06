@@ -45,7 +45,7 @@ class DocSyncTests(unittest.TestCase):
         decision = self.interaction.decide("帮我把这轮讨论整理成飞书文档")
         self.assertEqual(decision.mode, "doc")
 
-    def test_document_from_analysis_contains_core_sections(self) -> None:
+    def test_document_from_analysis_contains_task_sections_for_explicit_task_request(self) -> None:
         analysis = AnalyzeResponse(
             session_id="s1",
             summary="讨论明确了后端和前端分工。",
@@ -64,12 +64,70 @@ class DocSyncTests(unittest.TestCase):
             agent_traces=[AgentTrace(agent="planner", summary="ok")],
         )
 
-        package = self.workflow.doc_execution.document_from_analysis(analysis, "把这轮讨论整理成文档")
+        package = self.workflow.doc_execution.document_from_analysis(analysis, "把这轮讨论整理成任务清单文档")
         self.assertIn("title", package)
         self.assertTrue(package["sections"])
         headings = [section["heading"] for section in package["sections"]]
         self.assertIn("讨论摘要", headings)
         self.assertIn("任务清单", headings)
+
+    def test_document_from_analysis_defaults_to_requirement_solution_sections(self) -> None:
+        analysis = AnalyzeResponse(
+            session_id="s1",
+            summary="讨论明确了校园活动报名系统要解决报名混乱和审核低效的问题。",
+            tasks=[
+                TaskItem(
+                    title="支持学生查看活动并报名",
+                    owner="产品",
+                    priority="high",
+                    due_date="2026-05-07",
+                    status="draft",
+                    notes="核心需求",
+                )
+            ],
+            risks=["高峰期报名接口压力大"],
+            next_actions=["先完成报名和审核闭环，候补队列放到二期"],
+            agent_traces=[AgentTrace(agent="planner", summary="ok")],
+        )
+
+        package = self.workflow.doc_execution.document_from_analysis(analysis, "把刚才讨论整理成正式需求方案文档")
+
+        headings = [section["heading"] for section in package["sections"]]
+        self.assertIn("背景与痛点", headings)
+        self.assertIn("核心需求与方案范围", headings)
+        self.assertIn("产品流程与技术方案", headings)
+        self.assertIn("实施计划与分工", headings)
+        self.assertIn("演示稿准备要点", headings)
+        self.assertNotIn("任务清单", headings)
+
+    def test_solution_document_can_mention_task_list_without_becoming_task_document(self) -> None:
+        analysis = AnalyzeResponse(
+            session_id="s1",
+            summary="讨论明确了需求背景和方案范围。",
+            tasks=[
+                TaskItem(
+                    title="完成报名审核闭环",
+                    owner="后端",
+                    priority="high",
+                    due_date="2026-05-07",
+                    status="draft",
+                    notes="实施计划",
+                )
+            ],
+            risks=[],
+            next_actions=[],
+            agent_traces=[],
+        )
+
+        package = self.workflow.doc_execution.document_from_analysis(
+            analysis,
+            "整理成正式需求方案文档，最后包含任务清单",
+        )
+
+        headings = [section["heading"] for section in package["sections"]]
+        self.assertIn("背景与痛点", headings)
+        self.assertIn("实施计划与分工", headings)
+        self.assertNotIn("任务清单", headings)
 
     def test_default_doc_title_includes_timestamp(self) -> None:
         with patch.object(self.workflow.doc_execution, "doc_title_timestamp", return_value="2026-04-17 11:30"):
@@ -201,7 +259,7 @@ class DocSyncTests(unittest.TestCase):
         self.assertEqual(merged[0].owner, "Zeleous")
         self.assertEqual(merged[0].priority, "high")
 
-    def test_status_snapshot_keeps_same_title_with_distinct_explicit_owners(self) -> None:
+    def test_status_snapshot_merges_same_title_with_distinct_explicit_owners(self) -> None:
         from app.services.workflow.document_tasks import merge_status_task_sources
 
         document_tasks = [
@@ -213,8 +271,8 @@ class DocSyncTests(unittest.TestCase):
 
         merged = merge_status_task_sources(document_tasks, memory_tasks)
 
-        self.assertEqual(len(merged), 2)
-        self.assertEqual([task.owner for task in merged], ["张三", "李四"])
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0].owner, "张三、李四")
 
     def test_update_current_tasks_from_discussion_prefers_explicit_new_assignment(self) -> None:
         current_tasks = [
@@ -595,10 +653,10 @@ class DocSyncTests(unittest.TestCase):
         artifact = result["artifacts"][0]
         self.assertEqual(artifact["status"], "local_ready")
         self.assertEqual(artifact["provider"], "local")
-        self.assertEqual(artifact["url"], "/api/artifacts/doc/run_local_ready.md")
+        self.assertEqual(artifact["url"], "/api/artifacts/doc/Project-Note-run_local_ready.md")
         self.assertEqual(artifact["preview"]["sync"]["mode"], "local_only")
         self.assertEqual(artifact["preview"]["sync"]["status"], "local_ready")
-        local_path = Path(self.local_artifact_dir.name) / "doc" / "run_local_ready.md"
+        local_path = Path(self.local_artifact_dir.name) / "doc" / "Project-Note-run_local_ready.md"
         self.assertTrue(local_path.is_file())
         self.assertIn("Local artifact is available.", local_path.read_text(encoding="utf-8"))
 
@@ -710,6 +768,139 @@ class DocSyncTests(unittest.TestCase):
             package["sections"][0]["paragraphs"],
             ["接口联调窗口偏紧，需要提前锁定测试环境。"],
         )
+
+    def test_doc_response_package_falls_back_to_requirement_discussion_content(self) -> None:
+        discussion = "\n".join(
+            [
+                "[近期群聊讨论]",
+                "- 发言人: u1 | 内容: 我们这次想做一个校园活动报名与审核系统，主要解决社团活动报名信息分散、负责人手动统计太慢的问题。",
+                "- 发言人: u1 | 内容: 目标用户主要是学生、社团负责人和学院老师。学生希望能快速看到活动并报名，负责人希望能统一审核名单，老师需要看到活动数据和风险提醒。",
+                "- 发言人: u1 | 内容: 核心流程可以是：学生查看活动列表，提交报名信息，负责人审核，通过后生成名单，老师可以查看统计结果。",
+                "- 发言人: u1 | 内容: 风险是报名高峰期接口压力可能比较大，另外活动审核规则还需要老师确认。",
+                "- 发言人: u1 | 内容: 我们先做报名、审核、名单导出这三个核心能力，数据看板和候补队列可以放到二期。",
+            ]
+        )
+        with patch.object(
+            self.workflow.memory_service,
+            "get_discussion_cutoff_at",
+            return_value=None,
+        ), patch.object(
+            self.workflow.memory_service,
+            "build_discussion_block",
+            return_value=discussion,
+        ):
+            package, analysis = self.workflow.doc_execution.build_doc_response_package(
+                session_id="s1",
+                instruction="把刚才这轮讨论整理成一份正式需求方案文档",
+                llm_result={
+                    "operation": "create",
+                    "object": "doc",
+                    "route": "doc",
+                    "reason": "graph command only",
+                },
+                workspace_context="",
+                episode_id=33,
+                reason="生成文档",
+                source_message_id="m_doc",
+            )
+
+        self.assertIsNone(analysis)
+        content = "\n".join(
+            paragraph
+            for section in package["sections"]
+            for paragraph in section["paragraphs"]
+        )
+        headings = [section["heading"] for section in package["sections"]]
+        self.assertIn("背景与痛点", headings)
+        self.assertIn("目标用户与使用场景", headings)
+        self.assertIn("核心需求与方案范围", headings)
+        self.assertIn("校园活动报名与审核系统", content)
+        self.assertIn("学生希望能快速看到活动并报名", content)
+        self.assertIn("报名、审核、名单导出", content)
+        self.assertIn("活动审核规则还需要老师确认", content)
+        self.assertNotIn("在群里继续补充任务分工", content)
+
+    def test_document_package_from_requirement_brief_builds_solution_sections(self) -> None:
+        package = self.workflow.document_package_builder.from_requirement_brief(
+            {
+                "title": "校园活动报名与审核系统需求方案",
+                "problem": ["社团活动报名信息分散，负责人手动统计太慢。"],
+                "target_users": ["学生：快速查看活动并报名", "社团负责人：统一审核名单", "学院老师：查看活动数据和风险提醒"],
+                "goals": ["统一活动报名、审核和名单导出流程"],
+                "scope": {
+                    "phase_one": ["报名", "审核", "名单导出"],
+                    "phase_later": ["数据看板", "候补队列"],
+                    "out_of_scope": [],
+                },
+                "product_flow": ["学生查看活动列表，提交报名信息，负责人审核，通过后生成名单。"],
+                "technical_notes": ["报名高峰期需要关注接口容量保障。"],
+                "risks": ["报名高峰期接口压力可能较大"],
+                "open_questions": ["活动审核规则需要老师确认"],
+                "implementation_plan": [
+                    {"item": "补充审核规则", "owner": "TBD", "due_date": "TBD"},
+                ],
+                "source_evidence": ["讨论中明确一期先做报名、审核、名单导出。"],
+            },
+            "把刚才这轮讨论整理成一份正式需求方案文档",
+            stats_as_of="2026-05-06 13:58",
+        )
+
+        self.assertIsNotNone(package)
+        content = "\n".join(paragraph for section in package["sections"] for paragraph in section["paragraphs"])
+        headings = [section["heading"] for section in package["sections"]]
+        self.assertIn("背景与痛点", headings)
+        self.assertIn("目标用户与使用场景", headings)
+        self.assertIn("方案范围", headings)
+        self.assertIn("产品流程", headings)
+        self.assertNotIn("实施计划与分工", headings)
+        self.assertIn("社团活动报名信息分散", content)
+        self.assertIn("一期范围：报名", content)
+        self.assertIn("后续范围：数据看板", content)
+        self.assertIn("待确认：活动审核规则需要老师确认", content)
+
+    def test_doc_response_package_prefers_requirement_brief_over_task_fallback(self) -> None:
+        llm_result = {
+            "operation": "generate",
+            "object": "doc",
+            "route": "doc",
+            "requirement_brief": {
+                "title": "校园活动报名与审核系统需求方案",
+                "problem": ["报名信息分散，负责人手动统计慢。"],
+                "target_users": ["学生", "社团负责人", "学院老师"],
+                "goals": ["统一报名、审核和名单导出"],
+                "scope": {"phase_one": ["报名、审核、名单导出"], "phase_later": ["数据看板"], "out_of_scope": []},
+                "product_flow": ["查看活动列表 -> 提交报名 -> 负责人审核 -> 生成名单。"],
+                "technical_notes": ["接口需要考虑报名高峰期压力。"],
+                "risks": ["审核规则尚未确认"],
+                "open_questions": [],
+                "implementation_plan": [],
+                "source_evidence": ["IM 讨论中明确校园活动报名与审核系统。"],
+            },
+        }
+        with patch.object(
+            self.workflow.memory_service,
+            "get_discussion_cutoff_at",
+            return_value=None,
+        ), patch.object(
+            self.workflow.memory_service,
+            "build_discussion_block",
+            return_value="在群里继续补充任务分工、截止时间和阻塞项。",
+        ):
+            package, analysis = self.workflow.doc_execution.build_doc_response_package(
+                session_id="brief_session",
+                instruction="把刚才这轮讨论整理成一份正式需求方案文档",
+                llm_result=llm_result,
+                workspace_context="",
+                episode_id=None,
+                reason="生成文档",
+                source_message_id="m_doc",
+            )
+
+        self.assertIsNone(analysis)
+        content = "\n".join(paragraph for section in package["sections"] for paragraph in section["paragraphs"])
+        self.assertIn("报名信息分散", content)
+        self.assertIn("统一报名、审核和名单导出", content)
+        self.assertNotIn("在群里继续补充任务分工", content)
 
     def test_revision_context_includes_current_document_snapshot(self) -> None:
         context = DocTool.format_current_document_context(
@@ -1856,7 +2047,7 @@ class DocSyncTests(unittest.TestCase):
             ],
         )
 
-        self.assertIn("本轮任务：", reply)
+        self.assertIn("本轮产出：", reply)
         self.assertIn("- 删除：Update (2026-04-29 15:43)", reply)
         self.assertIn("- 已删除：Update (2026-04-29 15:43)", reply)
         self.assertIn("- 当前版本：v10", reply)
@@ -1966,7 +2157,7 @@ class DocSyncTests(unittest.TestCase):
             ],
         )
 
-        self.assertIn("本轮任务：", reply)
+        self.assertIn("本轮产出：", reply)
         self.assertIn("- 新增：任务清单", reply)
         self.assertIn("- 改写正文：讨论摘要", reply)
         self.assertIn("- 已新增章节：任务清单", reply)
@@ -2233,7 +2424,7 @@ class DocSyncTests(unittest.TestCase):
         tasks = self.workflow._context_tasks_for_message(message)
         reply = self.workflow.response_formatter.format_status_reply(message.text, tasks, {})
 
-        self.assertIn("【当前任务】", reply)
+        self.assertIn("【当前任务快照】", reply)
         self.assertIn("后端开发", reply)
         self.assertIn("Zeleous", reply)
         self.assertNotIn("前端开发", reply)
@@ -2733,6 +2924,73 @@ class DocSyncTests(unittest.TestCase):
         self.assertEqual(tasks[0].title, "产品经理协调前后端开发")
         self.assertIn("产品经理协调前后端开发", reply)
         self.assertIn("王五", reply)
+
+    def test_status_reads_mentioned_assignee_from_pending_discussion(self) -> None:
+        memory_service = MagicMock()
+        memory_service.get_current_tasks.return_value = []
+        memory_service.get_active_episode.return_value = type("Episode", (), {"id": 11})()
+        memory_service.get_episode_messages.return_value = [
+            type(
+                "Message",
+                (),
+                {
+                    "content": "你来帮我搞一下前端开发",
+                    "mentions_json": json.dumps([{"name": "zero", "is_bot": False}], ensure_ascii=False),
+                    "sender_id": "u1",
+                },
+            )()
+        ]
+        memory_service.get_alias_display_name.return_value = None
+        self.workflow.memory_service = memory_service
+        self.workflow.llm_service = MagicMock()
+        self.workflow.llm_service.is_configured.return_value = False
+        message = type(
+            "FakeMessage",
+            (),
+            {
+                "session_id": "pending_status_mention_session",
+                "message_id": "m_pending_status_mention",
+                "text": "任务列表",
+                "chat_id": "c1",
+                "chat_type": "group",
+            },
+        )()
+
+        tasks = self.workflow._context_tasks_for_message(message)
+
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(tasks[0].owner, "zero")
+        self.assertEqual(tasks[0].title, "前端开发")
+
+    def test_status_merges_pending_same_task_with_multiple_assignees(self) -> None:
+        memory_service = MagicMock()
+        memory_service.get_current_tasks.return_value = []
+        memory_service.get_active_episode.return_value = type("Episode", (), {"id": 11})()
+        memory_service.get_episode_messages.return_value = [
+            type("Message", (), {"content": "张三，你同时去搞一下录屏", "sender_id": "u1"})(),
+            type("Message", (), {"content": "王五你也去搞一下录屏", "sender_id": "u1"})(),
+        ]
+        memory_service.get_alias_display_name.return_value = None
+        self.workflow.memory_service = memory_service
+        self.workflow.llm_service = MagicMock()
+        self.workflow.llm_service.is_configured.return_value = False
+        message = type(
+            "FakeMessage",
+            (),
+            {
+                "session_id": "pending_status_multi_owner_session",
+                "message_id": "m_pending_status_multi_owner",
+                "text": "任务列表",
+                "chat_id": "c1",
+                "chat_type": "group",
+            },
+        )()
+
+        tasks = self.workflow._context_tasks_for_message(message)
+
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(tasks[0].title, "录屏")
+        self.assertEqual(tasks[0].owner, "张三、王五")
 
     def test_status_pending_discussion_accepts_orm_memory_tasks(self) -> None:
         memory_service = MagicMock()

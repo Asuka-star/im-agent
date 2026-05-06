@@ -19,6 +19,7 @@ class LLMPromptTests(unittest.TestCase):
         prompts = [
             LLMPromptBuilder().route(),
             LLMPromptBuilder().doc_request(),
+            LLMPromptBuilder().requirement_brief(),
             LLMPromptBuilder().analysis_request("tasks"),
             LLMPromptBuilder().presentation(),
         ]
@@ -28,6 +29,63 @@ class LLMPromptTests(unittest.TestCase):
             self.assertNotIn("鈥", prompt)
             self.assertNotIn("鍙", prompt)
 
+    def test_doc_prompt_keeps_tasks_subordinate_to_requirement_document(self) -> None:
+        prompt = LLMPromptBuilder().doc_request()
+
+        self.assertIn("需求文档", prompt)
+        self.assertIn("背景与痛点", prompt)
+        self.assertIn("产品流程", prompt)
+        self.assertIn("实施计划与分工", prompt)
+        self.assertIn("never let the whole document become a task list", prompt)
+        self.assertIn("IM discussion block as primary requirement evidence", prompt)
+        self.assertIn("Do not write placeholder content", prompt)
+        self.assertIn("do not invent dates, date ranges, owners, teams, or assignees", prompt)
+
+    def test_requirement_brief_prompt_separates_requirement_facts_from_tasks(self) -> None:
+        prompt = LLMPromptBuilder().requirement_brief()
+
+        self.assertIn("requirement-brief extraction agent", prompt)
+        self.assertIn('"requirement_brief"', prompt)
+        self.assertIn("first-class requirement evidence", prompt)
+        self.assertIn("implementation_plan optional and subordinate", prompt)
+        self.assertIn("Never infer implementation_plan dates", prompt)
+        self.assertIn("Do not convert", prompt)
+
+    def test_extraction_prompt_does_not_turn_requirement_discovery_into_tasks(self) -> None:
+        prompt = LLMPromptBuilder().extraction()
+
+        self.assertIn("narrow Feishu task extraction agent", prompt)
+        self.assertIn("Product ideas, target users, pain points", prompt)
+        self.assertIn("keep tasks empty", prompt)
+        self.assertIn("unless there is an owner, deadline, or explicit execution command", prompt)
+
+    def test_presentation_prompt_prefers_formal_solution_arc(self) -> None:
+        prompt = LLMPromptBuilder().presentation()
+
+        self.assertIn("formal rehearsal-ready presentation", prompt)
+        self.assertIn("背景痛点 -> 目标用户/核心需求 -> 产品流程", prompt)
+        self.assertIn("do not make the deck read like a task assignment report", prompt)
+
+    def test_route_prompt_defaults_discussion_settling_to_doc(self) -> None:
+        prompt = LLMPromptBuilder().route()
+
+        self.assertIn("整理这轮讨论", prompt)
+        self.assertIn('requested_outputs ["doc"]', prompt)
+
+    def test_workspace_command_prompt_treats_tasks_as_implementation_section(self) -> None:
+        prompt = LLMPromptBuilder().workspace_command()
+
+        self.assertIn("requested_outputs=[\"doc\"]", prompt)
+        self.assertIn("not the command goal", prompt)
+        self.assertIn("Primary product lifecycle", prompt)
+        self.assertIn("route=doc", prompt)
+
+    def test_workspace_request_prompt_keeps_requirement_artifacts_primary(self) -> None:
+        prompt = LLMPromptBuilder().workspace_request()
+
+        self.assertIn("background, pain points, target users", prompt)
+        self.assertIn("Do not use task snapshots as the main content", prompt)
+
     def test_llm_service_keeps_prompt_wrapper_methods(self) -> None:
         service = LLMService()
 
@@ -35,6 +93,7 @@ class LLMPromptTests(unittest.TestCase):
         self.assertEqual(service._workspace_command_prompt(), service.prompts.workspace_command())
         self.assertEqual(service._dag_plan_prompt(), service.prompts.dag_plan())
         self.assertEqual(service._analysis_request_prompt("risks"), service.prompts.analysis_request("risks"))
+        self.assertEqual(service._requirement_brief_prompt(), service.prompts.requirement_brief())
         self.assertEqual(service._doc_edit_intent_prompt(), service.prompts.doc_edit_intent())
         self.assertEqual(service._next_action_rerank_prompt(), service.prompts.next_action_rerank())
 
@@ -90,6 +149,77 @@ class LLMPromptTests(unittest.TestCase):
 
         self.assertEqual(result["operation"], "read")
         self.assertEqual(chat_json.call_args.kwargs["request_name"], "interpret_workspace_command")
+
+    def test_resolve_requirement_brief_uses_dedicated_request_name(self) -> None:
+        service = LLMService()
+        service.api_key = "test-key"
+        service.base_url = "https://example.test"
+        service.model = "demo-model"
+
+        with patch.object(
+            service,
+            "_chat_json",
+            return_value={"requirement_brief": {"title": "校园活动报名系统", "goals": ["统一报名审核"]}},
+        ) as chat_json:
+            result = service.resolve_requirement_brief("[讨论]", "整理成需求方案文档")
+
+        self.assertEqual(result["route"], "doc")
+        self.assertEqual(result["object"], "doc")
+        self.assertEqual(result["requirement_brief"]["title"], "校园活动报名系统")
+        self.assertEqual(chat_json.call_args.kwargs["request_name"], "resolve_requirement_brief")
+
+    def test_resolve_doc_request_removes_ungrounded_plan_dates_and_owners(self) -> None:
+        service = LLMService()
+        service.api_key = "test-key"
+        service.base_url = "https://example.test"
+        service.model = "demo-model"
+        workspace_context = "\n".join(
+            [
+                "[协作上下文]",
+                "[本次待同步讨论]",
+                "- 发言人: u1 | 内容: 补充一下，评委更关心这个系统为什么适合 IM 协作场景。",
+                "- 发言人: u1 | 内容: 技术方案里可以强调：飞书 IM 负责入口，Agent 负责理解和规划，Workbench 负责展示执行过程，文档和 PPT 是最终交付物。",
+                "[当前协作文档]",
+                "标题：校园活动报名系统需求方案 - 统计至2026-05-06 15:00",
+                "- 实施计划与分工",
+                "  - 具体任务分工、截止时间及阻塞项待后续会议确定。",
+            ]
+        )
+
+        with patch.object(
+            service,
+            "_chat_json",
+            return_value={
+                "doc": {
+                    "title": "校园活动报名系统需求方案",
+                    "sections": [
+                        {
+                            "heading": "技术方案",
+                            "paragraphs": ["飞书 IM 负责入口，Agent 负责理解和规划。"],
+                        },
+                        {
+                            "heading": "实施计划与分工",
+                            "paragraphs": [
+                                "一期实施计划（2026年5月-6月）：",
+                                "- 需求确认与设计：2026-05-06至2026-05-15，负责人：Zeleous",
+                                "- 核心功能开发：2026-05-16至2026-06-15，负责人：开发团队",
+                                "二期规划：根据一期反馈，规划数据看板和候补队列功能。",
+                            ],
+                        },
+                    ],
+                }
+            },
+        ):
+            result = service.resolve_doc_request(workspace_context, "更新刚才的需求方案文档，加入 IM 协作场景价值和技术架构说明")
+
+        sections = result["doc"]["sections"]
+        plan_section = next(section for section in sections if section["heading"] == "实施计划与分工")
+        content = "\n".join(plan_section["paragraphs"])
+        self.assertIn("尚未在本轮讨论中明确", content)
+        self.assertIn("二期规划", content)
+        self.assertNotIn("2026-05-15", content)
+        self.assertNotIn("Zeleous", content)
+        self.assertNotIn("开发团队", content)
 
     def test_next_action_rerank_prompt_is_dedicated_and_bounded(self) -> None:
         prompt = LLMPromptBuilder().next_action_rerank()

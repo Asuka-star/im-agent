@@ -1890,13 +1890,13 @@ class LLMTaskOperationTests(unittest.TestCase):
 
             artifact = result["artifacts"][0]
             self.assertEqual(artifact["provider"], "llm")
-            self.assertEqual(artifact["url"], "/api/artifacts/slides/run_slides.html")
-            self.assertTrue((Path(tmpdir) / "run_slides.html").is_file())
-            self.assertTrue((Path(tmpdir) / "run_slides.pptx").is_file())
+            self.assertEqual(artifact["url"], "/api/artifacts/slides/报名汇报-run_slides.html")
+            self.assertTrue((Path(tmpdir) / "报名汇报-run_slides.html").is_file())
+            self.assertTrue((Path(tmpdir) / "报名汇报-run_slides.pptx").is_file())
             self.assertIn("speaker_notes", artifact["preview"]["slides"][0])
             self.assertIn("预览链接：", result["reply_preview"])
             self.assertIn("PPT 下载：", result["reply_preview"])
-            self.assertIn("run_slides.pptx", result["reply_preview"])
+            self.assertIn("报名汇报-run_slides.pptx", result["reply_preview"])
 
     def test_prepare_slides_execution_marks_template_fallback_provider(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir, patch.object(
@@ -1916,7 +1916,7 @@ class LLMTaskOperationTests(unittest.TestCase):
 
         artifact = result["artifacts"][0]
         self.assertEqual(artifact["provider"], "fallback")
-        self.assertEqual(artifact["url"], "/api/artifacts/slides/run_slides.html")
+        self.assertEqual(artifact["url"], "/api/artifacts/slides/汇报演示稿-run_slides.html")
 
     def test_memory_gate_runs_only_for_historical_requests(self) -> None:
         self.assertFalse(
@@ -2836,7 +2836,7 @@ class LLMTaskOperationTests(unittest.TestCase):
                     artifact_id="artifact_slides",
                 )
 
-            self.assertTrue((Path(tmpdir) / "run_slides_revision.html").is_file())
+            self.assertTrue((Path(tmpdir) / "报名汇报-run_slides_revision.html").is_file())
 
         self.assertIs(result, final_detail)
         create_task_run.assert_called_once()
@@ -2851,7 +2851,7 @@ class LLMTaskOperationTests(unittest.TestCase):
         artifact = result_payload["artifacts"][0]
         self.assertEqual(artifact["artifact_type"], "slides_package")
         self.assertEqual(artifact["provider"], "local")
-        self.assertEqual(artifact["url"], "/api/artifacts/slides/run_slides_revision.html")
+        self.assertEqual(artifact["url"], "/api/artifacts/slides/报名汇报-run_slides_revision.html")
         self.assertEqual(artifact["preview"]["version"], 2)
         self.assertIn("把第 1 页改成评委视角", artifact["preview"]["slides"][0]["speaker_notes"])
         upsert_step.assert_any_call(

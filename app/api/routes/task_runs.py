@@ -66,8 +66,10 @@ async def confirm_task_run(task_run_id: str, payload: ConfirmationAnswerRequest)
     )
     if record is None:
         raise HTTPException(status_code=404, detail="Confirmation request not found")
+    if record.already_answered:
+        return record
     try:
-        workflow_service.resume_task_run_after_confirmation(
+        resumed = workflow_service.resume_task_run_after_confirmation(
             task_run_id,
             confirmation_id=payload.confirmation_id,
             answer_value=payload.answer_value,
@@ -75,6 +77,19 @@ async def confirm_task_run(task_run_id: str, payload: ConfirmationAnswerRequest)
         )
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to resume task run after confirmation: %s", exc)
+        task_run_service.update_task_run(
+            task_run_id,
+            stage="confirmation_resume_failed",
+            status="failed",
+            latest_error=str(exc),
+        )
+        raise HTTPException(status_code=500, detail="Failed to resume task run after confirmation") from exc
+    if resumed is None:
+        task_run_service.update_task_run(
+            task_run_id,
+            stage="confirmation_resume_skipped",
+            latest_error="No resumable confirmation payload was found for this task run.",
+        )
     return record
 
 

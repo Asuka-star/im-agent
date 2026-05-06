@@ -15,8 +15,6 @@ logger = logging.getLogger(__name__)
 class PresentationTool:
     """Handles presentation package formatting, artifact persistence, and local revisions."""
 
-    PUBLIC_PREVIEW_BASE_URL = settings.artifact_public_base_url
-
     def __init__(self, *, artifact_service: PresentationArtifactService) -> None:
         self.artifact_service = artifact_service
 
@@ -98,7 +96,8 @@ class PresentationTool:
             return url
         if not url.startswith("/"):
             url = f"/{url}"
-        return f"{cls.PUBLIC_PREVIEW_BASE_URL.rstrip('/')}{url}"
+        base_url = str(settings.artifact_public_base_url or "").strip().rstrip("/")
+        return f"{base_url}{url}" if base_url else url
 
     def resolve_slides_artifact(self, artifacts: list | None, *, artifact_id: str | None = None):
         requested_id = (artifact_id or "").strip()

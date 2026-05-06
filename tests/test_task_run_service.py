@@ -80,7 +80,12 @@ class TaskRunServiceTests(unittest.TestCase):
             source_type="group",
             source_ref="chat_123",
             created_by="user_1",
-            metadata={"chat_id": "chat_123"},
+            metadata={
+                "chat_id": "chat_123",
+                "run_kind": "artifact_lifecycle",
+                "primary_object": "doc",
+                "lifecycle_stage": "document",
+            },
         )
         self.service.upsert_step(
             created.task_run_id,
@@ -110,6 +115,9 @@ class TaskRunServiceTests(unittest.TestCase):
         self.assertEqual(detail.task_run_id, created.task_run_id)
         self.assertEqual(detail.session_id, "oc_test")
         self.assertEqual(detail.session_label, "产品讨论群")
+        self.assertEqual(detail.run_kind, "artifact_lifecycle")
+        self.assertEqual(detail.primary_object, "doc")
+        self.assertEqual(detail.lifecycle_stage, "document")
         self.assertEqual(len(detail.steps), 1)
         self.assertEqual(detail.steps[0].step_key, "request_received")
         self.assertEqual(len(detail.artifacts), 1)
@@ -125,6 +133,43 @@ class TaskRunServiceTests(unittest.TestCase):
         self.assertTrue(any(item.kind == "canvas" for item in detail.context_pack.missing_items))
         self.assertEqual(len(detail.confirmations), 1)
         self.assertEqual(detail.confirmations[0].status, "pending")
+
+    def test_detail_includes_recent_session_artifacts_for_lifecycle_context(self) -> None:
+        slides_run = self.service.create_task_run(
+            session_id="oc_lifecycle",
+            title="生成答辩 PPT",
+            source_type="group",
+        )
+        self.service.create_artifact(
+            slides_run.task_run_id,
+            artifact_type="slides_package",
+            title="校园活动报名系统答辩 PPT",
+            url="/api/artifacts/slides/demo.html",
+            preview={"exports": {"html": "/api/artifacts/slides/demo.html", "pptx": "/api/artifacts/slides/demo.pptx"}},
+        )
+        canvas_run = self.service.create_task_run(
+            session_id="oc_lifecycle",
+            title="生成产品流程图",
+            source_type="group",
+        )
+        self.service.create_artifact(
+            canvas_run.task_run_id,
+            artifact_type="canvas",
+            title="产品流程图",
+            url="/api/artifacts/canvas/demo.html",
+            preview={"schema": "im-agent.canvas.v1", "shapes": [{"type": "node"}], "exports": {"json": "a", "svg": "b", "html": "c"}},
+        )
+
+        detail = self.service.get_task_run(canvas_run.task_run_id)
+
+        self.assertIsNotNone(detail)
+        assert detail is not None
+        artifact_types = [artifact.artifact_type for artifact in detail.artifacts]
+        self.assertIn("slides_package", artifact_types)
+        self.assertIn("canvas", artifact_types)
+        check_status = {item.key: item.status for item in detail.artifact_checks}
+        self.assertNotEqual(check_status["slides"], "missing")
+        self.assertNotIn("演示稿", [item.label for item in detail.context_pack.missing_items])
 
     def test_detail_derives_langgraph_trace_from_metadata_and_worker_steps(self) -> None:
         created = self.service.create_task_run(
@@ -282,6 +327,43 @@ class TaskRunServiceTests(unittest.TestCase):
         self.assertEqual(detail.stage, "confirmation_resolved")
         self.assertEqual(detail.confirmations[0].answered_by, "tester")
 
+    def test_resolve_confirmation_does_not_overwrite_answered_confirmation(self) -> None:
+        created = self.service.create_task_run(
+            session_id="oc_test",
+            title="生成汇报稿",
+            source_type="p2p",
+        )
+        self.service.update_task_run(created.task_run_id, status="waiting_confirmation", stage="awaiting_user_confirmation")
+        confirmation = self.service.create_confirmation(
+            created.task_run_id,
+            prompt="是否继续？",
+            options=["继续", "取消"],
+        )
+
+        first = self.service.resolve_confirmation(
+            created.task_run_id,
+            confirmation_id=confirmation.confirmation_id,
+            answer_value="继续",
+            answered_by="tester",
+        )
+        second = self.service.resolve_confirmation(
+            created.task_run_id,
+            confirmation_id=confirmation.confirmation_id,
+            answer_value="取消",
+            answered_by="other",
+        )
+        detail = self.service.get_task_run(created.task_run_id)
+
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        assert second is not None
+        self.assertTrue(second.already_answered)
+        self.assertEqual(second.answer_value, "继续")
+        self.assertIsNotNone(detail)
+        assert detail is not None
+        self.assertEqual(detail.confirmations[0].answer_value, "继续")
+        self.assertEqual(detail.confirmations[0].answered_by, "tester")
+
     def test_update_task_run_accepts_partial_failed_as_terminal_status(self) -> None:
         created = self.service.create_task_run(
             session_id="oc_test",
@@ -366,6 +448,27 @@ class TaskRunServiceTests(unittest.TestCase):
         self.assertEqual(third_message["task_run"]["session_id"], "oc_demo")
         self.assertEqual(second_message["task_run"]["session_label"], "产品讨论群")
         self.assertEqual(third_message["task_run"]["session_label"], "产品讨论群")
+
+    def test_summary_payload_exposes_lifecycle_metadata(self) -> None:
+        with patch("app.services.task_run_service.realtime_hub.emit_room") as emit_room:
+            created = self.service.create_task_run(
+                session_id="oc_demo",
+                title="生成需求方案文档",
+                source_type="group",
+                metadata={
+                    "run_kind": "artifact_lifecycle",
+                    "primary_object": "doc",
+                    "lifecycle_stage": "document",
+                },
+            )
+
+        self.assertEqual(created.run_kind, "artifact_lifecycle")
+        self.assertEqual(created.primary_object, "doc")
+        self.assertEqual(created.lifecycle_stage, "document")
+        first_message = emit_room.call_args_list[0].args[1]
+        self.assertEqual(first_message["task_run"]["run_kind"], "artifact_lifecycle")
+        self.assertEqual(first_message["task_run"]["primary_object"], "doc")
+        self.assertEqual(first_message["task_run"]["lifecycle_stage"], "document")
 
     def test_get_task_run_tolerates_session_document_failure(self) -> None:
         service = TaskRunService(

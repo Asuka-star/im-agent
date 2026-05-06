@@ -1,5 +1,13 @@
+import sys
+
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _env_file() -> str | None:
+    if "unittest" in sys.modules:
+        return None
+    return ".env"
 
 
 class Settings(BaseSettings):
@@ -94,7 +102,7 @@ class Settings(BaseSettings):
     anthropic_model: str = Field(default="claude-sonnet-4-5", alias="ANTHROPIC_MODEL")
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=_env_file(),
         env_file_encoding="utf-8",
         case_sensitive=False,
         populate_by_name=True,

@@ -17,7 +17,11 @@ def merge_status_task_sources(primary: list, secondary: list) -> list:
             continue
         target_index = _find_status_merge_target(merged, normalized)
         if target_index is not None:
-            merged[target_index] = normalized
+            existing = merged[target_index]
+            if _task_title_key(existing.title) == _task_title_key(normalized.title) and _normalized(existing.owner) == _normalized(normalized.owner):
+                merged[target_index] = normalized
+            else:
+                merged[target_index] = _merge_status_task(existing, normalized)
             continue
         merged.append(normalized)
     return merged
@@ -59,7 +63,56 @@ def _find_status_merge_target(tasks: list[TaskItem], incoming: TaskItem) -> int 
         existing_owner = _normalized(tasks[title_matches[0]].owner)
         if _is_placeholder_owner(existing_owner) or _is_placeholder_owner(incoming_owner):
             return title_matches[0]
+        return title_matches[0]
     return None
+
+def _merge_status_task(existing: TaskItem, incoming: TaskItem) -> TaskItem:
+    return existing.model_copy(
+        update={
+            "owner": _merge_owner_labels(existing.owner, incoming.owner),
+            "priority": _pick_higher_priority(existing.priority, incoming.priority),
+            "due_date": _pick_due_date(existing.due_date, incoming.due_date),
+            "status": _pick_status(existing.status, incoming.status),
+            "notes": _merge_notes(existing.notes, incoming.notes),
+        }
+    )
+
+def _merge_owner_labels(existing: str | None, incoming: str | None) -> str:
+    owners: list[str] = []
+    for raw in (existing, incoming):
+        for part in re.split(r"\s*(?:、|,|，|/|;|；)\s*", str(raw or "")):
+            owner = part.strip()
+            if not owner or _is_placeholder_owner(_normalized(owner)) or owner in owners:
+                continue
+            owners.append(owner)
+    return "、".join(owners) if owners else "TBD"
+
+def _pick_higher_priority(existing: str | None, incoming: str | None) -> str:
+    order = {"low": 0, "medium": 1, "high": 2}
+    existing_value = order.get(_normalized(existing), 1)
+    incoming_value = order.get(_normalized(incoming), 1)
+    return incoming or "medium" if incoming_value > existing_value else existing or "medium"
+
+def _pick_due_date(existing: str | None, incoming: str | None) -> str:
+    existing_value = str(existing or "").strip()
+    incoming_value = str(incoming or "").strip()
+    if not incoming_value or _is_placeholder_due(incoming_value):
+        return existing_value or "TBD"
+    if not existing_value or _is_placeholder_due(existing_value):
+        return incoming_value
+    return incoming_value
+
+def _pick_status(existing: str | None, incoming: str | None) -> str:
+    incoming_value = str(incoming or "").strip()
+    return incoming_value or str(existing or "").strip() or "draft"
+
+def _merge_notes(existing: str | None, incoming: str | None) -> str:
+    notes: list[str] = []
+    for value in (existing, incoming):
+        note = str(value or "").strip()
+        if note and note not in notes:
+            notes.append(note)
+    return "；".join(notes)
 
 def _task_value(task: object, field: str, *, default: str = "") -> str:
     if isinstance(task, dict):
@@ -126,6 +179,9 @@ def _generic_artifact_title_key(compact: str, *, artifact_tokens: tuple[str, ...
 
 def _is_placeholder_owner(value: str) -> bool:
     return value in {"", "tbd", "待定", "未定", "待确认", "待確認", "unassigned"}
+
+def _is_placeholder_due(value: str) -> bool:
+    return _normalized(value) in {"", "tbd", "待定", "未定", "待确认", "待確認"}
 
 def task_items_from_llm_payload(payload: dict) -> list[TaskItem]:
     raw_tasks = payload.get("tasks") if isinstance(payload, dict) else []

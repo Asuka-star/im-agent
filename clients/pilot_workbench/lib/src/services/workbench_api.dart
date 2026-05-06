@@ -45,7 +45,7 @@ class WorkbenchApi {
     _ensureSuccess(response);
     final decoded = jsonDecode(utf8.decode(response.bodyBytes));
     if (decoded is! Map<String, dynamic>) {
-      throw const FormatException('任务详情返回的不是有效对象。');
+      throw const FormatException('协作运行详情返回的不是有效对象。');
     }
     return TaskRunDetail.fromJson(decoded);
   }
@@ -86,7 +86,7 @@ class WorkbenchApi {
     _ensureSuccess(response);
     final decoded = jsonDecode(utf8.decode(response.bodyBytes));
     if (decoded is! Map<String, dynamic>) {
-      throw const FormatException('文档修订返回的不是有效任务对象。');
+      throw const FormatException('文档修订返回的不是有效运行对象。');
     }
     return TaskRunDetail.fromJson(decoded);
   }
@@ -109,7 +109,7 @@ class WorkbenchApi {
     _ensureSuccess(response);
     final decoded = jsonDecode(utf8.decode(response.bodyBytes));
     if (decoded is! Map<String, dynamic>) {
-      throw const FormatException('演示稿修订返回的不是有效任务对象。');
+      throw const FormatException('演示稿修订返回的不是有效运行对象。');
     }
     return TaskRunDetail.fromJson(decoded);
   }
@@ -126,7 +126,7 @@ class WorkbenchApi {
     _ensureSuccess(response);
     final decoded = jsonDecode(utf8.decode(response.bodyBytes));
     if (decoded is! Map<String, dynamic>) {
-      throw const FormatException('交付包返回的不是有效任务对象。');
+      throw const FormatException('交付包返回的不是有效运行对象。');
     }
     return TaskRunDetail.fromJson(decoded);
   }

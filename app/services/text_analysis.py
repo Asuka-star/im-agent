@@ -6,7 +6,7 @@ from app.schemas.task import TaskItem
 
 SENDER_PREFIX_RE = re.compile(r"^\s*[-*]?\s*[A-Za-z0-9_]{4,}:\s*")
 LEADING_FILLER_RE = re.compile(r"^(不对|另外|然后|还有|补充一个|补充|顺便|以及|目前|近期群聊讨论)\s*[，,:：]?\s*")
-DIALOG_OWNER_RE = re.compile(r"^(?P<owner>[\u4e00-\u9fa5A-Za-z0-9]{1,8})(?=你|同学|老师|这边|这个)")
+DIALOG_OWNER_RE = re.compile(r"^(?P<owner>[\u4e00-\u9fa5A-Za-z0-9]{1,12})[\s,，、]*(?=你|同学|老师|这边|这个)")
 ACTION_OWNER_RE = re.compile(
     r"^(?P<owner>[\u4e00-\u9fa5A-Za-z0-9]{1,8}?)(?:来)?(?=负责|完成|准备|处理|跟进|推进|协调|搞|做)"
 )
@@ -33,6 +33,7 @@ TASK_KEYWORDS = (
     "前端",
     "海报",
     "材料",
+    "录屏",
     "demo",
     "路演",
     "文档",
@@ -166,6 +167,7 @@ def _extract_candidate_clauses(raw_text: str) -> list[str]:
         if not line:
             continue
 
+        line = re.sub(r"^([\u4e00-\u9fa5A-Za-z0-9]{1,12})[\s,，、]+(?=你|同学|老师|这边|这个)", r"\1", line)
         if "近期群聊讨论" in line and ":" in line:
             line = line.split(":", 1)[1].strip()
 
@@ -297,6 +299,8 @@ def _extract_owner(text: str) -> str:
     invalid_tokens = {"今天", "明天", "后天", "本周", "这周", "下周", "需要", "大概", "预计"}
     if owner in invalid_tokens:
         return "TBD"
+    if owner.startswith(("你", "请你", "麻烦你", "需要你")):
+        return "TBD"
     if any(token in owner for token in ("周", "今天", "明天", "后天", "需要", "大概", "预计")):
         return "TBD"
     return owner
@@ -310,11 +314,11 @@ def _extract_due_hint(text: str) -> str:
 def _extract_title(text: str, owner: str, due_hint: str) -> str:
     working = text
     if owner and owner != "TBD":
-        working = re.sub(rf"^{re.escape(owner)}(?:你|同学|老师)?", "", working).strip()
+        working = re.sub(rf"^{re.escape(owner)}[\s,，、]*(?:你|同学|老师)?", "", working).strip()
     if due_hint and due_hint != "TBD":
         working = working.replace(due_hint, " ")
 
-    working = re.sub(r"(大概|预计|需要你|需要|尽快|马上|立即|搞定|完成|负责|来做|做|本周|这周|下周)", " ", working)
+    working = re.sub(r"(大概|预计|需要你|需要|尽快|马上|立即|同时|帮我|麻烦你|请你|你也|你|也去|去|一下|搞定|完成|负责|来做|做|搞|本周|这周|下周)", " ", working)
     working = re.sub(r"[，。；;：:]", " ", working)
     working = " ".join(working.split())
     raw_working = working
@@ -326,6 +330,7 @@ def _extract_title(text: str, owner: str, due_hint: str) -> str:
         "前端": "前端开发",
         "联调": "飞书联调",
         "海报": "海报确认",
+        "录屏": "录屏",
         "报名材料": "报名材料提交",
         "路演": "路演 Demo 准备",
         "demo": "路演 Demo 准备",

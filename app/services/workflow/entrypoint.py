@@ -27,6 +27,12 @@ class WorkflowEntrypoint:
             "artifacts": [],
         }
 
+    def _merge_task_run_metadata(self, task_run_id: str, patch: dict) -> None:
+        try:
+            self.workflow.task_run_service.merge_task_run_metadata(task_run_id, patch)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to merge task run metadata: task_run_id=%s error=%s", task_run_id, exc)
+
     def handle_message(self, message: FeishuMessageContext) -> dict:
         workflow = self.workflow
         started_at = time.perf_counter()
@@ -106,6 +112,7 @@ class WorkflowEntrypoint:
                 "event_id": message.event_id,
                 "chat_id": message.chat_id,
                 "is_mentioned": message.is_mentioned,
+                **workflow._task_run_lifecycle_metadata(None),
             },
         )
         workflow.task_run_service.upsert_step(
@@ -151,6 +158,10 @@ class WorkflowEntrypoint:
                 latest_summary=workflow._condense_text(result.get("reply_preview")),
                 latest_reply_preview=result.get("reply_preview"),
                 latest_error=result.get("reply_error"),
+            )
+            self._merge_task_run_metadata(
+                task_run.task_run_id,
+                workflow._task_run_lifecycle_metadata(result["mode"]),
             )
             result["task_run_id"] = task_run.task_run_id
             return result
@@ -222,6 +233,10 @@ class WorkflowEntrypoint:
             latest_reply_preview=result.get("reply_preview"),
             latest_error=result.get("reply_error"),
         )
+        self._merge_task_run_metadata(
+            task_run.task_run_id,
+            workflow._task_run_lifecycle_metadata(result["mode"]),
+        )
         workflow.result_persistence.store_next_action_recommendations(task_run.task_run_id)
         result["task_run_id"] = task_run.task_run_id
         logger.info(
@@ -280,6 +295,14 @@ class WorkflowEntrypoint:
                     "requested_outputs": list(route_decision.requested_outputs),
                 },
             )
+            if route_decision.route != "unknown":
+                self._merge_task_run_metadata(
+                    task_run_id,
+                    workflow._task_run_lifecycle_metadata(
+                        route_decision.route,
+                        list(route_decision.requested_outputs),
+                    ),
+                )
         logger.info(
             "Request route resolved: message_id=%s route=%s source=%s confidence=%.2f clarification=%s",
             message.message_id,
@@ -305,33 +328,34 @@ class WorkflowEntrypoint:
             if graph_task_result is not None:
                 return graph_task_result
 
-        llm_task_intent_result = workflow.task_intent_execution.handle_llm_task_intent_instruction(
-            message,
-            route_decision=route_decision,
-            workspace_context=base_workspace_context,
-            active_episode_id=active_episode_id,
-            task_run_id=task_run_id,
-        )
-        if llm_task_intent_result is not None:
-            return llm_task_intent_result
+        if route_decision.route not in {"doc", "slides", "canvas", "delivery"}:
+            llm_task_intent_result = workflow.task_intent_execution.handle_llm_task_intent_instruction(
+                message,
+                route_decision=route_decision,
+                workspace_context=base_workspace_context,
+                active_episode_id=active_episode_id,
+                task_run_id=task_run_id,
+            )
+            if llm_task_intent_result is not None:
+                return llm_task_intent_result
 
-        task_status_update_result = workflow.task_intent_execution.handle_task_status_update_instruction(
-            message,
-            route_decision=route_decision,
-            active_episode_id=active_episode_id,
-            task_run_id=task_run_id,
-        )
-        if task_status_update_result is not None:
-            return task_status_update_result
+            task_status_update_result = workflow.task_intent_execution.handle_task_status_update_instruction(
+                message,
+                route_decision=route_decision,
+                active_episode_id=active_episode_id,
+                task_run_id=task_run_id,
+            )
+            if task_status_update_result is not None:
+                return task_status_update_result
 
-        local_task_assignment_result = workflow.task_intent_execution.handle_local_task_assignment_instruction(
-            message,
-            route_decision=route_decision,
-            active_episode_id=active_episode_id,
-            task_run_id=task_run_id,
-        )
-        if local_task_assignment_result is not None:
-            return local_task_assignment_result
+            local_task_assignment_result = workflow.task_intent_execution.handle_local_task_assignment_instruction(
+                message,
+                route_decision=route_decision,
+                active_episode_id=active_episode_id,
+                task_run_id=task_run_id,
+            )
+            if local_task_assignment_result is not None:
+                return local_task_assignment_result
 
         preplanned_llm_result: dict | None = None
         if workflow.llm_service.is_configured() and workflow._should_run_dag_planner(route_decision):
@@ -448,7 +472,7 @@ class WorkflowEntrypoint:
                     workflow.task_run_service.upsert_step(
                         task_run_id,
                         step_key="intent_resolution",
-                        title="识别任务意图",
+                        title="识别请求意图",
                         step_type="intent",
                         status="done",
                         output_payload={
@@ -475,7 +499,7 @@ class WorkflowEntrypoint:
                     workflow.task_run_service.upsert_step(
                         task_run_id,
                         step_key="intent_resolution",
-                        title="识别任务意图",
+                        title="识别请求意图",
                         step_type="intent",
                         status="failed",
                         error=str(exc),

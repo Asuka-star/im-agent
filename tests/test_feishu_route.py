@@ -106,8 +106,45 @@ class FeishuRouteTests(unittest.TestCase):
         ):
             response = asyncio.run(feishu.receive_events(_CardRequest(), background))
 
-        self.assertEqual(response["toast"]["type"], "info")
-        self.assertIn("background", response["toast"]["i18n"]["en_us"])
+        self.assertEqual(response, {})
+        self.assertEqual(len(background.tasks), 1)
+        fake_dedup.accept_for_processing.assert_not_called()
+
+    def test_receive_events_schedules_legacy_top_level_card_action(self) -> None:
+        background = _FakeBackgroundTasks()
+        fake_handler = Mock()
+        fake_handler.parse_event.return_value = SimpleNamespace(
+            type=None,
+            challenge=None,
+            header=None,
+            event=None,
+        )
+        fake_handler.is_url_verification.return_value = False
+        fake_handler.verify_token.return_value = True
+        fake_dedup = Mock()
+
+        class _LegacyCardRequest:
+            async def json(self) -> dict:
+                return {
+                    "open_message_id": "om_card",
+                    "open_chat_id": "oc_card",
+                    "action": {
+                        "value": {
+                            "action": "cancel_task_update",
+                            "idempotency_key": "card_legacy",
+                            "payload": {},
+                        }
+                    },
+                }
+
+        with patch.object(feishu, "event_handler", fake_handler), patch.object(
+            feishu,
+            "dedup_service",
+            fake_dedup,
+        ):
+            response = asyncio.run(feishu.receive_events(_LegacyCardRequest(), background))
+
+        self.assertEqual(response, {})
         self.assertEqual(len(background.tasks), 1)
         fake_dedup.accept_for_processing.assert_not_called()
 

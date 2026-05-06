@@ -17,6 +17,9 @@ class TaskRunSummary {
     this.latestSummary,
     this.latestReplyPreview,
     this.latestError,
+    this.runKind,
+    this.primaryObject,
+    this.lifecycleStage,
     this.createdBy,
     this.completedAt,
   });
@@ -36,6 +39,9 @@ class TaskRunSummary {
   final String? latestSummary;
   final String? latestReplyPreview;
   final String? latestError;
+  final String? runKind;
+  final String? primaryObject;
+  final String? lifecycleStage;
   final String? createdBy;
   final DateTime? completedAt;
 
@@ -48,12 +54,15 @@ class TaskRunSummary {
       sourceRef: json['source_ref'] as String?,
       triggerMessageId: json['trigger_message_id'] as String?,
       intent: json['intent'] as String?,
-      title: json['title'] as String? ?? '未命名任务',
+      title: json['title'] as String? ?? '未命名运行',
       stage: json['stage'] as String? ?? 'queued',
       status: json['status'] as String? ?? 'queued',
       latestSummary: json['latest_summary'] as String?,
       latestReplyPreview: json['latest_reply_preview'] as String?,
       latestError: json['latest_error'] as String?,
+      runKind: json['run_kind'] as String?,
+      primaryObject: json['primary_object'] as String?,
+      lifecycleStage: json['lifecycle_stage'] as String?,
       createdBy: json['created_by'] as String?,
       createdAt: _parseDateTime(json['created_at']),
       updatedAt: _parseDateTime(json['updated_at']),
@@ -256,6 +265,9 @@ class TaskRunDetail extends TaskRunSummary {
     super.latestSummary,
     super.latestReplyPreview,
     super.latestError,
+    super.runKind,
+    super.primaryObject,
+    super.lifecycleStage,
     super.createdBy,
     super.completedAt,
   });
@@ -276,12 +288,15 @@ class TaskRunDetail extends TaskRunSummary {
       sourceRef: json['source_ref'] as String?,
       triggerMessageId: json['trigger_message_id'] as String?,
       intent: json['intent'] as String?,
-      title: json['title'] as String? ?? '未命名任务',
+      title: json['title'] as String? ?? '未命名运行',
       stage: json['stage'] as String? ?? 'queued',
       status: json['status'] as String? ?? 'queued',
       latestSummary: json['latest_summary'] as String?,
       latestReplyPreview: json['latest_reply_preview'] as String?,
       latestError: json['latest_error'] as String?,
+      runKind: json['run_kind'] as String?,
+      primaryObject: json['primary_object'] as String?,
+      lifecycleStage: json['lifecycle_stage'] as String?,
       metadataJson: json['metadata_json'] as String?,
       graphTrace: _asMap(json['graph_trace']),
       createdBy: json['created_by'] as String?,

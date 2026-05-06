@@ -4,6 +4,7 @@ import logging
 from typing import Any
 
 from app.schemas.feishu_event import FeishuMessageContext
+from app.services.artifact_title_service import ArtifactTitleService
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +39,7 @@ class WorkflowSlidesExecution:
                 llm_result["_slides_provider"] = "fallback"
                 provider = "fallback"
         presentation_tool = workflow._presentation_tool()
+        package = self._with_semantic_title(package, instruction=message.text, workspace_context=workspace_context)
         artifact = presentation_tool.persist_artifact(
             package,
             provider=provider,
@@ -51,3 +53,15 @@ class WorkflowSlidesExecution:
             "artifacts": [artifact],
             "close_title": "slides",
         }
+
+    def _with_semantic_title(self, package: dict, *, instruction: str, workspace_context: str) -> dict:
+        current_title = str(package.get("theme") or "").strip()
+        title = ArtifactTitleService.presentation_title(
+            current_title=current_title,
+            instruction=instruction,
+            workspace_context=workspace_context,
+        )
+        if title:
+            package = dict(package)
+            package["theme"] = title
+        return package

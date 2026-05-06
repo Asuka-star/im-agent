@@ -438,11 +438,11 @@ def _step_goal(command: WorkspaceCommand, worker: str) -> str:
     if base_goal:
         return base_goal
     if worker == "doc":
-        return "Draft a concise collaboration document from the workspace context."
+        return "Draft a requirement or solution document from the workspace context."
     if worker == "slides":
-        return "Create a presentation outline from the workspace context."
+        return "Create a formal presentation deck from the requirement and solution context."
     if worker == "canvas":
-        return "Create a visual canvas or diagram from the workspace context."
+        return "Create a product flow, architecture, or solution diagram from the workspace context."
     return command.reason or command.target_text
 
 

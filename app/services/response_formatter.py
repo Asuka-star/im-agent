@@ -79,7 +79,7 @@ class ResponseFormatter:
 
         lines = ["【文档同步】", f"文档：{title}"]
         if action_lines:
-            lines.append("本轮任务：")
+            lines.append("本轮产出：")
             lines.extend(action_lines)
         lines.append("执行结果：")
         lines.extend(result_lines or ["- 已完成处理。"])
@@ -289,7 +289,15 @@ class ResponseFormatter:
 
         lines = [header, f"摘要：{analysis.summary}"]
 
-        if mode in {"summary", "tasks"}:
+        if mode == "summary":
+            lines.append("讨论要点：")
+            if analysis.tasks:
+                for idx, task in enumerate(analysis.tasks[:5], start=1):
+                    lines.append(f"{idx}. {task.title}")
+            else:
+                lines.append("1. 当前讨论更适合沉淀为需求事实或方案结论，暂未形成明确待办。")
+
+        if mode == "tasks":
             lines.append("任务：")
             if analysis.tasks:
                 for idx, task in enumerate(analysis.tasks, start=1):
@@ -330,7 +338,7 @@ class ResponseFormatter:
             return "\n".join(["【当前总结】", summary])
 
         if not tasks:
-            return "我这边还没有现成的任务快照。你可以先让我总结一下或整理待办，我再基于结果回答状态问题。"
+            return "我这边还没有现成的任务快照。如果你想推进协作产出，可以先让我把当前讨论整理成需求方案文档；如果你要查任务，请补充负责人、截止时间或待办内容。"
 
         if "没负责人" in query or "未分配" in query:
             pending = [task for task in tasks if task.owner == "TBD"]
@@ -383,7 +391,7 @@ class ResponseFormatter:
             return "\n".join(["【当前总结】", summary])
 
         if not tasks:
-            return "我这边还没有可用的任务快照。你可以先让我总结任务并写入文档，或补充谁负责什么任务。"
+            return "我这边还没有可用的任务快照。如果你想推进协作产出，可以先让我把当前讨论整理成需求方案文档；如果你要查任务，请补充负责人、截止时间或待办内容。"
 
         matched = self._matching_tasks_for_query(query_text, tasks)
         if matched and any(marker in query_text for marker in ("谁负责", "谁在负责", "负责人")):
@@ -416,7 +424,7 @@ class ResponseFormatter:
         completed = sum(1 for task in tasks if str(self._task_status(task)).lower() == "done")
         unassigned = sum(1 for task in tasks if self._task_owner(task) in {"", "TBD", "待定"})
         lines = [
-            "【当前任务】",
+            "【当前任务快照】",
             f"- 任务总数：{len(tasks)}",
             f"- 已完成：{completed}",
             f"- 待确认负责人：{unassigned}",
@@ -473,11 +481,11 @@ class ResponseFormatter:
             lines.append(f"提示：{reason}")
         lines.extend(
             [
-                "- @我 总结一下这次讨论",
-                "- @我 帮我整理待办",
+                "- @我 把这轮讨论沉淀成需求方案文档",
+                "- @我 基于当前文档生成正式演示稿",
+                "- @我 把第 3 页改成评委视角",
+                "- @我 生成流程图并打包交付",
                 "- @我 看一下当前风险和卡点",
-                "- @我 现在还有哪些任务没负责人",
-                "- @我 帮我搞个汇报大纲",
             ]
         )
         return "\n".join(lines)

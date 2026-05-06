@@ -33,18 +33,18 @@ class PresentationArtifactServiceTests(unittest.TestCase):
                 session_id="s1",
             )
 
-            json_path = Path(tmpdir) / "run_slides.json"
-            html_path = Path(tmpdir) / "run_slides.html"
-            pptx_path = Path(tmpdir) / "run_slides.pptx"
-            pdf_path = Path(tmpdir) / "run_slides.pdf"
+            json_path = Path(tmpdir) / "报名汇报-run_slides.json"
+            html_path = Path(tmpdir) / "报名汇报-run_slides.html"
+            pptx_path = Path(tmpdir) / "报名汇报-run_slides.pptx"
+            pdf_path = Path(tmpdir) / "报名汇报-run_slides.pdf"
 
             self.assertEqual(artifact["artifact_type"], "slides_package")
             self.assertEqual(artifact["provider"], "llm")
-            self.assertEqual(artifact["url"], "/api/artifacts/slides/run_slides.html")
-            self.assertEqual(artifact["preview"]["exports"]["json"], "/api/artifacts/slides/run_slides.json")
-            self.assertEqual(artifact["preview"]["exports"]["html"], "/api/artifacts/slides/run_slides.html")
-            self.assertEqual(artifact["preview"]["exports"]["pptx"], "/api/artifacts/slides/run_slides.pptx")
-            self.assertEqual(artifact["preview"]["exports"]["pdf"], "/api/artifacts/slides/run_slides.pdf")
+            self.assertEqual(artifact["url"], "/api/artifacts/slides/报名汇报-run_slides.html")
+            self.assertEqual(artifact["preview"]["exports"]["json"], "/api/artifacts/slides/报名汇报-run_slides.json")
+            self.assertEqual(artifact["preview"]["exports"]["html"], "/api/artifacts/slides/报名汇报-run_slides.html")
+            self.assertEqual(artifact["preview"]["exports"]["pptx"], "/api/artifacts/slides/报名汇报-run_slides.pptx")
+            self.assertEqual(artifact["preview"]["exports"]["pdf"], "/api/artifacts/slides/报名汇报-run_slides.pdf")
             self.assertTrue(json_path.is_file())
             self.assertTrue(html_path.is_file())
             self.assertTrue(pptx_path.is_file())
@@ -70,8 +70,8 @@ class PresentationArtifactServiceTests(unittest.TestCase):
             self.assertIn("预览链接：", reply)
             self.assertIn("PPT 下载：", reply)
             self.assertIn("PDF 下载：", reply)
-            self.assertIn("run_slides.pptx", reply)
-            self.assertIn("run_slides.pdf", reply)
+            self.assertIn("报名汇报-run_slides.pptx", reply)
+            self.assertIn("报名汇报-run_slides.pdf", reply)
 
     def test_pdf_export_failure_keeps_ready_slides_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -91,16 +91,16 @@ class PresentationArtifactServiceTests(unittest.TestCase):
                 session_id="s1",
             )
 
-            json_path = Path(tmpdir) / "run_slides.json"
-            html_path = Path(tmpdir) / "run_slides.html"
-            pptx_path = Path(tmpdir) / "run_slides.pptx"
-            pdf_path = Path(tmpdir) / "run_slides.pdf"
+            json_path = Path(tmpdir) / "PDF-fallback-run_slides.json"
+            html_path = Path(tmpdir) / "PDF-fallback-run_slides.html"
+            pptx_path = Path(tmpdir) / "PDF-fallback-run_slides.pptx"
+            pdf_path = Path(tmpdir) / "PDF-fallback-run_slides.pdf"
             exports = artifact["preview"]["exports"]
 
             self.assertEqual(artifact["status"], "ready")
-            self.assertEqual(artifact["url"], "/api/artifacts/slides/run_slides.html")
-            self.assertEqual(exports["html"], "/api/artifacts/slides/run_slides.html")
-            self.assertEqual(exports["pptx"], "/api/artifacts/slides/run_slides.pptx")
+            self.assertEqual(artifact["url"], "/api/artifacts/slides/PDF-fallback-run_slides.html")
+            self.assertEqual(exports["html"], "/api/artifacts/slides/PDF-fallback-run_slides.html")
+            self.assertEqual(exports["pptx"], "/api/artifacts/slides/PDF-fallback-run_slides.pptx")
             self.assertNotIn("pdf", exports)
             self.assertTrue(json_path.is_file())
             self.assertTrue(html_path.is_file())
@@ -122,6 +122,23 @@ class PresentationArtifactServiceTests(unittest.TestCase):
 
             self.assertEqual(artifact["version"], 1)
             self.assertEqual(artifact["preview"]["version"], 1)
+
+    def test_presentation_service_derives_title_from_first_slide_when_theme_is_generic(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = PresentationArtifactService(root_dir=Path(tmpdir))
+            artifact = service.persist_package(
+                {
+                    "theme": "Presentation",
+                    "slides": [{"title": "校园活动报名与审核系统", "bullets": ["统一报名审核"]}],
+                },
+                provider="llm",
+                task_run_id="run_abcdef123456",
+                session_id="s1",
+            )
+
+            self.assertEqual(artifact["title"], "校园活动报名与审核系统演示稿")
+            self.assertEqual(artifact["preview"]["theme"], "校园活动报名与审核系统演示稿")
+            self.assertTrue((Path(tmpdir) / "校园活动报名与审核系统演示稿-run_abcdef123456.html").is_file())
 
 
 if __name__ == "__main__":

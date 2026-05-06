@@ -39,13 +39,13 @@ class RequestRouterTests(unittest.TestCase):
         self.assertEqual(decision.route, "status")
         self.assertEqual(decision.source, "rule")
 
-    def test_exact_task_list_command_uses_llm_when_available(self) -> None:
+    def test_exact_task_list_command_uses_exact_rule_before_llm(self) -> None:
         llm = FakeRouteLLM({"route": "doc", "confidence": 1.0, "reason": "wrong"})
         decision = self.router.route("任务列表", llm_service=llm)
 
-        self.assertEqual(decision.route, "doc")
-        self.assertEqual(decision.source, "llm")
-        self.assertEqual(llm.requests, ["任务列表"])
+        self.assertEqual(decision.route, "status")
+        self.assertEqual(decision.source, "rule_exact")
+        self.assertEqual(llm.requests, [])
 
     def test_task_list_command_with_extra_text_does_not_use_exact_rule(self) -> None:
         llm = FakeRouteLLM({"route": "status", "confidence": 0.88, "reason": "natural language task query"})
@@ -55,30 +55,30 @@ class RequestRouterTests(unittest.TestCase):
         self.assertEqual(decision.source, "llm")
         self.assertEqual(llm.requests, ["任务列表吧"])
 
-    def test_other_exact_task_command_uses_llm_when_available(self) -> None:
+    def test_other_exact_task_command_uses_exact_rule_before_llm(self) -> None:
         llm = FakeRouteLLM({"route": "doc", "confidence": 1.0, "reason": "wrong"})
         decision = self.router.route("待办清单", llm_service=llm)
 
-        self.assertEqual(decision.route, "doc")
-        self.assertEqual(decision.source, "llm")
-        self.assertEqual(llm.requests, ["待办清单"])
+        self.assertEqual(decision.route, "status")
+        self.assertEqual(decision.source, "rule_exact")
+        self.assertEqual(llm.requests, [])
 
-    def test_exact_risk_command_uses_llm_when_available(self) -> None:
+    def test_exact_risk_command_uses_exact_rule_before_llm(self) -> None:
         llm = FakeRouteLLM({"route": "doc", "confidence": 1.0, "reason": "wrong"})
         decision = self.router.route("风险清单", llm_service=llm)
 
-        self.assertEqual(decision.route, "doc")
-        self.assertEqual(decision.source, "llm")
-        self.assertEqual(llm.requests, ["风险清单"])
+        self.assertEqual(decision.route, "risks")
+        self.assertEqual(decision.source, "rule_exact")
+        self.assertEqual(llm.requests, [])
 
-    def test_exact_greeting_uses_llm_when_available(self) -> None:
+    def test_exact_greeting_uses_exact_rule_before_llm(self) -> None:
         llm = FakeRouteLLM({"route": "unknown", "confidence": 0.0, "needs_clarification": True})
         decision = self.router.route("你好", llm_service=llm)
 
-        self.assertEqual(decision.route, "unknown")
-        self.assertEqual(decision.source, "llm")
-        self.assertTrue(decision.needs_clarification)
-        self.assertEqual(llm.requests, ["你好"])
+        self.assertEqual(decision.route, "help")
+        self.assertEqual(decision.source, "rule_exact")
+        self.assertFalse(decision.needs_clarification)
+        self.assertEqual(llm.requests, [])
 
     def test_broad_task_query_defers_to_llm_router_when_available(self) -> None:
         llm = FakeRouteLLM({"route": "status", "confidence": 0.91, "reason": "user asks task status"})
@@ -129,7 +129,7 @@ class RequestRouterTests(unittest.TestCase):
 
         self.assertEqual(decision.route, "status")
         self.assertEqual(decision.source, "rule_exact")
-        self.assertEqual(llm.requests, ["任务列表"])
+        self.assertEqual(llm.requests, [])
 
     def test_first_person_completion_statement_routes_to_task_update(self) -> None:
         decision = self.router.route_by_rule("我已完成后端开发任务")
@@ -151,6 +151,14 @@ class RequestRouterTests(unittest.TestCase):
         self.assertIsNotNone(decision)
         self.assertEqual(decision.route, "doc")
         self.assertEqual(decision.requested_outputs, ("doc",))
+
+    def test_discussion_lifecycle_organize_request_defaults_to_doc(self) -> None:
+        decision = self.router.route_by_rule("帮我整理一下这轮讨论")
+
+        self.assertIsNotNone(decision)
+        self.assertEqual(decision.route, "doc")
+        self.assertEqual(decision.requested_outputs, ("doc",))
+        self.assertIn("需求", decision.reason)
 
     def test_compound_artifact_output_request_routes_without_local_target_clarification(self) -> None:
         decision = self.router.route_by_rule("总结一下目前的任务，然后写到文档里面")

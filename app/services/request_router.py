@@ -66,6 +66,20 @@ class RequestRouter:
         "写到文档",
     )
     DOC_ACTION_KEYWORDS = ("写成", "整理成", "总结成", "沉淀", "同步", "写入", "写到", "生成", "更新")
+    REQUIREMENT_LIFECYCLE_MARKERS = (
+        "刚才讨论",
+        "这轮讨论",
+        "本轮讨论",
+        "当前讨论",
+        "群聊讨论",
+        "聊天内容",
+        "需求",
+        "方案",
+        "项目材料",
+        "正式材料",
+        "评审材料",
+        "答辩材料",
+    )
     SLIDES_KEYWORDS = (
         "ppt",
         "slides",
@@ -216,16 +230,16 @@ class RequestRouter:
     LOW_CONFIDENCE_THRESHOLD = 0.45
 
     def route(self, instruction: str, *, llm_service: Any | None = None) -> RouteDecision:
+        exact_decision = self.route_by_exact_rule(instruction)
+        if exact_decision is not None:
+            return exact_decision
+
         if llm_service is not None and getattr(llm_service, "is_configured", lambda: False)():
             try:
                 result = llm_service.route_workspace_request(instruction)
                 return self.route_from_llm_result(result)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Lightweight request routing failed, using fallback route: %s", exc)
-
-        exact_decision = self.route_by_exact_rule(instruction)
-        if exact_decision is not None:
-            return exact_decision
 
         rule_decision = self.route_by_rule(instruction)
         if rule_decision is not None:
@@ -340,6 +354,15 @@ class RequestRouter:
                 requested_outputs=requested_outputs,
             )
 
+        if self._is_requirement_lifecycle_doc_request(text, lowered):
+            return RouteDecision(
+                route="doc",
+                source="rule",
+                confidence=0.86,
+                reason="用户要求把 IM 讨论沉淀成需求或方案材料。",
+                requested_outputs=("doc",),
+            )
+
         if self._is_task_status_update_request(text, lowered):
             return RouteDecision(route="tasks", source="rule", confidence=0.92, reason="用户在更新已有任务状态。")
 
@@ -374,11 +397,15 @@ class RequestRouter:
         confidence = self._normalize_confidence(result.get("confidence"))
         if route not in self.ROUTES:
             route = "unknown"
-        requested_outputs = self._normalize_requested_outputs(result.get("requested_outputs"), fallback_route=route)
+        low_confidence = confidence < self.LOW_CONFIDENCE_THRESHOLD
+        requested_outputs = self._normalize_requested_outputs(
+            result.get("requested_outputs"),
+            fallback_route="" if low_confidence else route,
+        )
         needs_clarification = bool(result.get("needs_clarification"))
-        if route == "unknown" or confidence < self.LOW_CONFIDENCE_THRESHOLD:
+        if route == "unknown" or low_confidence:
             needs_clarification = True
-        if requested_outputs and route in {"doc", "slides", "canvas"}:
+        if requested_outputs and route in {"doc", "slides", "canvas"} and not low_confidence:
             needs_clarification = False
         return RouteDecision(
             route=route,
@@ -480,6 +507,13 @@ class RequestRouter:
         if not (doc_requested or slides_requested or canvas_requested):
             return False
         return self._contains_any(text, lowered, self.ARTIFACT_OUTPUT_ACTIONS)
+
+    def _is_requirement_lifecycle_doc_request(self, text: str, lowered: str) -> bool:
+        if self._is_doc_excluded(text, lowered):
+            return False
+        if not self._is_vague_request(text) and not self._contains_any(text, lowered, self.SUMMARY_KEYWORDS):
+            return False
+        return self._contains_any(text, lowered, self.REQUIREMENT_LIFECYCLE_MARKERS)
 
     def _needs_artifact_edit_clarification(self, text: str, lowered: str) -> bool:
         action_text = re.sub(r"(?<![A-Za-z])update\s*\([^)]*\)", "", text, flags=re.IGNORECASE)

@@ -14,6 +14,8 @@ logger = logging.getLogger(__name__)
 
 
 class PresentationArtifactService:
+    GENERIC_TITLES = {"presentation", "slides", "slide deck", "ppt", "汇报大纲", "演示稿", "ppt演示稿"}
+
     def __init__(self, *, root_dir: Path | None = None) -> None:
         self.root_dir = root_dir or Path("data") / "artifacts" / "slides"
         self.slides_skill = SlidesSkill()
@@ -29,6 +31,7 @@ class PresentationArtifactService:
     ) -> dict:
         self.root_dir.mkdir(parents=True, exist_ok=True)
         preview = self._normalize_package(package)
+        preview["theme"] = self._package_title(preview)
         json_filename = self._slides_filename(preview, task_run_id=task_run_id, session_id=session_id)
         html_filename = self._html_filename(json_filename)
         pptx_filename = self._pptx_filename(json_filename)
@@ -56,7 +59,7 @@ class PresentationArtifactService:
             "artifact_type": "slides_package",
             "provider": provider,
             "status": "ready",
-            "title": str(preview.get("theme") or "Presentation"),
+            "title": self._package_title(preview),
             "url": f"/api/artifacts/slides/{html_filename}",
             "preview": preview,
             "version": coerce_positive_int(preview.get("version")),
@@ -65,9 +68,23 @@ class PresentationArtifactService:
     def _normalize_package(self, package: dict) -> dict:
         return self.slides_skill.normalize(package)
 
+    @classmethod
+    def _package_title(cls, package: dict) -> str:
+        theme = str(package.get("theme") or "").strip()
+        if theme and theme.lower() not in cls.GENERIC_TITLES:
+            return theme
+        slides = package.get("slides") if isinstance(package.get("slides"), list) else []
+        for slide in slides:
+            if not isinstance(slide, dict):
+                continue
+            title = str(slide.get("title") or "").strip()
+            if title and title.lower() not in cls.GENERIC_TITLES:
+                return f"{title}演示稿" if "演示" not in title and "汇报" not in title else title
+        return "协作演示稿"
+
     def _slides_filename(self, package: dict, *, task_run_id: str | None, session_id: str) -> str:
-        title = str(package.get("theme") or "slides").strip() or "slides"
-        stem = self._slugify_filename(task_run_id or f"{session_id}-{title}")[:96]
+        title = self._package_title(package)
+        stem = self._artifact_stem(title, suffix=task_run_id or session_id)[:96]
         return f"{stem or 'slides'}.json"
 
     def _html_filename(self, json_filename: str) -> str:
@@ -81,6 +98,22 @@ class PresentationArtifactService:
     def _pdf_filename(self, json_filename: str) -> str:
         stem = json_filename.rsplit(".", 1)[0]
         return f"{stem or 'slides'}.pdf"
+
+    def _artifact_stem(self, title: str, *, suffix: str | None) -> str:
+        title_stem = self._slugify_filename(title)
+        suffix_stem = self._short_suffix(suffix)
+        if suffix_stem and suffix_stem not in title_stem:
+            return f"{title_stem}-{suffix_stem}"
+        return title_stem or suffix_stem or "slides"
+
+    @staticmethod
+    def _short_suffix(value: str | None) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        if text.startswith("run_") and len(text) > 24:
+            return text[:16]
+        return text[:24]
 
     def _attach_pdf_export_best_effort(self, package: dict, pdf_filename: str) -> None:
         try:
@@ -96,7 +129,7 @@ class PresentationArtifactService:
             exports["pdf"] = f"/api/artifacts/slides/{pdf_filename}"
 
     def _slugify_filename(self, value: str) -> str:
-        slug = re.sub(r"[^A-Za-z0-9._-]+", "-", value.strip()).strip(".-_")
+        slug = re.sub(r"[^\w.-]+", "-", value.strip(), flags=re.UNICODE).strip(".-_")
         return slug or "artifact"
 
     def _render_html(self, package: dict) -> str:

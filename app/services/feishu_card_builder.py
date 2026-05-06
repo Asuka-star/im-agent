@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.core.config import settings
+from app.core.config import settings  # Re-exported for legacy monkeypatch paths.
 from app.services.cards.builders import FeishuCardBuilder
 
 

@@ -68,7 +68,7 @@ class TaskRunService:
                 trigger_message_id=trigger_message_id,
                 created_by=created_by,
                 intent=intent,
-                title=title.strip()[:255] or "协作任务",
+                title=title.strip()[:255] or "协作运行",
                 metadata_json=json.dumps(metadata or {}, ensure_ascii=False),
             )
             session.add(row)
@@ -119,11 +119,7 @@ class TaskRunService:
                 .where(TaskRunStep.task_run_id == task_run_id)
                 .order_by(TaskRunStep.id.asc())
             ).scalars().all()
-            artifacts = session.execute(
-                select(Artifact)
-                .where(Artifact.task_run_id == task_run_id)
-                .order_by(Artifact.id.asc())
-            ).scalars().all()
+            artifacts = self._artifacts_for_task_run_detail(session, row)
             confirmations = session.execute(
                 select(ConfirmationRequest)
                 .where(ConfirmationRequest.task_run_id == task_run_id)
@@ -350,10 +346,20 @@ class TaskRunService:
                 select(ConfirmationRequest).where(
                     ConfirmationRequest.task_run_id == task_run_id,
                     ConfirmationRequest.confirmation_id == confirmation_id,
-                )
+                ).with_for_update()
             ).scalar_one_or_none()
             if row is None:
                 return None
+
+            if row.status == "answered":
+                response = ConfirmationAnswerResponse(
+                    task_run_id=task_run_id,
+                    confirmation_id=confirmation_id,
+                    status=row.status,
+                    answer_value=row.answer_value or answer_value,
+                    already_answered=True,
+                )
+                return response
 
             row.status = "answered"
             row.answer_value = answer_value
@@ -390,6 +396,7 @@ class TaskRunService:
         return response
 
     def _summary_from_row(self, row: TaskRun) -> TaskRunSummary:
+        metadata = self._decode_json_object(row.metadata_json)
         return TaskRunSummary(
             task_run_id=row.task_run_id,
             session_id=row.session_id,
@@ -409,6 +416,9 @@ class TaskRunService:
             latest_summary=row.latest_summary,
             latest_reply_preview=row.latest_reply_preview,
             latest_error=row.latest_error,
+            run_kind=str(metadata.get("run_kind") or "").strip() or None,
+            primary_object=str(metadata.get("primary_object") or "").strip() or None,
+            lifecycle_stage=str(metadata.get("lifecycle_stage") or "").strip() or None,
             created_by=row.created_by,
             created_at=row.created_at,
             updated_at=row.updated_at,
@@ -443,6 +453,30 @@ class TaskRunService:
             created_at=row.created_at,
             updated_at=row.updated_at,
         )
+
+    def _artifacts_for_task_run_detail(self, session, row: TaskRun) -> list[Artifact]:
+        run_ids = session.execute(
+            select(TaskRun.task_run_id)
+            .where(TaskRun.session_id == row.session_id)
+            .order_by(desc(TaskRun.id))
+            .limit(20)
+        ).scalars().all()
+        if row.task_run_id not in run_ids:
+            run_ids.append(row.task_run_id)
+        artifacts = session.execute(
+            select(Artifact)
+            .where(Artifact.task_run_id.in_(run_ids))
+            .order_by(Artifact.id.asc())
+        ).scalars().all()
+        seen: set[str] = set()
+        deduped: list[Artifact] = []
+        for artifact in artifacts:
+            artifact_id = str(artifact.artifact_id or "")
+            if artifact_id in seen:
+                continue
+            seen.add(artifact_id)
+            deduped.append(artifact)
+        return deduped
 
     def _confirmation_from_row(self, row: ConfirmationRequest) -> ConfirmationRequestRecord:
         return ConfirmationRequestRecord(
@@ -729,6 +763,9 @@ class TaskRunService:
             "latest_summary": detail.latest_summary,
             "latest_reply_preview": detail.latest_reply_preview,
             "latest_error": detail.latest_error,
+            "run_kind": detail.run_kind,
+            "primary_object": detail.primary_object,
+            "lifecycle_stage": detail.lifecycle_stage,
             "created_by": detail.created_by,
             "created_at": detail.created_at.isoformat() if detail.created_at else None,
             "updated_at": detail.updated_at.isoformat() if detail.updated_at else None,

@@ -11,7 +11,7 @@ export function statusLabel(value?: string | null): string {
     ready: '可用',
     done: '完成',
   };
-  return map[value || ''] || value || '未知';
+  return map[value || ''] || '未知状态';
 }
 
 export function stageLabel(value?: string | null): string {
@@ -27,7 +27,7 @@ export function stageLabel(value?: string | null): string {
     awaiting_user_confirmation: '等待确认',
     recommendation: '推荐下一步',
   };
-  return map[value || ''] || value || '未知阶段';
+  return map[value || ''] || '未知阶段';
 }
 
 export function intentLabel(value?: string | null): string {
@@ -41,7 +41,7 @@ export function intentLabel(value?: string | null): string {
     risks: '风险',
     help: '帮助',
   };
-  return map[value || ''] || value || '协作';
+  return map[value || ''] || '协作';
 }
 
 export function sourceLabel(value?: string | null): string {
@@ -51,7 +51,7 @@ export function sourceLabel(value?: string | null): string {
     workbench: '工作台',
     unknown: '未知来源',
   };
-  return map[value || ''] || value || '来源';
+  return map[value || ''] || '来源';
 }
 
 export function artifactLabel(value?: string | null): string {
@@ -64,7 +64,7 @@ export function artifactLabel(value?: string | null): string {
     plan: '计划',
     note: '记录',
   };
-  return map[value || ''] || value || '产物';
+  return map[value || ''] || '产物';
 }
 
 export function providerLabel(value?: string | null): string {
@@ -74,7 +74,33 @@ export function providerLabel(value?: string | null): string {
     local: '本地',
     feishu_doc: '飞书文档',
   };
-  return map[value || ''] || value || 'provider';
+  return map[value || ''] || '服务';
+}
+
+export function stepTypeLabel(value?: string | null): string {
+  const map: Record<string, string> = {
+    context: '上下文',
+    artifact: '产物',
+    confirm: '确认',
+    confirmation: '确认',
+    system: '系统',
+    reply: '回复',
+    route: '路由',
+    planner: '规划',
+    reviewer: '复核',
+    generate_canvas: '画布生成',
+  };
+  return map[value || ''] || '步骤';
+}
+
+export function priorityLabel(value?: string | null): string {
+  const map: Record<string, string> = {
+    high: '高优先级',
+    medium: '中优先级',
+    normal: '普通优先级',
+    low: '低优先级',
+  };
+  return map[value || ''] || '建议';
 }
 
 export function statusTone(value?: string | null): string {

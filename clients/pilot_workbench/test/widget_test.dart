@@ -14,7 +14,7 @@ void main() {
     await tester.pump();
 
     expect(find.text(workbenchAppName), findsOneWidget);
-    expect(find.text('任务运行面板'), findsOneWidget);
-    expect(find.text('任务详情与产物'), findsOneWidget);
+    expect(find.text('协作运行面板'), findsOneWidget);
+    expect(find.text('协作运行详情与产物'), findsOneWidget);
   });
 }

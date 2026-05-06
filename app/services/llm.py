@@ -1,6 +1,7 @@
 import hashlib
 import json
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -146,6 +147,7 @@ class LLMService:
                 result["artifact_edit_plan"] = edit_plan
             if edit_intent.get("reason") and not result.get("reason"):
                 result["reason"] = edit_intent["reason"]
+        result = self._sanitize_doc_request_result(result, workspace_context, instruction)
         doc = result.get("doc") if isinstance(result.get("doc"), dict) else {}
         logger.info(
             "LLM doc request resolved: sections=%s edit_intent=%s",
@@ -170,6 +172,27 @@ class LLMService:
                 ],
             },
         )
+        return result
+
+    def resolve_requirement_brief(self, workspace_context: str, instruction: str) -> dict[str, Any]:
+        self._ensure_configured()
+        payload = self._json_payload(
+            system_prompt=self._requirement_brief_prompt(),
+            user_content=self._context_request_content(workspace_context, instruction),
+            temperature=0.2,
+        )
+        result = self._chat_json(payload, request_name="resolve_requirement_brief", timeout_seconds=settings.llm_timeout_seconds)
+        brief = result.get("requirement_brief") if isinstance(result.get("requirement_brief"), dict) else {}
+        logger.info(
+            "LLM requirement brief resolved: title=%s goals=%s risks=%s",
+            brief.get("title"),
+            len(brief.get("goals", [])) if isinstance(brief.get("goals"), list) else 0,
+            len(brief.get("risks", [])) if isinstance(brief.get("risks"), list) else 0,
+        )
+        result.setdefault("operation", "analyze")
+        result.setdefault("object", "doc")
+        result.setdefault("route", "doc")
+        result.setdefault("reason", "用户要求沉淀当前需求讨论")
         return result
 
     def plan_workspace_request(self, workspace_context: str, instruction: str) -> dict[str, Any]:
@@ -547,6 +570,9 @@ class LLMService:
     def _doc_request_prompt(self) -> str:
         return self.prompts.doc_request()
 
+    def _requirement_brief_prompt(self) -> str:
+        return self.prompts.requirement_brief()
+
     def _doc_edit_intent_prompt(self) -> str:
         return self.prompts.doc_edit_intent()
 
@@ -555,6 +581,128 @@ class LLMService:
 
     def _memory_gate_prompt(self) -> str:
         return self.prompts.memory_gate()
+
+    @classmethod
+    def _sanitize_doc_request_result(cls, result: dict[str, Any], workspace_context: str, instruction: str) -> dict[str, Any]:
+        if not isinstance(result, dict):
+            return result
+        doc = result.get("doc")
+        if not isinstance(doc, dict):
+            return result
+        sections = doc.get("sections")
+        if not isinstance(sections, list):
+            return result
+
+        grounding_text = cls._implementation_grounding_text(workspace_context, instruction)
+        sanitized_sections: list[Any] = []
+        for section in sections:
+            if not isinstance(section, dict):
+                sanitized_sections.append(section)
+                continue
+            heading = str(section.get("heading") or "").strip()
+            paragraphs = section.get("paragraphs")
+            if not isinstance(paragraphs, list) or not cls._is_implementation_section_heading(heading):
+                sanitized_sections.append(section)
+                continue
+
+            kept: list[Any] = []
+            removed_specifics = False
+            for paragraph in paragraphs:
+                text = str(paragraph or "").strip()
+                if not text:
+                    continue
+                if cls._has_ungrounded_plan_specifics(text, grounding_text):
+                    removed_specifics = True
+                    continue
+                kept.append(paragraph)
+            if removed_specifics:
+                fallback = "具体实施计划、负责人和截止时间尚未在本轮讨论中明确，需后续确认。"
+                if fallback not in [str(item).strip() for item in kept]:
+                    kept.insert(0, fallback)
+            section = {**section, "paragraphs": kept or ["具体实施计划、负责人和截止时间尚未在本轮讨论中明确，需后续确认。"]}
+            sanitized_sections.append(section)
+
+        result = {**result, "doc": {**doc, "sections": sanitized_sections}}
+        return result
+
+    @staticmethod
+    def _is_implementation_section_heading(heading: str) -> bool:
+        return any(marker in heading for marker in ("实施计划", "分工", "里程碑", "交付计划"))
+
+    @classmethod
+    def _has_ungrounded_plan_specifics(cls, text: str, grounding_text: str) -> bool:
+        normalized_text = str(text or "").strip()
+        normalized_grounding = str(grounding_text or "")
+        if not normalized_text:
+            return False
+        if cls._contains_ungrounded_plan_date(normalized_text, normalized_grounding):
+            return True
+        if cls._contains_ungrounded_plan_owner(normalized_text, normalized_grounding):
+            return True
+        return False
+
+    @staticmethod
+    def _contains_ungrounded_plan_date(text: str, grounding_text: str) -> bool:
+        date_patterns = (
+            r"20\d{2}[-/.年]\d{1,2}(?:[-/.月]\d{1,2}日?)?",
+            r"\d{1,2}月\s*(?:[-至到~]\s*\d{1,2}月)?",
+        )
+        for pattern in date_patterns:
+            for match in re.finditer(pattern, text):
+                value = match.group(0)
+                if value and value not in grounding_text:
+                    return True
+        return False
+
+    @classmethod
+    def _contains_ungrounded_plan_owner(cls, text: str, grounding_text: str) -> bool:
+        if "负责人" not in text and "owner" not in text.lower():
+            return False
+        for match in re.finditer(r"(?:负责人|owner)\s*[:：]\s*([^，,；;。\n]+)", text, flags=re.IGNORECASE):
+            owner = match.group(1).strip(" -｜|：:。；;，,")
+            if not owner or owner.upper() == "TBD" or owner in {"待确认", "待定", "未定"}:
+                continue
+            if not cls._has_grounded_owner_assignment(owner, grounding_text):
+                return True
+        return False
+
+    @staticmethod
+    def _has_grounded_owner_assignment(owner: str, grounding_text: str) -> bool:
+        if not owner:
+            return False
+        for line in str(grounding_text or "").splitlines():
+            if owner not in line:
+                continue
+            if "发言人" in line and "负责人" not in line and "负责" not in line:
+                continue
+            if any(marker in line for marker in ("负责人", "负责", "分工", "由", "来做", "认领", "owner")):
+                return True
+        return False
+
+    @staticmethod
+    def _implementation_grounding_text(workspace_context: str, instruction: str) -> str:
+        context = str(workspace_context or "")
+        blocks: list[str] = [str(instruction or "")]
+        allowed_headings = (
+            "[本次待同步讨论]",
+            "[近期群聊讨论]",
+            "[实施计划参考]",
+            "[实施计划变更参考]",
+            "[任务变更记录]",
+            "[当前任务快照]",
+        )
+        lines = context.splitlines()
+        collecting = False
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("[") and stripped.endswith("]"):
+                collecting = stripped in allowed_headings
+                if collecting:
+                    blocks.append(stripped)
+                continue
+            if collecting:
+                blocks.append(line)
+        return "\n".join(blocks)
 
     @staticmethod
     def _compact_planning_context(workspace_context: str, *, max_chars: int = 3000) -> str:

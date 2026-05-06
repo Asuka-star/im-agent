@@ -3,6 +3,7 @@ import time
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 
+from app.core.config import settings
 from app.feishu.event_handler import FeishuEventHandler
 from app.schemas.feishu_event import FeishuEventEnvelope, FeishuMessageContext
 from app.services.dedup import MessageDedupService
@@ -34,7 +35,7 @@ async def receive_events(request: Request, background_tasks: BackgroundTasks) ->
         logger.info("Responding to Feishu url verification challenge")
         return {"challenge": envelope.challenge}
 
-    if not event_handler.verify_token(envelope):
+    if not _verify_callback_token(payload, envelope):
         logger.warning("Rejected Feishu callback due to invalid verification token")
         raise HTTPException(status_code=403, detail="Invalid Feishu verification token")
 
@@ -45,16 +46,7 @@ async def receive_events(request: Request, background_tasks: BackgroundTasks) ->
             envelope.header.event_id if envelope.header else None,
             (time.perf_counter() - started_at) * 1000,
         )
-        return {
-            "toast": {
-                "type": "info",
-                "content": "已收到操作，正在后台处理。",
-                "i18n": {
-                    "zh_cn": "已收到操作，正在后台处理。",
-                    "en_us": "Action received. Processing in the background.",
-                },
-            }
-        }
+        return {}
 
     if event_handler.is_message_lifecycle_event(envelope):
         background_tasks.add_task(_process_message_lifecycle_background, payload)
@@ -98,8 +90,33 @@ def _is_card_action_event(payload: dict, envelope: FeishuEventEnvelope) -> bool:
         return True
     event = payload.get("event") if isinstance(payload.get("event"), dict) else {}
     action = event.get("action") if isinstance(event.get("action"), dict) else {}
-    value = action.get("value") or action.get("form_value") or event.get("value")
+    top_action = payload.get("action") if isinstance(payload.get("action"), dict) else {}
+    value = (
+        action.get("value")
+        or action.get("form_value")
+        or action.get("option")
+        or event.get("value")
+        or top_action.get("value")
+        or top_action.get("form_value")
+        or payload.get("value")
+    )
     return isinstance(value, (dict, str)) and "action" in str(value)
+
+
+def _verify_callback_token(payload: dict, envelope: FeishuEventEnvelope) -> bool:
+    if event_handler.verify_token(envelope):
+        return True
+    expected = settings.feishu_verification_token
+    if not expected:
+        return True
+    candidates = [
+        payload.get("token"),
+        payload.get("verification_token"),
+        _nested(payload, ("header", "token")),
+        _nested(payload, ("event", "token")),
+        _nested(payload, ("event", "verification_token")),
+    ]
+    return expected in {str(item) for item in candidates if item}
 
 
 def _process_card_action_background(payload: dict) -> None:
@@ -147,6 +164,15 @@ def _process_event_background(envelope: FeishuEventEnvelope, raw_message_id: str
         logger.exception("Failed to process Feishu callback in background: message_id=%s error=%s", raw_message_id, exc)
     finally:
         dedup_service.finish_processing(raw_message_id)
+
+
+def _nested(payload: dict, path: tuple[str, ...]) -> object:
+    current: object = payload
+    for key in path:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
 
 
 def _process_message_context(message_context: FeishuMessageContext, *, started_at: float) -> None:

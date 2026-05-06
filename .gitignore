@@ -6,3 +6,4 @@ data/
 doc/
 bitable-setup.md
 feishu-integrated-mvp-plan.md
+.playwright-mcp/

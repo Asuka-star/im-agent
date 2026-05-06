@@ -42,7 +42,7 @@ String localizeStage(String stage) {
     case 'confirmation_resolved':
       return '确认已处理';
     case 'delivered':
-      return '任务交付';
+      return '产物交付';
     case 'failed':
       return '执行失败';
   }
@@ -70,7 +70,7 @@ String localizeStage(String stage) {
     return '协作确认';
   }
   if (normalized.contains('deliver') || normalized.contains('complete')) {
-    return '任务交付';
+    return '产物交付';
   }
   return _humanizeIdentifier(stage);
 }
@@ -99,6 +99,48 @@ String localizeIntent(String? intent) {
       return '';
     default:
       return _humanizeIdentifier(intent ?? '');
+  }
+}
+
+String localizeRunKind(String? runKind) {
+  switch ((runKind ?? '').trim().toLowerCase()) {
+    case 'artifact_lifecycle':
+      return '产物生命周期';
+    case 'task_management':
+      return '任务支线';
+    case 'analysis':
+      return '协作分析';
+    case 'help':
+      return '帮助支持';
+    case 'collaboration':
+      return '协作运行';
+    case '':
+      return '';
+    default:
+      return _humanizeIdentifier(runKind ?? '');
+  }
+}
+
+String localizeLifecycleStage(String? lifecycleStage) {
+  switch ((lifecycleStage ?? '').trim().toLowerCase()) {
+    case 'discussion':
+      return '讨论沉淀';
+    case 'document':
+      return '正式文档';
+    case 'presentation':
+      return '演示稿';
+    case 'canvas':
+      return '流程画布';
+    case 'delivery':
+      return '交付包';
+    case 'implementation':
+      return '实施计划';
+    case 'support':
+      return '支持';
+    case '':
+      return '';
+    default:
+      return _humanizeIdentifier(lifecycleStage ?? '');
   }
 }
 
@@ -228,7 +270,7 @@ String localizeWorkbenchError(Object error) {
   }
 
   if (normalized.contains('task run payload is not a json object')) {
-    return '任务详情返回格式不正确。';
+    return '协作运行详情返回格式不正确。';
   }
   if (normalized.contains('not upgraded to websocket')) {
     return '服务端暂未开启实时推送，界面已切换为轮询刷新。';
@@ -237,7 +279,7 @@ String localizeWorkbenchError(Object error) {
     return '实时连接建立失败，界面已切换为轮询刷新。';
   }
   if (normalized.contains('400 bad request')) {
-    return '请求参数有误，请检查当前任务或会话是否仍然有效。';
+    return '请求参数有误，请检查当前运行或会话是否仍然有效。';
   }
   if (normalized.contains('connection refused')) {
     return '无法连接到服务端，请确认后端是否正在运行。';

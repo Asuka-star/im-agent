@@ -67,6 +67,27 @@ class TextAnalysisTests(unittest.TestCase):
         self.assertEqual(tasks[0].owner, "王五")
         self.assertEqual(tasks[0].title, "产品经理协调前后端开发")
 
+    def test_extract_tasks_from_dialog_assignment_with_pause(self) -> None:
+        tasks = normalize_tasks(extract_tasks("张三，你同时去搞一下录屏"))
+
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(tasks[0].owner, "张三")
+        self.assertEqual(tasks[0].title, "录屏")
+
+    def test_extract_tasks_from_additional_assignee_assignment(self) -> None:
+        tasks = normalize_tasks(extract_tasks("王五你也去搞一下录屏"))
+
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(tasks[0].owner, "王五")
+        self.assertEqual(tasks[0].title, "录屏")
+
+    def test_extract_tasks_from_rewritten_mention_assignment(self) -> None:
+        tasks = normalize_tasks(extract_tasks("zero你来帮我搞一下前端开发"))
+
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(tasks[0].owner, "zero")
+        self.assertEqual(tasks[0].title, "前端开发")
+
 
 if __name__ == "__main__":
     unittest.main()

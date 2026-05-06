@@ -5,6 +5,7 @@ from html import escape
 from pathlib import Path
 
 from app.services.artifact_skills import CanvasSkill
+from app.services.artifact_title_service import ArtifactTitleService
 from app.utils.values import coerce_positive_int
 
 
@@ -73,10 +74,18 @@ class CanvasArtifactService:
         if not shapes:
             labels = self._flow_labels(canvas, instruction=instruction, workspace_context=workspace_context)
             shapes = self._template_shapes(template, labels)
+        shapes = self._fit_shape_text(shapes)
+        raw_title = str(canvas.get("title") or title or "Canvas").strip() or "Canvas"
+        scene_title = ArtifactTitleService.canvas_title(
+            current_title=raw_title,
+            instruction=instruction,
+            workspace_context=workspace_context,
+            template=template,
+        )
         scene = {
             "canvas_id": str(canvas.get("canvas_id") or f"canvas_{uuid.uuid4().hex[:12]}").strip()
             or f"canvas_{uuid.uuid4().hex[:12]}",
-            "title": str(canvas.get("title") or title or "Canvas").strip() or "Canvas",
+            "title": scene_title,
             "version": coerce_positive_int(canvas.get("version")) or 1,
             "schema": str(canvas.get("schema") or "im-agent.canvas.v1").strip() or "im-agent.canvas.v1",
             "template": template,
@@ -153,12 +162,17 @@ class CanvasArtifactService:
         }
         if raw_template in aliases:
             return aliases[raw_template]
-        text = f"{instruction}\n{workspace_context}".lower()
-        if re.search(r"(风险|隐患|阻塞|延期|延迟|应对|缓解|risk|mitigation|blocker)", text, flags=re.IGNORECASE):
-            return "risk"
-        if re.search(r"(流程图|流程画布|流程|flowchart|process|flow)", str(instruction or ""), flags=re.IGNORECASE):
+        instruction_text = str(instruction or "")
+        combined_text = f"{instruction_text}\n{workspace_context}"
+        if re.search(r"(流程图|产品流程|业务流程|用户流程|流程画布|流程|flowchart|process|flow)", instruction_text, flags=re.IGNORECASE):
             return "flow"
-        if re.search(r"(模块|架构|分工|前端|后端|设计|测试|交付|frontend|backend|module|architecture)", text, flags=re.IGNORECASE):
+        if re.search(r"(风险应对图|风险画布|风险矩阵|风险图|risk\s*map|mitigation)", instruction_text, flags=re.IGNORECASE):
+            return "risk"
+        if re.search(r"(模块图|架构图|系统架构|技术架构|module|architecture)", instruction_text, flags=re.IGNORECASE):
+            return "module"
+        if re.search(r"(风险|隐患|阻塞|延期|延迟|应对|缓解|risk|mitigation|blocker)", combined_text, flags=re.IGNORECASE):
+            return "risk"
+        if re.search(r"(模块|架构|分工|前端|后端|设计|测试|交付|frontend|backend|module|architecture)", combined_text, flags=re.IGNORECASE):
             return "module"
         return "flow"
 
@@ -203,10 +217,67 @@ class CanvasArtifactService:
 
     def _infer_flow_labels(self, *, instruction: str, workspace_context: str) -> list[str]:
         discussion_text = self._discussion_content(workspace_context)
+        if self._is_product_flow_request(instruction):
+            labels = self._product_flow_labels_from_context(f"{discussion_text}\n{workspace_context}")
+            if labels:
+                return labels
         labels = self._flow_labels_from_discussion(discussion_text)
         if labels:
             return labels
         return self._flow_labels_from_discussion(instruction)
+
+    def _is_product_flow_request(self, instruction: str) -> bool:
+        return bool(
+            re.search(
+                r"(产品流程图|业务流程图|用户流程图|产品流程|业务流程|用户流程|流程图|flowchart|process)",
+                str(instruction or ""),
+                flags=re.IGNORECASE,
+            )
+        )
+
+    def _product_flow_labels_from_context(self, text: str) -> list[str]:
+        labels: list[str] = []
+        in_flow_section = False
+        for raw_line in str(text or "").splitlines():
+            line = self._clean_flow_candidate(raw_line)
+            line = re.sub(r"^\d+[\.\)、)]\s*", "", line).strip()
+            if not line:
+                continue
+            heading = line.strip("[] ")
+            if re.fullmatch(r"(产品流程|业务流程|核心流程|用户流程|流程设计)", heading):
+                in_flow_section = True
+                continue
+            if in_flow_section and re.fullmatch(
+                r"(背景与痛点|目标用户|核心需求|技术方案|风险与约束|实施计划与分工|演示稿准备要点|里程碑与下一步)",
+                heading,
+            ):
+                in_flow_section = False
+                continue
+            has_flow_marker = bool(re.search(r"(核心流程|产品流程|业务流程|用户流程|流程可以|流程是|步骤)", line))
+            if not in_flow_section and not has_flow_marker:
+                continue
+            candidate = re.sub(
+                r"^(?:核心|产品|业务|用户)?流程(?:可以是|是|包括|如下)?[:：]\s*",
+                "",
+                line,
+            ).strip()
+            if not candidate or self._is_canvas_meta_text(candidate):
+                continue
+            for part in self._split_flow_sentence(candidate):
+                label = self._normalize_flow_label(part)
+                if label and label not in labels and self._looks_like_process_label(label):
+                    labels.append(label[:36])
+                if len(labels) >= 8:
+                    return labels
+        return labels
+
+    def _looks_like_process_label(self, text: str) -> bool:
+        return bool(
+            re.search(
+                r"(学生|负责人|老师|用户|系统|平台|登录|查看|浏览|选择|填写|提交|报名|审核|通过|生成|导出|统计|提醒|沉淀|生成|交付|展示)",
+                str(text or ""),
+            )
+        )
 
     def _discussion_content(self, workspace_context: str) -> str:
         lines: list[str] = []
@@ -269,6 +340,12 @@ class CanvasArtifactService:
         text = self._clean_flow_candidate(text)
         if not text:
             return ""
+        text = re.sub(r"^\d+[\.\)、)]\s*", "", text).strip()
+        text = re.sub(
+            r"^(?:核心|产品|业务|用户)?流程(?:可以是|是|包括|如下)?[:：]\s*",
+            "",
+            text,
+        ).strip()
         text = re.sub(r"^\u5f53(.+?)\u5b8c\u6210\u540e$", lambda match: f"{match.group(1)}\u5b8c\u6210", text)
         text = re.sub(r"^(.+?)\u5b8c\u6210\u540e$", lambda match: f"{match.group(1)}\u5b8c\u6210", text)
         text = re.sub(r"^(?:\u7b49|\u7b49\u5f85)(.+?)\u5b8c\u6210$", lambda match: f"{match.group(1)}\u5b8c\u6210", text)
@@ -322,7 +399,7 @@ class CanvasArtifactService:
                     "text": label,
                     "x": 80 + (index - 1) * 220,
                     "y": 140,
-                    "w": 168,
+                    "w": 184,
                     "h": 72,
                     "color": palette["color"],
                     "stroke": palette["stroke"],
@@ -479,7 +556,7 @@ class CanvasArtifactService:
 
     def _canvas_filename(self, scene: dict, *, task_run_id: str | None, session_id: str) -> str:
         title = str(scene.get("title") or "canvas").strip() or "canvas"
-        stem = self._slugify_filename(task_run_id or f"{session_id}-{title}")[:96]
+        stem = self._artifact_stem(title, suffix=task_run_id or session_id)[:96]
         return f"{stem or 'canvas'}.json"
 
     def _svg_filename(self, json_filename: str) -> str:
@@ -490,9 +567,105 @@ class CanvasArtifactService:
         stem = json_filename.rsplit(".", 1)[0]
         return f"{stem or 'canvas'}.html"
 
+    def _artifact_stem(self, title: str, *, suffix: str | None) -> str:
+        title_stem = self._slugify_filename(title)
+        suffix_stem = self._short_suffix(suffix)
+        if suffix_stem and suffix_stem not in title_stem:
+            return f"{title_stem}-{suffix_stem}"
+        return title_stem or suffix_stem or "canvas"
+
+    @staticmethod
+    def _short_suffix(value: str | None) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        if text.startswith("run_") and len(text) > 24:
+            return text[:16]
+        return text[:24]
+
     def _slugify_filename(self, value: str) -> str:
-        slug = re.sub(r"[^A-Za-z0-9._-]+", "-", value.strip()).strip(".-_")
+        slug = re.sub(r"[^\w.-]+", "-", value.strip(), flags=re.UNICODE).strip(".-_")
         return slug or "artifact"
+
+    def _fit_shape_text(self, shapes: list[dict]) -> list[dict]:
+        fitted: list[dict] = []
+        for shape in shapes:
+            if not isinstance(shape, dict) or shape.get("type") == "arrow":
+                fitted.append(shape)
+                continue
+            item = dict(shape)
+            width = max(self._int_value(item.get("w"), 168), 128)
+            height = max(self._int_value(item.get("h"), 72), 56)
+            group = str(item.get("group") or "").strip()
+            max_units = self._text_units_for_width(width)
+            lines = self._wrap_text(str(item.get("text") or item.get("id") or "Node"), max_units=max_units)
+            top = 42 if group else 28
+            required_height = top + max(len(lines), 1) * 18 + 18
+            item["w"] = width
+            item["h"] = max(height, required_height)
+            fitted.append(item)
+        return fitted
+
+    def _text_units_for_width(self, width: int) -> int:
+        return max(12, int(max(width - 24, 80) / 7))
+
+    def _wrap_text(self, text: str, *, max_units: int, max_lines: int = 4) -> list[str]:
+        words = re.split(r"(\s+)", " ".join(str(text or "").split()))
+        lines: list[str] = []
+        current = ""
+        current_units = 0
+
+        def char_units(char: str) -> int:
+            return 1 if ord(char) < 128 else 2
+
+        def append_current() -> None:
+            nonlocal current, current_units
+            if current.strip():
+                lines.append(current.strip())
+            current = ""
+            current_units = 0
+
+        tokens = words if len(words) > 1 else list(str(text or ""))
+        for token in tokens:
+            if not token:
+                continue
+            token_units = sum(char_units(char) for char in token)
+            if token.isspace():
+                if current and current_units + 1 <= max_units:
+                    current += " "
+                    current_units += 1
+                continue
+            if token_units > max_units:
+                for char in token:
+                    unit = char_units(char)
+                    if current and current_units + unit > max_units:
+                        append_current()
+                        if len(lines) >= max_lines:
+                            break
+                    current += char
+                    current_units += unit
+                if len(lines) >= max_lines:
+                    break
+                continue
+            if current and current_units + token_units > max_units:
+                append_current()
+                if len(lines) >= max_lines:
+                    break
+            current += token
+            current_units += token_units
+        if len(lines) < max_lines:
+            append_current()
+        if len(lines) > max_lines:
+            lines = lines[:max_lines]
+        if lines and "".join("".join(lines).split()) != "".join(str(text or "").split()):
+            lines[-1] = self._ellipsis_line(lines[-1], max_units=max_units)
+        return lines or [""]
+
+    def _ellipsis_line(self, text: str, *, max_units: int) -> str:
+        value = str(text or "").rstrip("…")
+        while value and sum(1 if ord(char) < 128 else 2 for char in value + "…") > max_units:
+            value = value[:-1]
+        return f"{value}…" if value else "…"
 
     def _build_svg(self, scene: dict) -> str:
         shapes = scene.get("shapes") if isinstance(scene.get("shapes"), list) else []
@@ -586,8 +759,14 @@ class CanvasArtifactService:
         height = self._int_value(node.get("h"), 72)
         fill = self._hex_color(node.get("color"), "#EAF5FF")
         stroke = self._hex_color(node.get("stroke"), "#5A9FD6")
-        text = escape(str(node.get("text") or node.get("id") or "Node"))
+        raw_text = str(node.get("text") or node.get("id") or "Node")
         group = escape(str(node.get("group") or "").strip())
+        lines = self._wrap_text(raw_text, max_units=self._text_units_for_width(width))
+        text_y = y + (42 if group else 34)
+        text_lines = "".join(
+            f'<tspan x="{x + 12}" dy="{0 if index == 0 else 18}">{escape(line)}</tspan>'
+            for index, line in enumerate(lines)
+        )
         group_label = (
             f'<text x="{x + 12}" y="{y + 18}" fill="#60717B" font-size="11" '
             f'font-family="Arial, sans-serif">{group}</text>'
@@ -599,8 +778,8 @@ class CanvasArtifactService:
             f'<rect x="{x}" y="{y}" width="{width}" height="{height}" rx="8" fill="{fill}" '
             f'stroke="{stroke}" stroke-width="2"/>'
             f"{group_label}"
-            f'<text x="{x + 12}" y="{y + (42 if group else 38)}" fill="#12313A" font-size="14" '
-            f'font-weight="700" font-family="Arial, sans-serif">{text}</text>'
+            f'<text x="{x + 12}" y="{text_y}" fill="#12313A" font-size="14" '
+            f'font-weight="700" font-family="Arial, sans-serif">{text_lines}</text>'
             "</g>"
         )
 

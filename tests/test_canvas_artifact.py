@@ -22,14 +22,14 @@ class CanvasArtifactTests(unittest.TestCase):
             )
 
             self.assertEqual(artifact["artifact_type"], "canvas")
-            self.assertEqual(artifact["url"], "/api/artifacts/canvas/run_canvas.html")
-            self.assertEqual(artifact["export_url"], "/api/artifacts/canvas/run_canvas.svg")
-            self.assertTrue((Path(tmpdir) / "run_canvas.json").is_file())
-            self.assertTrue((Path(tmpdir) / "run_canvas.svg").is_file())
-            self.assertTrue((Path(tmpdir) / "run_canvas.html").is_file())
-            self.assertEqual(artifact["preview"]["exports"]["json"], "/api/artifacts/canvas/run_canvas.json")
-            self.assertEqual(artifact["preview"]["exports"]["svg"], "/api/artifacts/canvas/run_canvas.svg")
-            self.assertEqual(artifact["preview"]["exports"]["html"], "/api/artifacts/canvas/run_canvas.html")
+            self.assertEqual(artifact["url"], "/api/artifacts/canvas/Architecture-run_canvas.html")
+            self.assertEqual(artifact["export_url"], "/api/artifacts/canvas/Architecture-run_canvas.svg")
+            self.assertTrue((Path(tmpdir) / "Architecture-run_canvas.json").is_file())
+            self.assertTrue((Path(tmpdir) / "Architecture-run_canvas.svg").is_file())
+            self.assertTrue((Path(tmpdir) / "Architecture-run_canvas.html").is_file())
+            self.assertEqual(artifact["preview"]["exports"]["json"], "/api/artifacts/canvas/Architecture-run_canvas.json")
+            self.assertEqual(artifact["preview"]["exports"]["svg"], "/api/artifacts/canvas/Architecture-run_canvas.svg")
+            self.assertEqual(artifact["preview"]["exports"]["html"], "/api/artifacts/canvas/Architecture-run_canvas.html")
             self.assertTrue(artifact["preview"]["shapes"])
             first_node = next(shape for shape in artifact["preview"]["shapes"] if shape["type"] == "node")
             self.assertEqual(first_node["color"], "#EAF5FF")
@@ -37,13 +37,38 @@ class CanvasArtifactTests(unittest.TestCase):
             self.assertEqual(first_node["group"], "Input")
             nodes = [shape for shape in artifact["preview"]["shapes"] if shape["type"] == "node"]
             self.assertEqual(nodes[-1]["group"], "Artifact")
-            svg = (Path(tmpdir) / "run_canvas.svg").read_text(encoding="utf-8")
+            svg = (Path(tmpdir) / "Architecture-run_canvas.svg").read_text(encoding="utf-8")
             self.assertIn("<svg", svg)
             self.assertIn("login", svg)
-            html = (Path(tmpdir) / "run_canvas.html").read_text(encoding="utf-8")
+            html = (Path(tmpdir) / "Architecture-run_canvas.html").read_text(encoding="utf-8")
             self.assertIn("自由画布预览", html)
             self.assertNotIn("鑷", html)
             self.assertIn("<svg", html)
+
+    def test_canvas_service_uses_semantic_chinese_filename_with_short_run_suffix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = CanvasArtifactService(root_dir=Path(tmpdir))
+            artifact = service.generate_flow(
+                title="产品流程图",
+                instruction="根据刚才的需求画一张产品流程图",
+                llm_result={},
+                workspace_context=(
+                    "[当前协作文档]\n"
+                    "标题：协同产出 - 校园活动报名与审核系统需求方案 - 统计至2026-05-06 13:58\n"
+                    "产品流程：学生查看活动列表，提交报名信息，负责人审核。"
+                ),
+                task_run_id="run_b1087928b3a5abcdef123456",
+                session_id="s1",
+            )
+
+        self.assertEqual(
+            artifact["url"],
+            "/api/artifacts/canvas/校园活动报名与审核系统需求流程图-run_b1087928b3a5.html",
+        )
+        self.assertEqual(
+            artifact["preview"]["exports"]["json"],
+            "/api/artifacts/canvas/校园活动报名与审核系统需求流程图-run_b1087928b3a5.json",
+        )
 
     def test_canvas_service_derives_flow_nodes_from_discussion_content(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -96,6 +121,76 @@ class CanvasArtifactTests(unittest.TestCase):
         self.assertIn("风险", groups)
         self.assertIn("应对", groups)
         self.assertTrue(any(shape.get("label") == "缓解" for shape in preview["shapes"] if shape["type"] == "arrow"))
+
+    def test_canvas_service_prioritizes_product_flow_over_risk_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = CanvasArtifactService(root_dir=Path(tmpdir))
+            context = "\n".join(
+                [
+                    "[当前协作文档]",
+                    "- 背景与痛点",
+                    "  - 报名高峰期接口压力较大，活动审核规则需要老师确认。",
+                    "- 产品流程",
+                    "  - 1. 学生查看活动列表，选择活动并提交报名信息。",
+                    "  - 2. 社团负责人审核报名申请，通过后生成正式名单。",
+                    "  - 3. 负责人导出名单，学院老师查看统计结果和风险提醒。",
+                    "- 风险与约束",
+                    "  - 报名高峰期接口压力较大。",
+                ]
+            )
+
+            artifact = service.generate_flow(
+                title="产品流程图",
+                instruction="根据刚才的需求画一张产品流程图",
+                llm_result={},
+                workspace_context=context,
+                task_run_id="run_flow",
+                session_id="s1",
+            )
+
+        preview = artifact["preview"]
+        self.assertEqual(preview["template"], "flow")
+        labels = [shape["text"] for shape in preview["shapes"] if shape["type"] == "node"]
+        joined = " ".join(labels)
+        self.assertIn("学生查看活动列表", joined)
+        self.assertIn("负责人审核报名申请", joined)
+        self.assertIn("学院老师查看统计结果和风险提醒", joined)
+        self.assertNotIn("应对：明确负责人、截止时间和可验证结果", joined)
+
+    def test_canvas_svg_wraps_long_node_text_inside_card(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = CanvasArtifactService(root_dir=Path(tmpdir))
+            artifact = service.generate_flow(
+                title="产品流程图",
+                instruction="根据刚才的需求画一张产品流程图",
+                llm_result={
+                    "canvas": {
+                        "shapes": [
+                            {
+                                "id": "n1",
+                                "type": "node",
+                                "text": "学生在活动报名高峰期查看活动列表并提交完整报名信息",
+                                "x": 80,
+                                "y": 140,
+                                "w": 168,
+                                "h": 72,
+                                "group": "流程",
+                            }
+                        ]
+                    }
+                },
+                workspace_context="",
+                task_run_id="run_wrap",
+                session_id="s1",
+            )
+
+            svg_filename = artifact["export_url"].rsplit("/", 1)[-1]
+            svg = (Path(tmpdir) / svg_filename).read_text(encoding="utf-8")
+
+        node = artifact["preview"]["shapes"][0]
+        self.assertGreater(node["h"], 72)
+        self.assertIn("<tspan", svg)
+        self.assertNotIn(">学生在活动报名高峰期查看活动列表并提交完整报名信息</text>", svg)
 
     def test_canvas_service_uses_module_template_for_architecture_requests(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

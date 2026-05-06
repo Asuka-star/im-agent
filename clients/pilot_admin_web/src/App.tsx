@@ -3,6 +3,8 @@ import {
   AlertCircle,
   Boxes,
   CheckCircle2,
+  ChevronDown,
+  ChevronRight,
   Clipboard,
   Clock3,
   Download,
@@ -37,11 +39,13 @@ import {
 import {
   artifactLabel,
   intentLabel,
+  priorityLabel,
   providerLabel,
   sessionLabel,
   shortTime,
   sourceLabel,
   stageLabel,
+  stepTypeLabel,
   statusLabel,
   statusTone,
 } from './labels';
@@ -68,6 +72,11 @@ type SessionSummary = {
   waiting: number;
   latestTitle: string;
   updatedAt?: string | null;
+};
+
+type SectionToggleProps = {
+  collapsed: boolean;
+  onToggle: () => void;
 };
 
 export function App() {
@@ -340,8 +349,16 @@ function TaskDetail(props: {
   onReviseSlides: (artifactId: string, instruction: string) => void;
 }) {
   const { detail, recommendations } = props;
+  const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>({});
   const deliveryArtifact = detail.artifacts.find((artifact) => artifact.artifact_type === 'delivery_bundle' && artifact.url);
   const deliveryUrl = deliveryArtifact?.url ? artifactUrl(deliveryArtifact.url) : '';
+  const toggleSection = (key: string) => {
+    setCollapsedSections((current) => ({ ...current, [key]: !current[key] }));
+  };
+  const sectionToggle = (key: string): SectionToggleProps => ({
+    collapsed: Boolean(collapsedSections[key]),
+    onToggle: () => toggleSection(key),
+  });
   return (
     <div className="detail-stack">
       <section className="summary-band">
@@ -385,13 +402,14 @@ function TaskDetail(props: {
         submitting={props.submitting}
         onBundle={props.onBundle}
         onReviseSlides={props.onReviseSlides}
+        toggle={sectionToggle('next-actions')}
       />
-      <ReplyPreview text={detail.latest_reply_preview} error={detail.latest_error} />
-      <ContextPackPanel pack={detail.context_pack} />
-      <ArtifactChecks checks={detail.artifact_checks || []} />
-      <Timeline steps={detail.steps} />
-      <Artifacts detail={detail} submitting={props.submitting} onReviseDocument={props.onReviseDocument} onReviseSlides={props.onReviseSlides} />
-      <Confirmations detail={detail} submitting={props.submitting} onConfirm={props.onConfirm} />
+      <ReplyPreview text={detail.latest_reply_preview} error={detail.latest_error} toggle={sectionToggle('reply-preview')} />
+      <ContextPackPanel pack={detail.context_pack} toggle={sectionToggle('context-pack')} />
+      <ArtifactChecks checks={detail.artifact_checks || []} toggle={sectionToggle('artifact-checks')} />
+      <Timeline steps={detail.steps} toggle={sectionToggle('timeline')} />
+      <Artifacts detail={detail} submitting={props.submitting} onReviseDocument={props.onReviseDocument} onReviseSlides={props.onReviseSlides} toggle={sectionToggle('artifacts')} />
+      <Confirmations detail={detail} submitting={props.submitting} onConfirm={props.onConfirm} toggle={sectionToggle('confirmations')} />
     </div>
   );
 }
@@ -402,20 +420,22 @@ function NextActions({
   submitting,
   onBundle,
   onReviseSlides,
+  toggle,
 }: {
   bundle: NextActionBundle | null;
   detail: TaskRunDetail;
   submitting: string;
   onBundle: () => void;
   onReviseSlides: (artifactId: string, instruction: string) => void;
+  toggle: SectionToggleProps;
 }) {
   const items = bundle?.recommendations || [];
   const slidesArtifact = detail.artifacts.find((artifact) => artifact.artifact_type === 'slides_package');
   if (!items.length) return null;
   return (
     <section className="section-block">
-      <SectionTitle icon={<Sparkles size={17} />} title="推荐下一步" count={items.length} />
-      <div className="next-action-grid">
+      <SectionTitle icon={<Sparkles size={17} />} title="推荐下一步" count={items.length} collapsed={toggle.collapsed} onToggle={toggle.onToggle} />
+      {!toggle.collapsed && <div className="next-action-grid">
         {items.map((item) => {
           const command = item.command?.trim() || '';
           const canBundle = item.action_type === 'bundle_delivery' && detail.artifacts.length > 0;
@@ -424,7 +444,7 @@ function NextActions({
             <div className="next-action" key={item.action_id}>
               <div className="row-between">
                 <b>{item.title}</b>
-                <Badge tone={item.priority === 'high' ? 'wait' : 'muted'}>{item.priority}</Badge>
+                <Badge tone={item.priority === 'high' ? 'wait' : 'muted'}>{priorityLabel(item.priority)}</Badge>
               </div>
               {item.reason && <p>{item.reason}</p>}
               {command && <code>{command}</code>}
@@ -454,30 +474,34 @@ function NextActions({
             </div>
           );
         })}
-      </div>
+      </div>}
     </section>
   );
 }
 
-function ContextPackPanel({ pack }: { pack?: ContextPackRecord | null }) {
+function ContextPackPanel({ pack, toggle }: { pack?: ContextPackRecord | null; toggle: SectionToggleProps }) {
   if (!pack) return null;
   const usedSources = pack.used_sources || [];
   const missingItems = pack.missing_items || [];
   const suggestions = pack.suggested_inputs || [];
   return (
     <section className="section-block">
-      <SectionTitle icon={<Gauge size={17} />} title="上下文依据" />
-      <p className="context-summary">{pack.summary}</p>
-      <div className="context-pack-grid">
-        <ContextPackColumn title="已使用材料" items={usedSources} empty="暂无可追溯材料" />
-        <ContextPackColumn title="建议补充" items={missingItems} empty="上下文较完整" />
-      </div>
-      {suggestions.length > 0 && (
-        <div className="context-suggestions">
-          {suggestions.slice(0, 4).map((item, index) => (
-            <span key={index}>{item}</span>
-          ))}
-        </div>
+      <SectionTitle icon={<Gauge size={17} />} title="上下文依据" collapsed={toggle.collapsed} onToggle={toggle.onToggle} />
+      {!toggle.collapsed && (
+        <>
+          <p className="context-summary">{pack.summary}</p>
+          <div className="context-pack-grid">
+            <ContextPackColumn title="已使用材料" items={usedSources} empty="暂无可追溯材料" />
+            <ContextPackColumn title="建议补充" items={missingItems} empty="上下文较完整" />
+          </div>
+          {suggestions.length > 0 && (
+            <div className="context-suggestions">
+              {suggestions.slice(0, 4).map((item, index) => (
+                <span key={index}>{item}</span>
+              ))}
+            </div>
+          )}
+        </>
       )}
     </section>
   );
@@ -516,49 +540,57 @@ function ContextPackColumn({
   );
 }
 
-function ArtifactChecks({ checks }: { checks: ArtifactCheckRecord[] }) {
+function ArtifactChecks({ checks, toggle }: { checks: ArtifactCheckRecord[]; toggle: SectionToggleProps }) {
   if (!checks.length) return null;
   const ready = checks.filter((item) => item.status === 'ready').length;
   const sceneChecks = checks.filter((item) => item.category === 'scene_c' || item.category === 'scene_d' || item.category === 'scene_cd');
   return (
     <section className="section-block">
-      <SectionTitle icon={<CheckCircle2 size={17} />} title="验收检查" count={checks.length} />
-      <div className="check-summary-row">
-        <Badge tone={ready === checks.length ? 'ok' : 'wait'}>{ready}/{checks.length} 已满足</Badge>
-        <span>场景 C/D：{sceneChecks.filter((item) => item.status === 'ready').length}/{sceneChecks.length} 已满足</span>
-      </div>
-      <div className="check-grid">
-        {checks.map((check) => (
-          <article className={`check-card tone-${artifactCheckTone(check.status)}`} key={check.key}>
-            <div className="check-card-head">
-              {artifactCheckIcon(check.status)}
-              <b>{check.label}</b>
-              <Badge tone={artifactCheckTone(check.status)}>{artifactCheckLabel(check.status)}</Badge>
-            </div>
-            <p>{check.detail || '等待检查结果'}</p>
-          </article>
-        ))}
-      </div>
+      <SectionTitle icon={<CheckCircle2 size={17} />} title="验收检查" count={checks.length} collapsed={toggle.collapsed} onToggle={toggle.onToggle} />
+      {!toggle.collapsed && (
+        <>
+          <div className="check-summary-row">
+            <Badge tone={ready === checks.length ? 'ok' : 'wait'}>{ready}/{checks.length} 已满足</Badge>
+            <span>场景 C/D：{sceneChecks.filter((item) => item.status === 'ready').length}/{sceneChecks.length} 已满足</span>
+          </div>
+          <div className="check-grid">
+            {checks.map((check) => (
+              <article className={`check-card tone-${artifactCheckTone(check.status)}`} key={check.key}>
+                <div className="check-card-head">
+                  {artifactCheckIcon(check.status)}
+                  <b>{check.label}</b>
+                  <Badge tone={artifactCheckTone(check.status)}>{artifactCheckLabel(check.status)}</Badge>
+                </div>
+                <p>{check.detail || '等待检查结果'}</p>
+              </article>
+            ))}
+          </div>
+        </>
+      )}
     </section>
   );
 }
 
-function ReplyPreview({ text, error }: { text?: string | null; error?: string | null }) {
+function ReplyPreview({ text, error, toggle }: { text?: string | null; error?: string | null; toggle: SectionToggleProps }) {
   if (!text && !error) return null;
   return (
     <section className="section-block">
-      <SectionTitle icon={<MessageSquare size={17} />} title="最近回复" />
-      {text && <pre className="reply-preview">{text}</pre>}
-      {error && <div className="error-box">{error}</div>}
+      <SectionTitle icon={<MessageSquare size={17} />} title="最近回复" collapsed={toggle.collapsed} onToggle={toggle.onToggle} />
+      {!toggle.collapsed && (
+        <>
+          {text && <pre className="reply-preview">{text}</pre>}
+          {error && <div className="error-box">{error}</div>}
+        </>
+      )}
     </section>
   );
 }
 
-function Timeline({ steps }: { steps: TaskRunStepRecord[] }) {
+function Timeline({ steps, toggle }: { steps: TaskRunStepRecord[]; toggle: SectionToggleProps }) {
   return (
     <section className="section-block">
-      <SectionTitle icon={<Route size={17} />} title="执行步骤" count={steps.length} />
-      {steps.length === 0 ? <EmptyState title="暂无步骤" /> : (
+      <SectionTitle icon={<Route size={17} />} title="执行步骤" count={steps.length} collapsed={toggle.collapsed} onToggle={toggle.onToggle} />
+      {!toggle.collapsed && (steps.length === 0 ? <EmptyState title="暂无步骤" /> : (
         <div className="step-list">
           {steps.map((step) => (
             <div className="step-row" key={step.step_key}>
@@ -569,7 +601,7 @@ function Timeline({ steps }: { steps: TaskRunStepRecord[] }) {
                   <Badge tone={statusTone(step.status)}>{statusLabel(step.status)}</Badge>
                 </div>
                 <div className="meta-row">
-                  <span>{step.step_type}</span>
+                  <span>{stepTypeLabel(step.step_type)}</span>
                   <Dot />
                   <span>{shortTime(step.updated_at || step.finished_at || step.created_at)}</span>
                 </div>
@@ -578,7 +610,7 @@ function Timeline({ steps }: { steps: TaskRunStepRecord[] }) {
             </div>
           ))}
         </div>
-      )}
+      ))}
     </section>
   );
 }
@@ -588,18 +620,19 @@ function Artifacts(props: {
   submitting: string;
   onReviseDocument: (instruction: string, documentId?: string) => void;
   onReviseSlides: (artifactId: string, instruction: string) => void;
+  toggle: SectionToggleProps;
 }) {
   const { detail } = props;
   return (
     <section className="section-block">
-      <SectionTitle icon={<Boxes size={17} />} title="产物" count={detail.artifacts.length} />
-      {detail.artifacts.length === 0 ? <EmptyState title="暂无产物" /> : (
+      <SectionTitle icon={<Boxes size={17} />} title="产物" count={detail.artifacts.length} collapsed={props.toggle.collapsed} onToggle={props.toggle.onToggle} />
+      {!props.toggle.collapsed && (detail.artifacts.length === 0 ? <EmptyState title="暂无产物" /> : (
         <div className="artifact-grid">
           {detail.artifacts.map((artifact) => (
             <ArtifactCard key={artifact.artifact_id} artifact={artifact} detail={detail} submitting={props.submitting} onReviseDocument={props.onReviseDocument} onReviseSlides={props.onReviseSlides} />
           ))}
         </div>
-      )}
+      ))}
     </section>
   );
 }
@@ -740,13 +773,17 @@ function DeliveryBundlePreview({ preview }: { preview: JsonMap }) {
 
 function CanvasArtifactPreview({ preview }: { preview: JsonMap }) {
   const shapes = Array.isArray(preview.shapes) ? preview.shapes.filter((item) => asMap(item)).map((item) => item as JsonMap) : [];
+  const nodes = shapes.filter((shape) => stringValue(shape.type) !== 'arrow');
+  const arrows = shapes.filter((shape) => stringValue(shape.type) === 'arrow');
   const summary = asMap(preview.summary);
-  const nodeCount = numberValue(summary?.node_count) || shapes.filter((shape) => stringValue(shape.type) !== 'arrow').length;
-  const arrowCount = numberValue(summary?.arrow_count) || shapes.filter((shape) => stringValue(shape.type) === 'arrow').length;
+  const nodeCount = numberValue(summary?.node_count) || nodes.length;
+  const arrowCount = numberValue(summary?.arrow_count) || arrows.length;
   const groups = Array.isArray(summary?.groups)
     ? summary.groups.map(String).filter(Boolean)
-    : [...new Set(shapes.map((shape) => stringValue(shape.group)).filter(Boolean))];
+    : [...new Set(nodes.map((shape) => stringValue(shape.group)).filter(Boolean))];
   const template = stringValue(preview.template || summary?.template) || 'flow';
+  const view = canvasViewBox(nodes);
+  const nodeById = new Map(nodes.map((node, index) => [stringValue(node.id) || `node-${index}`, node]));
   return (
     <div className="canvas-preview">
       <div className="rehearsal-metrics">
@@ -755,11 +792,55 @@ function CanvasArtifactPreview({ preview }: { preview: JsonMap }) {
         <span><Route size={15} />{arrowCount} 连线</span>
       </div>
       {groups.length > 0 && <p className="muted-text">分组：{groups.slice(0, 6).join('、')}</p>}
-      <div className="mini-list">
-        {shapes.filter((shape) => stringValue(shape.type) !== 'arrow').slice(0, 4).map((shape, index) => (
-          <span key={index}>{stringValue(shape.group) ? `${stringValue(shape.group)} · ` : ''}{String(shape.text || `节点 ${index + 1}`)}</span>
-        ))}
-      </div>
+      {nodes.length > 0 ? (
+        <div className="canvas-inline-board">
+          <svg viewBox={`0 0 ${view.width} ${view.height}`} role="img" aria-label={stringValue(preview.title) || 'Canvas 预览'}>
+            <defs>
+              <marker id="inline-canvas-arrow" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto">
+                <path d="M0,0 L10,4 L0,8 Z" fill="#2f7f8a" />
+              </marker>
+            </defs>
+            <rect width="100%" height="100%" rx="14" fill="#f8fbfc" />
+            {arrows.map((arrow, index) => {
+              const source = nodeById.get(stringValue(arrow.from));
+              const target = nodeById.get(stringValue(arrow.to));
+              if (!source || !target) return null;
+              const sourceBox = canvasNodeBox(source, view);
+              const targetBox = canvasNodeBox(target, view);
+              const x1 = sourceBox.x + sourceBox.w;
+              const y1 = sourceBox.y + sourceBox.h / 2;
+              const x2 = targetBox.x;
+              const y2 = targetBox.y + targetBox.h / 2;
+              const label = stringValue(arrow.label);
+              return (
+                <g key={stringValue(arrow.id) || `arrow-${index}`}>
+                  <line x1={x1} y1={y1} x2={x2} y2={y2} stroke={hexColor(arrow.color, '#2f7f8a')} strokeWidth="2.5" markerEnd="url(#inline-canvas-arrow)" />
+                  {label && <text className="canvas-arrow-label" x={(x1 + x2) / 2} y={(y1 + y2) / 2 - 8} textAnchor="middle">{label}</text>}
+                </g>
+              );
+            })}
+            {nodes.map((node, index) => {
+              const box = canvasNodeBox(node, view);
+              const group = stringValue(node.group);
+              const text = stringValue(node.text) || `节点 ${index + 1}`;
+              const lines = wrapCanvasText(text, Math.max(8, Math.floor(box.w / 13)), group ? 3 : 4);
+              return (
+                <g key={stringValue(node.id) || `node-${index}`}>
+                  <rect x={box.x} y={box.y} width={box.w} height={box.h} rx="8" fill={hexColor(node.color, '#eaf5ff')} stroke={hexColor(node.stroke, '#5a9fd6')} strokeWidth="2" />
+                  {group && <text className="canvas-group-label" x={box.x + 12} y={box.y + 18}>{group}</text>}
+                  <text className="canvas-node-label" x={box.x + 12} y={box.y + (group ? 42 : 34)}>
+                    {lines.map((line, lineIndex) => (
+                      <tspan key={lineIndex} x={box.x + 12} dy={lineIndex === 0 ? 0 : 18}>{line}</tspan>
+                    ))}
+                  </text>
+                </g>
+              );
+            })}
+          </svg>
+        </div>
+      ) : (
+        <EmptyState title="暂无可渲染节点" />
+      )}
     </div>
   );
 }
@@ -795,8 +876,8 @@ function SlidesRehearsalPreview({
       </div>
       {(missingNotes.length > 0 || denseSlides.length > 0) && (
         <div className="rehearsal-alerts">
-          {missingNotes.length > 0 && <span>缺少讲稿：P{missingNotes.join('、P')}</span>}
-          {denseSlides.length > 0 && <span>内容偏密：P{denseSlides.join('、P')}</span>}
+          {missingNotes.length > 0 && <span>缺少讲稿：第 {missingNotes.join('、第 ')} 页</span>}
+          {denseSlides.length > 0 && <span>内容偏密：第 {denseSlides.join('、第 ')} 页</span>}
         </div>
       )}
       <div className="slide-quick-list">
@@ -835,7 +916,7 @@ function SlideQuickRevisionRow({
   return (
     <div className="slide-quick-row">
       <div className="slide-quick-main">
-        <b>P{page}. {title}</b>
+        <b>第 {page} 页：{title}</b>
         <span>{notes ? notes.slice(0, 54) : '待补讲者备注'}{bulletCount > 0 ? ` · ${bulletCount} 条要点` : ''}</span>
       </div>
       <div className="slide-quick-actions">
@@ -857,11 +938,12 @@ function Confirmations(props: {
   detail: TaskRunDetail;
   submitting: string;
   onConfirm: (confirmation: ConfirmationRequestRecord, option: string) => void;
+  toggle: SectionToggleProps;
 }) {
   return (
     <section className="section-block">
-      <SectionTitle icon={<CheckCircle2 size={17} />} title="确认节点" count={props.detail.confirmations.length} />
-      {props.detail.confirmations.length === 0 ? <EmptyState title="暂无确认节点" /> : (
+      <SectionTitle icon={<CheckCircle2 size={17} />} title="确认节点" count={props.detail.confirmations.length} collapsed={props.toggle.collapsed} onToggle={props.toggle.onToggle} />
+      {!props.toggle.collapsed && (props.detail.confirmations.length === 0 ? <EmptyState title="暂无确认节点" /> : (
         <div className="confirmation-list">
           {props.detail.confirmations.map((confirmation) => (
             <div className="confirmation-row" key={confirmation.confirmation_id}>
@@ -879,7 +961,7 @@ function Confirmations(props: {
             </div>
           ))}
         </div>
-      )}
+      ))}
     </section>
   );
 }
@@ -957,8 +1039,35 @@ function StatsStrip({ runs }: { runs: TaskRunSummary[] }) {
   );
 }
 
-function SectionTitle({ icon, title, count }: { icon: React.ReactNode; title: string; count?: number }) {
-  return <div className="section-title">{icon}<h3>{title}</h3>{typeof count === 'number' && <span>{count}</span>}</div>;
+function SectionTitle({
+  icon,
+  title,
+  count,
+  collapsed,
+  onToggle,
+}: {
+  icon: React.ReactNode;
+  title: string;
+  count?: number;
+  collapsed?: boolean;
+  onToggle?: () => void;
+}) {
+  const content = (
+    <>
+      {icon}
+      <h3>{title}</h3>
+      {typeof count === 'number' && <span>{count}</span>}
+      {onToggle && (collapsed ? <ChevronRight className="collapse-icon" size={16} /> : <ChevronDown className="collapse-icon" size={16} />)}
+    </>
+  );
+  if (onToggle) {
+    return (
+      <button className="section-title section-toggle" type="button" onClick={onToggle} aria-expanded={!collapsed}>
+        {content}
+      </button>
+    );
+  }
+  return <div className="section-title">{content}</div>;
 }
 
 function PanelHeading({ title, subtitle }: { title: string; subtitle: string }) {
@@ -1024,7 +1133,7 @@ function slideRevisionInstruction(kind: 'notes' | 'judge' | 'concise', page: num
   if (kind === 'judge') {
     return `请把第 ${page} 页「${title}」改成评委视角，突出赛题价值、完成度和验收证据。`;
   }
-  return `请精简第 ${page} 页「${title}」的要点，保留最多 4 条 bullet，并保持讲者备注可用。`;
+  return `请精简第 ${page} 页「${title}」的要点，保留最多 4 条，并保持讲者备注可用。`;
 }
 
 function canvasTemplateLabel(template: string) {
@@ -1153,6 +1262,67 @@ function numberValue(value: unknown): number {
     return Number.isFinite(parsed) ? Math.max(parsed, 0) : 0;
   }
   return 0;
+}
+
+function canvasViewBox(nodes: JsonMap[]) {
+  if (!nodes.length) return { width: 640, height: 360, offsetX: 40, offsetY: 40 };
+  const boxes = nodes.map((node) => ({
+    x: numberValue(node.x) || 80,
+    y: numberValue(node.y) || 140,
+    w: numberValue(node.w || node.width) || 168,
+    h: numberValue(node.h || node.height) || 72,
+  }));
+  const minX = Math.min(...boxes.map((box) => box.x));
+  const minY = Math.min(...boxes.map((box) => box.y));
+  const maxX = Math.max(...boxes.map((box) => box.x + box.w));
+  const maxY = Math.max(...boxes.map((box) => box.y + box.h));
+  return {
+    width: Math.max(640, maxX - minX + 80),
+    height: Math.max(360, maxY - minY + 80),
+    offsetX: 40 - minX,
+    offsetY: 40 - minY,
+  };
+}
+
+function canvasNodeBox(node: JsonMap, view: { offsetX: number; offsetY: number }) {
+  return {
+    x: (numberValue(node.x) || 80) + view.offsetX,
+    y: (numberValue(node.y) || 140) + view.offsetY,
+    w: numberValue(node.w || node.width) || 168,
+    h: numberValue(node.h || node.height) || 72,
+  };
+}
+
+function hexColor(value: unknown, fallback: string): string {
+  const text = stringValue(value);
+  return /^#[0-9a-f]{6}$/i.test(text) ? text : fallback;
+}
+
+function wrapCanvasText(text: string, maxChars: number, maxLines: number): string[] {
+  const source = text.trim();
+  if (!source) return [''];
+  const lines: string[] = [];
+  let current = '';
+  for (const char of source) {
+    const next = `${current}${char}`;
+    if (current && visualLength(next) > maxChars) {
+      lines.push(current);
+      current = char;
+      if (lines.length >= maxLines) break;
+    } else {
+      current = next;
+    }
+  }
+  if (lines.length < maxLines && current) lines.push(current);
+  if (lines.length > maxLines) lines.length = maxLines;
+  if (lines.length && source !== lines.join('')) {
+    lines[lines.length - 1] = `${lines[lines.length - 1].slice(0, Math.max(1, maxChars - 1))}…`;
+  }
+  return lines;
+}
+
+function visualLength(text: string): number {
+  return [...text].reduce((sum, char) => sum + (char.charCodeAt(0) < 128 ? 1 : 2), 0);
 }
 
 function confirmationOptions(confirmation: ConfirmationRequestRecord): string[] {

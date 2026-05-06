@@ -94,6 +94,55 @@ class TeamMemoryTests(unittest.TestCase):
         self.assertEqual(len(tasks), 1)
         self.assertEqual(tasks[0].owner, "张三")
 
+    def test_lifecycle_context_keeps_discussion_before_task_snapshot(self) -> None:
+        episode = self.service.ensure_active_episode("oc_lifecycle_context")
+        self.service.save_user_message(
+            session_id="oc_lifecycle_context",
+            message_id="msg_req_1",
+            sender_id="u1",
+            content="我们要做校园活动报名系统，目标用户是学生、社团负责人和学院老师。",
+            episode_id=episode.id,
+            embed=False,
+        )
+        self.service.save_round(
+            session_id="oc_lifecycle_context",
+            analysis=AnalyzeResponse(
+                session_id="oc_lifecycle_context",
+                summary="已整理实施任务。",
+                tasks=[
+                    TaskItem(
+                        title="前端页面开发",
+                        owner="张三",
+                        priority="medium",
+                        due_date="TBD",
+                        status="draft",
+                        notes="实施计划",
+                    )
+                ],
+                risks=[],
+                next_actions=[],
+                agent_traces=[AgentTrace(agent="planner", summary="ok")],
+            ),
+            episode_id=episode.id,
+            embed=False,
+        )
+
+        lifecycle_context = self.service.build_workspace_context(
+            "oc_lifecycle_context",
+            profile="lifecycle",
+            episode_id=episode.id,
+        )
+        task_context = self.service.build_workspace_context(
+            "oc_lifecycle_context",
+            profile="task",
+            episode_id=episode.id,
+        )
+
+        self.assertIn("[近期群聊讨论]", lifecycle_context)
+        self.assertIn("[实施计划参考]", lifecycle_context)
+        self.assertLess(lifecycle_context.index("[近期群聊讨论]"), lifecycle_context.index("[实施计划参考]"))
+        self.assertLess(task_context.index("[当前任务快照]"), task_context.index("[近期群聊讨论]"))
+
     def test_recalled_message_is_removed_from_context_and_chunks(self) -> None:
         episode = self.service.ensure_active_episode("oc_group_recall")
         self.service.save_user_message(

@@ -170,6 +170,12 @@ class _DashboardPageState extends State<DashboardPage> {
         item.sessionLabel ?? '',
         item.intent ?? '',
         localizeIntent(item.intent),
+        item.runKind ?? '',
+        localizeRunKind(item.runKind),
+        item.primaryObject ?? '',
+        localizeIntent(item.primaryObject),
+        item.lifecycleStage ?? '',
+        localizeLifecycleStage(item.lifecycleStage),
         item.stage,
         localizeStage(item.stage),
         item.status,
@@ -288,7 +294,7 @@ class _HeroPanel extends StatelessWidget {
                 children: [
                   _StatusPill(
                     label:
-                        '任务流 ${_connectionLabel(controller.taskConnectionState)}',
+                        '运行流 ${_connectionLabel(controller.taskConnectionState)}',
                     accent: _connectionAccent(controller.taskConnectionState),
                   ),
                   _StatusPill(
@@ -347,7 +353,7 @@ class _HeroPanel extends StatelessWidget {
                       ? Icons.hourglass_top_rounded
                       : Icons.sync_rounded,
                 ),
-                label: Text(controller.isLoadingList ? '同步中...' : '刷新任务'),
+                label: Text(controller.isLoadingList ? '同步中...' : '刷新运行'),
                 style: OutlinedButton.styleFrom(
                   foregroundColor: Colors.white,
                   disabledForegroundColor: Colors.white70,
@@ -399,14 +405,14 @@ class _TaskListPanel extends StatelessWidget {
   Widget build(BuildContext context) {
     final statusOptions = _buildStatusOptions(controller.taskRuns);
     return _PanelShell(
-      title: '任务运行面板',
-      subtitle: '展示当前会话里的任务实例、阶段和运行状态。',
+      title: '协作运行面板',
+      subtitle: '展示当前会话里的 Agent 请求、产物、阶段和确认节点。',
       child: controller.isLoadingList && controller.taskRuns.isEmpty
           ? const Center(child: CircularProgressIndicator())
           : controller.taskRuns.isEmpty
           ? const _EmptyState(
-              title: '还没有任务运行数据',
-              message: '先从飞书侧触发一次 @机器人 请求，工作台就会开始出现任务轨迹。',
+              title: '还没有协作运行数据',
+              message: '先从飞书侧触发一次 @机器人 请求，工作台就会开始出现 Agent 运行轨迹。',
             )
           : items.isEmpty
           ? const _EmptyState(
@@ -493,6 +499,18 @@ class _TaskListPanel extends StatelessWidget {
                                 label: localizeIntent(item.intent),
                                 color: const Color(0xFF116A7B),
                               ),
+                            if ((item.runKind ?? '').isNotEmpty)
+                              _Badge(
+                                label: localizeRunKind(item.runKind),
+                                color: const Color(0xFF6D5BD0),
+                              ),
+                            if ((item.lifecycleStage ?? '').isNotEmpty)
+                              _Badge(
+                                label: localizeLifecycleStage(
+                                  item.lifecycleStage,
+                                ),
+                                color: const Color(0xFF2F855A),
+                              ),
                           ],
                         ),
                         const SizedBox(height: 12),
@@ -578,7 +596,7 @@ class _TaskQuickStats extends StatelessWidget {
       children: [
         Expanded(
           child: _StatCard(
-            label: '全部任务',
+            label: '全部运行',
             value: '$total',
             accent: const Color(0xFF213848),
           ),
@@ -776,7 +794,7 @@ class _SessionCard extends StatelessWidget {
               runSpacing: 6,
               children: [
                 _TinyPill(
-                  label: '${summary.totalCount} 任务',
+                  label: '${summary.totalCount} 运行',
                   color: const Color(0xFF213848),
                 ),
                 if (summary.runningCount > 0)
@@ -893,12 +911,12 @@ class _DetailPanel extends StatelessWidget {
   Widget build(BuildContext context) {
     final detail = controller.selectedTaskRun;
     return _PanelShell(
-      title: '任务详情与产物',
+      title: '协作运行详情与产物',
       subtitle: '步骤时间线、生成产物、确认请求都会从这里实时更新。',
       child: detail == null
           ? const _EmptyState(
-              title: '选择一个任务运行',
-              message: '左侧点开任意任务后，这里会展示步骤、产物和确认节点。',
+              title: '选择一个协作运行',
+              message: '左侧点开任意运行后，这里会展示步骤、产物和确认节点。',
             )
           : controller.isLoadingDetail
           ? const Center(child: CircularProgressIndicator())
@@ -1032,6 +1050,16 @@ class _SummaryCard extends StatelessWidget {
                 _Badge(
                   label: localizeIntent(detail.intent),
                   color: const Color(0xFF8CCDEB),
+                ),
+              if ((detail.runKind ?? '').isNotEmpty)
+                _Badge(
+                  label: localizeRunKind(detail.runKind),
+                  color: const Color(0xFFB8A1FF),
+                ),
+              if ((detail.lifecycleStage ?? '').isNotEmpty)
+                _Badge(
+                  label: localizeLifecycleStage(detail.lifecycleStage),
+                  color: const Color(0xFF73C8A9),
                 ),
             ],
           ),
@@ -1427,7 +1455,7 @@ class _CurrentDocumentCard extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      '用一句自然语言描述要怎么改。若当前会话里已有多份文档，可以先选定目标文档，再生成新的修订任务。',
+                      '用一句自然语言描述要怎么改。若当前会话里已有多份文档，可以先选定目标文档，再生成新的修订运行。',
                       style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                         color: const Color(0xFF72808A),
                         height: 1.45,
@@ -1516,7 +1544,7 @@ class _CurrentDocumentCard extends StatelessWidget {
       }
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(SnackBar(content: Text('已创建文档修订任务：${detail.title}')));
+      ).showSnackBar(SnackBar(content: Text('已创建文档修订运行：${detail.title}')));
     } catch (_) {
       if (!context.mounted) {
         return;
@@ -2641,7 +2669,7 @@ class _ArtifactTile extends StatelessWidget {
       if (context.mounted) {
         ScaffoldMessenger.of(
           context,
-        ).showSnackBar(const SnackBar(content: Text('演示稿修订任务已生成')));
+        ).showSnackBar(const SnackBar(content: Text('演示稿修订运行已生成')));
       }
     } finally {
       textController.dispose();
@@ -4770,7 +4798,7 @@ class _ConfirmationTile extends StatelessWidget {
               ),
               const SizedBox(height: 12),
               Text(
-                '确认后，工作台和后端任务运行态都会同步刷新。',
+                '确认后，工作台和后端协作运行态都会同步刷新。',
                 style: Theme.of(
                   context,
                 ).textTheme.bodySmall?.copyWith(color: const Color(0xFF72808A)),
@@ -5349,7 +5377,7 @@ List<_StageItem> _buildStageItems(TaskRunDetail detail) {
     const _StageItem(
       key: 'queued',
       label: '请求进入',
-      caption: '接收消息触发并建立任务实例',
+      caption: '接收消息触发并建立协作运行',
       icon: Icons.inbox_rounded,
       state: _StageVisualState.pending,
     ),
@@ -5383,7 +5411,7 @@ List<_StageItem> _buildStageItems(TaskRunDetail detail) {
     ),
     const _StageItem(
       key: 'delivered',
-      label: '任务交付',
+      label: '产物交付',
       caption: '工作流完成并同步结果',
       icon: Icons.rocket_launch_rounded,
       state: _StageVisualState.pending,
@@ -5432,7 +5460,7 @@ String _buildActionHint(TaskRunDetail detail) {
     return '工作流已经暂停在确认节点，建议先在下方“确认节点”区域给出下一步选择。';
   }
   if (detail.status == 'failed') {
-    return '当前任务执行失败，建议先查看执行步骤里的报错信息，再决定是否重试或改写请求。';
+    return '当前协作运行执行失败，建议先查看执行步骤里的报错信息，再决定是否重试或改写请求。';
   }
   if (detail.status == 'completed') {
     if (detail.intent == 'doc') {
@@ -5441,12 +5469,12 @@ String _buildActionHint(TaskRunDetail detail) {
     if (detail.intent == 'slides') {
       return '演示稿内容包已经生成，建议进入排练模式检查页面顺序、重点表达和补充素材。';
     }
-    return '当前任务已经完成，可以继续发起下一轮请求，或者围绕现有产物做确认和迭代。';
+    return '当前协作运行已经完成，可以继续发起下一轮请求，或者围绕现有产物做确认和迭代。';
   }
   if (detail.status == 'running') {
-    return '任务还在执行中，建议重点关注“执行阶段”和“执行步骤”的实时更新。';
+    return '协作运行还在执行中，建议重点关注“执行阶段”和“执行步骤”的实时更新。';
   }
-  return '当前任务已进入工作台，可继续观察状态变化或从飞书侧补充上下文。';
+  return '当前协作运行已进入工作台，可继续观察状态变化或从飞书侧补充上下文。';
 }
 
 enum _StageVisualState { pending, current, completed }

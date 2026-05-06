@@ -64,10 +64,12 @@ def _load_sources(
     context: ContextPack,
     session_id: str,
 ) -> dict[str, Any]:
+    command = WorkspaceCommand.model_validate(state.get("command") or {})
     loaders: dict[str, Callable[[], Any]] = {
-        "tasks": lambda: _load_tasks(workflow, message),
         "recent_messages": lambda: _load_recent_messages(workflow, state, message, session_id),
     }
+    if _should_load_task_snapshot(command):
+        loaders["tasks"] = lambda: _load_tasks(workflow, message)
     if context.current_document is None:
         loaders["current_document"] = lambda: _load_current_document(workflow, session_id)
     artifacts_loader = getattr(workflow, "graph_context_artifacts_loader", None)
@@ -112,7 +114,6 @@ def _load_sources(
         errors.append({"node": "graph.context_loader", "field": field, "error": error})
         source_traces.append({"field": field, "status": "timeout", "error": error})
     executor.shutdown(wait=False, cancel_futures=True)
-    command = WorkspaceCommand.model_validate(state.get("command") or {})
     source_docs = _source_docs(values["current_document"], context.source_docs)
     output_requirements = _output_requirements(command, context)
     missing_fields = _missing_fields(command, context, values)
@@ -124,6 +125,24 @@ def _load_sources(
         "errors": errors,
         "source_traces": sorted(source_traces, key=lambda item: str(item.get("field") or "")),
     }
+
+
+def _should_load_task_snapshot(command: WorkspaceCommand) -> bool:
+    artifact_routes = {"doc", "slides", "canvas", "delivery"}
+    artifact_outputs = {"doc", "slides", "canvas"}
+    if command.object in {"task", "tasks"}:
+        return True
+    if command.route in artifact_routes:
+        return False
+    if (
+        command.operation in {"generate", "create", "revise", "update"}
+        and (
+            command.object in artifact_routes | {"workspace"}
+            or any(output in artifact_outputs for output in command.requested_outputs)
+        )
+    ):
+        return False
+    return True
 
 
 def _timed_load(field: str, loader: Callable[[], Any]) -> dict[str, Any]:
