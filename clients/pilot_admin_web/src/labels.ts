@@ -26,6 +26,14 @@ export function stageLabel(value?: string | null): string {
     failed: '失败',
     awaiting_user_confirmation: '等待确认',
     recommendation: '推荐下一步',
+    offline_document_downloading: '下载离线文档',
+    offline_document_parsing: '解析离线文档',
+    offline_document_confirmation: '等待离线合并确认',
+    offline_document_archiving: '暂存离线文档',
+    offline_document_applying: '应用离线文档',
+    offline_document_follow_up: '联动更新当前产物',
+    offline_document_duplicate: '识别重复上传',
+    offline_document_failed: '离线文档处理失败',
   };
   return map[value || ''] || '未知阶段';
 }
@@ -66,7 +74,6 @@ export function artifactLabel(value?: string | null): string {
     slides_package: 'PPT',
     slides: '演示稿',
     canvas: '画布',
-    delivery_bundle: '交付包',
     plan: '计划',
     note: '记录',
   };
@@ -134,7 +141,6 @@ function stepKeyTitle(value?: string | null): string {
     workspace_context: '构建协作上下文',
     response_generated: '生成处理结果',
     artifact_persisted: '记录协作产物',
-    delivery_bundle: '生成交付包',
   };
   if (map[key]) return map[key];
   if (key === 'graph.execution') return '流程编排完成';
@@ -167,7 +173,6 @@ function workerActionLabel(workerValue: string, operationValue?: string): string
     doc: '生成文档',
     slides: '生成演示稿',
     canvas: '生成画布',
-    delivery: '整理交付包',
     reply: '生成回复',
   };
   const reviseMap: Record<string, string> = {
@@ -191,7 +196,6 @@ function workerLabel(worker: string): string {
     doc: '文档处理',
     slides: '演示稿处理',
     canvas: '画布处理',
-    delivery: '交付整理',
     review: '质量复核',
     reply: '回复处理',
     help: '帮助说明',

@@ -14,7 +14,6 @@ import {
   Layers3,
   Loader2,
   MessageSquare,
-  PackageCheck,
   PlayCircle,
   Presentation,
   RefreshCw,
@@ -27,7 +26,6 @@ import {
 import {
   apiBaseUrl,
   artifactUrl,
-  bundleDelivery,
   confirmTaskRun,
   connectSocket,
   getRequirement,
@@ -54,9 +52,7 @@ import {
 } from './labels';
 import type {
   ArtifactRecord,
-  ArtifactCheckRecord,
   ConfirmationRequestRecord,
-  ContextPackItemRecord,
   ContextPackRecord,
   JsonMap,
   NextActionBundle,
@@ -459,7 +455,6 @@ export function App() {
               {requirementDetail ? (
                 <RequirementDetailCard
                   detail={requirementDetail}
-                  fallbackContextPack={detail?.requirement_id === requirementDetail.requirement_id ? detail.context_pack : null}
                 />
               ) : (
                 <section className="requirement-empty-panel">
@@ -514,7 +509,6 @@ export function App() {
                     recommendations={recommendations}
                     submitting={submitting}
                     showArtifacts={!requirementDetail}
-                    onBundle={() => runAction('bundle', () => bundleDelivery(detail.task_run_id))}
                     onConfirm={(confirmation, option) => runAction(`confirm:${confirmation.confirmation_id}`, () => confirmTaskRun(detail.task_run_id, confirmation.confirmation_id, option))}
                     onReviseDocument={(instruction, documentId) => runAction('revise-doc', () => reviseDocument(detail.task_run_id, instruction, documentId))}
                     onReviseSlides={(artifactId, instruction) => runAction(`revise-slides:${artifactId}`, () => reviseSlides(detail.task_run_id, instruction, artifactId))}
@@ -536,15 +530,12 @@ function TaskDetail(props: {
   recommendations: NextActionBundle | null;
   submitting: string;
   showArtifacts: boolean;
-  onBundle: () => void;
   onConfirm: (confirmation: ConfirmationRequestRecord, option: string) => void;
   onReviseDocument: (instruction: string, documentId?: string) => void;
   onReviseSlides: (artifactId: string, instruction: string) => void;
 }) {
   const { detail, recommendations } = props;
   const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>(DEFAULT_TASK_COLLAPSED);
-  const deliveryArtifact = detail.artifacts.find((artifact) => artifact.artifact_type === 'delivery_bundle' && artifact.url);
-  const deliveryUrl = deliveryArtifact?.url ? artifactUrl(deliveryArtifact.url) : '';
   useEffect(() => {
     setCollapsedSections(DEFAULT_TASK_COLLAPSED);
   }, [detail.task_run_id]);
@@ -574,27 +565,12 @@ function TaskDetail(props: {
           </div>
           {detail.latest_summary && <p className="summary-text">{detail.latest_summary}</p>}
         </div>
-        <div className="summary-actions">
-          <button className="primary-button" onClick={props.onBundle} disabled={!detail.artifacts.length || props.submitting === 'bundle'}>
-            {props.submitting === 'bundle' ? <Loader2 className="spin" size={17} /> : <PackageCheck size={17} />}
-            {deliveryArtifact ? '更新交付包' : '生成交付包'}
-          </button>
-          {deliveryUrl && (
-            <>
-              <a className="line-button" href={deliveryUrl} target="_blank" rel="noreferrer">
-                <PlayCircle size={16} />打开交付包
-              </a>
-              <CopyButton text={deliveryUrl} label="复制链接" />
-            </>
-          )}
-        </div>
       </section>
 
       <NextActions
         bundle={recommendations}
         detail={detail}
         submitting={props.submitting}
-        onBundle={props.onBundle}
         onReviseSlides={props.onReviseSlides}
         toggle={sectionToggle('next-actions')}
       />
@@ -612,18 +588,16 @@ function NextActions({
   bundle,
   detail,
   submitting,
-  onBundle,
   onReviseSlides,
   toggle,
 }: {
   bundle: NextActionBundle | null;
   detail: TaskRunDetail;
   submitting: string;
-  onBundle: () => void;
   onReviseSlides: (artifactId: string, instruction: string) => void;
   toggle: SectionToggleProps;
 }) {
-  const items = bundle?.recommendations || [];
+  const items = (bundle?.recommendations || []).filter((item) => item.action_type !== 'bundle_delivery');
   const slidesArtifact = detail.artifacts.find((artifact) => artifact.artifact_type === 'slides_package');
   if (!items.length) return null;
   return (
@@ -632,7 +606,6 @@ function NextActions({
       {!toggle.collapsed && <div className="next-action-grid">
         {items.map((item) => {
           const command = item.command?.trim() || '';
-          const canBundle = item.action_type === 'bundle_delivery' && detail.artifacts.length > 0;
           const canReviseSlides = item.action_type === 'revise_slides' && Boolean(slidesArtifact?.artifact_id && command);
           return (
             <div className="next-action" key={item.action_id}>
@@ -643,12 +616,6 @@ function NextActions({
               {item.reason && <p>{item.reason}</p>}
               {command && <code>{command}</code>}
               <div className="button-row">
-                {canBundle && (
-                  <button className="line-button" disabled={submitting === 'bundle'} onClick={onBundle}>
-                    {submitting === 'bundle' ? <Loader2 className="spin" size={15} /> : <PackageCheck size={15} />}
-                    打包
-                  </button>
-                )}
                 {canReviseSlides && slidesArtifact && (
                   <button
                     className="line-button"
@@ -825,10 +792,10 @@ function Artifacts(props: {
   const { detail } = props;
   return (
     <section className="section-block">
-      <SectionTitle icon={<Boxes size={17} />} title="产物" count={detail.artifacts.length} collapsed={props.toggle.collapsed} onToggle={props.toggle.onToggle} />
-      {!props.toggle.collapsed && (detail.artifacts.length === 0 ? <EmptyState title="暂无产物" /> : (
+      <SectionTitle icon={<Boxes size={17} />} title="产物" count={detail.artifacts.filter((artifact) => artifact.artifact_type !== 'delivery_bundle').length} collapsed={props.toggle.collapsed} onToggle={props.toggle.onToggle} />
+      {!props.toggle.collapsed && (detail.artifacts.filter((artifact) => artifact.artifact_type !== 'delivery_bundle').length === 0 ? <EmptyState title="暂无产物" /> : (
         <div className="artifact-grid">
-          {detail.artifacts.map((artifact) => (
+          {detail.artifacts.filter((artifact) => artifact.artifact_type !== 'delivery_bundle').map((artifact) => (
             <ArtifactCard key={artifact.artifact_id} artifact={artifact} detail={detail} submitting={props.submitting} onReviseDocument={props.onReviseDocument} onReviseSlides={props.onReviseSlides} />
           ))}
         </div>
@@ -924,51 +891,7 @@ function ArtifactPreview({
   if (artifact.artifact_type === 'canvas') {
     return <CanvasArtifactPreview preview={preview} />;
   }
-  if (artifact.artifact_type === 'delivery_bundle') {
-    return <DeliveryBundlePreview preview={preview} />;
-  }
   return <pre className="json-snippet">{JSON.stringify(preview, null, 2).slice(0, 360)}</pre>;
-}
-
-function DeliveryBundlePreview({ preview }: { preview: JsonMap }) {
-  const checks = Array.isArray(preview.checks) ? preview.checks.map(asMap).filter((item): item is JsonMap => Boolean(item)) : [];
-  const summaries = Array.isArray(preview.artifact_summaries)
-    ? preview.artifact_summaries.map(asMap).filter((item): item is JsonMap => Boolean(item))
-    : [];
-  const contextPack = asMap(preview.context_pack);
-  const missingItems = Array.isArray(contextPack?.missing_items)
-    ? contextPack.missing_items.map(asMap).filter((item): item is JsonMap => Boolean(item))
-    : [];
-  const highlights = Array.isArray(preview.highlights) ? preview.highlights.map(String).filter(Boolean) : [];
-  const ready = checks.filter((item) => stringValue(item.status) === 'ready').length;
-  return (
-    <div className="delivery-preview">
-      <div className="rehearsal-metrics">
-        <span><PackageCheck size={15} />{ready}/{checks.length} 项验收</span>
-        <span><Layers3 size={15} />{summaries.length} 个交付物</span>
-        <span><Gauge size={15} />{missingItems.length} 项待补依据</span>
-      </div>
-      {highlights.length > 0 && (
-        <div className="mini-list">
-          {highlights.slice(0, 3).map((item, index) => <span key={index}>{item}</span>)}
-        </div>
-      )}
-      <div className="delivery-summary-list">
-        {summaries.slice(0, 4).map((item, index) => {
-          const metrics = Array.isArray(item.metrics) ? item.metrics.map(String).filter(Boolean) : [];
-          const warnings = Array.isArray(item.warnings) ? item.warnings.map(String).filter(Boolean) : [];
-          return (
-            <div className="delivery-summary-row" key={stringValue(item.artifact_id) || index}>
-              <b>{stringValue(item.label) || artifactLabel(stringValue(item.artifact_type))}</b>
-              <span>{stringValue(item.title) || '协作产物'}</span>
-              {metrics.length > 0 && <small>{metrics.slice(0, 3).join(' · ')}</small>}
-              {warnings.length > 0 && <em>{warnings[0]}</em>}
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
 }
 
 function CanvasArtifactPreview({ preview }: { preview: JsonMap }) {
@@ -1216,9 +1139,8 @@ function RequirementOverview(props: {
 
 function RequirementDetailCard(props: {
   detail: RequirementDetail;
-  fallbackContextPack?: ContextPackRecord | null;
 }) {
-  const { detail, fallbackContextPack } = props;
+  const { detail } = props;
   const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>(DEFAULT_REQUIREMENT_COLLAPSED);
   useEffect(() => {
     setCollapsedSections(DEFAULT_REQUIREMENT_COLLAPSED);
@@ -1252,55 +1174,9 @@ function RequirementDetailCard(props: {
         {detail.summary && <p className="context-summary">{detail.summary}</p>}
       </section>
       <RequirementSourceTrace detail={detail} toggle={sectionToggle('sources')} />
-      <RequirementContextPack detail={detail} fallbackPack={fallbackContextPack} toggle={sectionToggle('context-pack')} />
       <RequirementArtifactBoard detail={detail} toggle={sectionToggle('products')} />
-      <RequirementAcceptanceChecks detail={detail} toggle={sectionToggle('acceptance')} />
       <RequirementRecommendations detail={detail} toggle={sectionToggle('recommendations')} />
     </div>
-  );
-}
-
-function RequirementContextPack({
-  detail,
-  fallbackPack,
-  toggle,
-}: {
-  detail: RequirementDetail;
-  fallbackPack?: ContextPackRecord | null;
-  toggle: SectionToggleProps;
-}) {
-  const pack = requirementContextPack(detail) || fallbackPack || null;
-  if (!pack) {
-    return (
-      <section className="section-block requirement-context-block">
-        <SectionTitle icon={<Gauge size={17} />} title="上下文依据" collapsed={toggle.collapsed} onToggle={toggle.onToggle} />
-        {!toggle.collapsed && <EmptyState title="生成交付包后，这里会汇总需求级上下文依据。" />}
-      </section>
-    );
-  }
-  const usedSources = pack.used_sources || [];
-  const missingItems = pack.missing_items || [];
-  const suggestions = pack.suggested_inputs || [];
-  return (
-    <section className="section-block requirement-context-block">
-      <SectionTitle icon={<Gauge size={17} />} title="上下文依据" count={usedSources.length + missingItems.length} collapsed={toggle.collapsed} onToggle={toggle.onToggle} />
-      {!toggle.collapsed && (
-        <>
-          {pack.summary && <p className="context-summary">{pack.summary}</p>}
-          <div className="requirement-context-lanes">
-            <ContextPackLane title="已使用材料" items={usedSources} empty="暂无可追溯材料" />
-            <ContextPackLane title="建议补充" items={missingItems} empty="上下文较完整" />
-          </div>
-          {suggestions.length > 0 && (
-            <div className="context-suggestions">
-              {suggestions.slice(0, 4).map((item, index) => (
-                <span key={index}>{item}</span>
-              ))}
-            </div>
-          )}
-        </>
-      )}
-    </section>
   );
 }
 
@@ -1337,50 +1213,10 @@ function RequirementSourceTrace({ detail, toggle }: { detail: RequirementDetail;
   );
 }
 
-function RequirementAcceptanceChecks({ detail, toggle }: { detail: RequirementDetail; toggle: SectionToggleProps }) {
-  const checks = requirementAcceptanceChecks(detail);
-  if (!checks.length) {
-    return (
-      <section className="section-block requirement-check-block">
-        <SectionTitle icon={<CheckCircle2 size={17} />} title="需求验收" collapsed={toggle.collapsed} onToggle={toggle.onToggle} />
-        {!toggle.collapsed && <EmptyState title="生成交付包后，这里会汇总需求级验收状态" />}
-      </section>
-    );
-  }
-  const ready = checks.filter((item) => item.status === 'ready').length;
-  const sceneChecks = checks.filter((item) => item.category === 'scene_c' || item.category === 'scene_d' || item.category === 'scene_cd');
-  return (
-    <section className="section-block requirement-check-block">
-      <SectionTitle icon={<CheckCircle2 size={17} />} title="需求验收" count={checks.length} collapsed={toggle.collapsed} onToggle={toggle.onToggle} />
-      {!toggle.collapsed && (
-        <>
-          <div className="check-summary-row">
-            <Badge tone={ready === checks.length ? 'ok' : 'wait'}>{ready}/{checks.length} 已满足</Badge>
-            <span>场景 C/D：{sceneChecks.filter((item) => item.status === 'ready').length}/{sceneChecks.length} 已满足</span>
-          </div>
-          <div className="check-grid requirement-check-grid">
-            {checks.map((check) => (
-              <article className={`check-card tone-${artifactCheckTone(check.status)}`} key={check.key}>
-                <div className="check-card-head">
-                  {artifactCheckIcon(check.status)}
-                  <b>{check.label}</b>
-                  <Badge tone={artifactCheckTone(check.status)}>{artifactCheckLabel(check.status)}</Badge>
-                </div>
-                <p>{check.detail || '等待检查结果'}</p>
-              </article>
-            ))}
-          </div>
-        </>
-      )}
-    </section>
-  );
-}
-
 function RequirementArtifactBoard({ detail, toggle }: { detail: RequirementDetail; toggle: SectionToggleProps }) {
   const artifacts = [
     detail.current_slides,
     detail.current_canvas,
-    detail.current_delivery,
   ].filter(Boolean) as ArtifactRecord[];
   const hasProducts = Boolean(detail.current_document || artifacts.length);
   return (
@@ -1484,21 +1320,11 @@ function RequirementArtifactCompactPreview({ artifact, preview }: { artifact: Ar
       </div>
     );
   }
-  if (artifact.artifact_type === 'delivery_bundle') {
-    const checks = Array.isArray(preview.checks) ? preview.checks : [];
-    const summaries = Array.isArray(preview.artifact_summaries) ? preview.artifact_summaries : [];
-    return (
-      <div className="compact-artifact-summary">
-        <span><PackageCheck size={15} />{checks.length} 项验收</span>
-        <span><Boxes size={15} />{summaries.length} 个交付物</span>
-      </div>
-    );
-  }
   return <p className="muted-text">{artifactLabel(artifact.artifact_type)} 已沉淀到需求工作区</p>;
 }
 
 function RequirementRecommendations({ detail, toggle }: { detail: RequirementDetail; toggle: SectionToggleProps }) {
-  const items = detail.recommendations?.recommendations || [];
+  const items = (detail.recommendations?.recommendations || []).filter((item) => item.action_type !== 'bundle_delivery');
   if (!items.length) return null;
   return (
     <section className="section-block requirement-recommendations">
@@ -1582,62 +1408,7 @@ function requirementArtifactCount(item: RequirementSummary): number {
     item.current_document_id,
     item.current_slides_artifact_id,
     item.current_canvas_artifact_id,
-    item.current_delivery_artifact_id,
   ].filter(Boolean).length;
-}
-
-function requirementAcceptanceChecks(detail: RequirementDetail): ArtifactCheckRecord[] {
-  const preview = parseJsonMap(detail.current_delivery?.preview_json);
-  const checks = Array.isArray(preview?.checks) ? preview.checks : [];
-  return checks
-    .map((item, index) => {
-      const source = asMap(item);
-      if (!source) return null;
-      const key = stringValue(source.key) || stringValue(source.id) || `requirement-check-${index}`;
-      const label = stringValue(source.label) || stringValue(source.title) || `验收项 ${index + 1}`;
-      const status = stringValue(source.status) || 'missing';
-      const detailText = stringValue(source.detail) || stringValue(source.message) || stringValue(source.reason);
-      const category = stringValue(source.category);
-      return {
-        key,
-        label,
-        status,
-        detail: detailText,
-        category,
-      };
-    })
-    .filter((item): item is ArtifactCheckRecord => Boolean(item));
-}
-
-function requirementContextPack(detail: RequirementDetail): ContextPackRecord | null {
-  const preview = parseJsonMap(detail.current_delivery?.preview_json);
-  const source = asMap(preview?.context_pack);
-  if (!source) return null;
-  return {
-    summary: stringValue(source.summary) || '已根据当前交付包汇总需求上下文。',
-    used_sources: contextPackItems(source.used_sources),
-    missing_items: contextPackItems(source.missing_items),
-    suggested_inputs: Array.isArray(source.suggested_inputs)
-      ? source.suggested_inputs.map(String).map((item) => item.trim()).filter(Boolean)
-      : [],
-  };
-}
-
-function contextPackItems(value: unknown): ContextPackItemRecord[] {
-  if (!Array.isArray(value)) return [];
-  return value
-    .map((item, index): ContextPackItemRecord | null => {
-      const source = asMap(item);
-      if (!source) return null;
-      return {
-        kind: stringValue(source.kind) || 'note',
-        label: stringValue(source.label) || stringValue(source.title) || `依据 ${index + 1}`,
-        detail: stringValue(source.detail) || stringValue(source.summary) || stringValue(source.reason),
-        status: stringValue(source.status) || 'ready',
-        url: stringValue(source.url) || null,
-      };
-    })
-    .filter((item): item is ContextPackItemRecord => Boolean(item));
 }
 
 function sourceSessionTypeLabel(value?: string | null): string {
@@ -1730,7 +1501,6 @@ function ConnectionPill({ state, label }: { state: ConnectionState; label: strin
 function artifactIcon(type: string) {
   if (type === 'document') return <FileText size={18} />;
   if (type === 'slides_package' || type === 'slides') return <Presentation size={18} />;
-  if (type === 'delivery_bundle') return <PackageCheck size={18} />;
   return <Layers3 size={18} />;
 }
 
