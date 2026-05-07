@@ -117,6 +117,10 @@ class ConfirmationAnswerRequest(BaseModel):
     confirmation_id: str
     answer_value: str
     answered_by: str = Field(default="user", description="Who resolved the confirmation")
+    override_instruction: str | None = Field(
+        default=None,
+        description="Optional lightweight instruction that further constrains the confirmed action",
+    )
 
 
 class ConfirmationAnswerResponse(BaseModel):
@@ -125,6 +129,15 @@ class ConfirmationAnswerResponse(BaseModel):
     status: str
     answer_value: str
     already_answered: bool = False
+
+
+class OfflineSyncConfirmRequest(BaseModel):
+    answer_value: str
+    answered_by: str = Field(default="user", description="Who resolved the offline sync confirmation")
+    override_instruction: str | None = Field(
+        default=None,
+        description="Optional lightweight instruction that further constrains the confirmed offline merge action",
+    )
 
 
 class DocumentRevisionRequest(BaseModel):
@@ -137,6 +150,12 @@ class SlidesRevisionRequest(BaseModel):
     instruction: str = Field(min_length=1, description="Natural-language instruction for revising the current slides package")
     requested_by: str = Field(default="pilot_workbench", description="Who requested the slides revision")
     artifact_id: str | None = Field(default=None, description="Optional explicit slides artifact id to revise")
+
+
+class CanvasRevisionRequest(BaseModel):
+    instruction: str = Field(min_length=1, description="Natural-language instruction for revising the current canvas artifact")
+    requested_by: str = Field(default="pilot_workbench", description="Who requested the canvas revision")
+    artifact_id: str | None = Field(default=None, description="Optional explicit canvas artifact id to revise")
 
 
 class DeliveryBundleRequest(BaseModel):

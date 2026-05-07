@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import httpx
 import re
@@ -619,6 +619,41 @@ class DocApiTests(unittest.TestCase):
         self.assertEqual(blocks[3]["table"]["property"]["row_size"], 2)
         self.assertEqual(blocks[3]["table"]["property"]["column_size"], 2)
 
+    def test_append_sections_binds_image_token_after_block_creation(self) -> None:
+        client = ManagedFolderClient()
+        api = FeishuDocAPI(auth_service=DummyAuthService(), client=client, state_service=DummyStateService())
+
+        payload = api.append_sections_to_document(
+            "doc-token",
+            "测试文档",
+            [
+                {
+                    "heading": "Canvas",
+                    "paragraphs": [
+                        {
+                            "type": "image",
+                            "token": "img_token_uploaded",
+                            "bind_after_create": True,
+                            "caption": "流程图",
+                        }
+                    ],
+                }
+            ],
+        )
+
+        self.assertEqual(payload["appended_block_count"], 3)
+        post_call = next(
+            call
+            for call in client.calls
+            if call["path"] == "/open-apis/docx/v1/documents/doc-token/blocks/doc-token/children"
+        )
+        image_child = post_call["json"]["children"][1]
+        self.assertEqual(image_child["block_type"], 27)
+        self.assertEqual(image_child["image"], {})
+        patch_call = next(call for call in client.calls if call.get("method") == "PATCH")
+        self.assertIn("/blocks/managed_2", patch_call["path"])
+        self.assertEqual(patch_call["json"], {"replace_image": {"token": "img_token_uploaded"}})
+
     def test_build_blocks_supports_markdown_and_structured_callout(self) -> None:
         api = FeishuDocAPI(auth_service=DummyAuthService(), client=ManagedFolderClient(), state_service=DummyStateService())
 
@@ -680,6 +715,43 @@ class DocApiTests(unittest.TestCase):
         self.assertEqual(payload["appended_block_count"], 3)
         child_paths = [call["path"] for call in client.calls]
         self.assertIn("/open-apis/docx/v1/documents/doc-token/blocks/managed_2/children", child_paths)
+
+    def test_section_snapshot_from_blocks_preserves_rich_block_structure(self) -> None:
+        api = FeishuDocAPI(auth_service=DummyAuthService(), client=ManagedFolderClient(), state_service=DummyStateService())
+        child_map = {
+            "callout_1": [_text_block("callout_text", "Double check the rollout window.")],
+            "table_1": [
+                {"block_id": "cell_1", "block_type": 32, "table_cell": {}},
+                {"block_id": "cell_2", "block_type": 32, "table_cell": {}},
+                {"block_id": "cell_3", "block_type": 32, "table_cell": {}},
+                {"block_id": "cell_4", "block_type": 32, "table_cell": {}},
+            ],
+            "cell_1": [_text_block("cell_1_text", "Module")],
+            "cell_2": [_text_block("cell_2_text", "Status")],
+            "cell_3": [_text_block("cell_3_text", "DocTool")],
+            "cell_4": [_text_block("cell_4_text", "Ready")],
+        }
+        api.list_child_blocks = MagicMock(side_effect=lambda document_id, block_id=None, page_size=100: child_map.get(block_id or document_id, []))
+
+        snapshot = api._section_snapshot_from_blocks(
+            "doc-token",
+            [
+                _heading_block("heading_1", "Artifacts"),
+                {"block_id": "divider_1", "block_type": 22, "divider": {}},
+                {"block_id": "image_1", "block_type": 27, "image": {"token": "img_token_1", "width": 640, "height": 320}},
+                {"block_id": "callout_1", "block_type": 19, "callout": {"emoji_id": "warning"}},
+                {"block_id": "table_1", "block_type": 31, "table": {"property": {"row_size": 2, "column_size": 2}}},
+            ],
+        )
+
+        self.assertEqual(snapshot[0]["heading"], "Artifacts")
+        self.assertEqual(snapshot[0]["paragraphs"][0]["type"], "divider")
+        self.assertEqual(snapshot[0]["paragraphs"][1]["type"], "image")
+        self.assertEqual(snapshot[0]["paragraphs"][1]["token"], "img_token_1")
+        self.assertEqual(snapshot[0]["paragraphs"][2]["type"], "callout")
+        self.assertEqual(snapshot[0]["paragraphs"][2]["text"], "Double check the rollout window.")
+        self.assertEqual(snapshot[0]["paragraphs"][3]["type"], "table")
+        self.assertEqual(snapshot[0]["paragraphs"][3]["rows"], [["Module", "Status"], ["DocTool", "Ready"]])
 
 
 

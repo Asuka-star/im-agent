@@ -1,4 +1,5 @@
 import unittest
+from types import SimpleNamespace
 
 from app.services.workflow.persistence import WorkflowResultPersistence
 
@@ -18,6 +19,56 @@ class _TaskRunService:
 class _Workflow:
     def __init__(self) -> None:
         self.task_run_service = _TaskRunService()
+
+
+class _MemoryService:
+    def __init__(self) -> None:
+        self.saved: list[dict] = []
+
+    def save_assistant_message(self, **kwargs) -> None:
+        self.saved.append(kwargs)
+
+
+class _RequirementService:
+    def __init__(self) -> None:
+        self.updated: list[str] = []
+
+    def update_current_artifacts_from_task_run(self, task_run_id: str) -> None:
+        self.updated.append(task_run_id)
+
+
+class _FeishuArtifactIntegrator:
+    def __init__(self) -> None:
+        self.synced: list[object] = []
+
+    def sync_current_task_run_artifacts(self, detail) -> None:
+        self.synced.append(detail)
+
+
+class _TaskRunServiceForPersist(_TaskRunService):
+    def __init__(self) -> None:
+        super().__init__()
+        self.updated_runs: list[dict] = []
+
+    def update_task_run(self, task_run_id: str, **kwargs) -> None:
+        self.updated_runs.append({"task_run_id": task_run_id, **kwargs})
+
+    def get_task_run(self, task_run_id: str):
+        return SimpleNamespace(task_run_id=task_run_id, session_id="session_1")
+
+
+class _WorkflowForPersist:
+    def __init__(self) -> None:
+        self.task_run_service = _TaskRunServiceForPersist()
+        self.memory_service = _MemoryService()
+        self.requirement_service = _RequirementService()
+        self.feishu_artifact_integrator = _FeishuArtifactIntegrator()
+
+    def _condense_text(self, value: object) -> str:
+        return str(value or "")
+
+    def _task_run_title(self, message_text: str, mode: str) -> str:
+        return f"{mode}:{message_text}"
 
 
 class WorkflowResultPersistenceTests(unittest.TestCase):
@@ -72,6 +123,57 @@ class WorkflowResultPersistenceTests(unittest.TestCase):
 
         self.assertEqual(len(workflow.task_run_service.artifacts), 1)
         self.assertEqual(workflow.task_run_service.steps, [])
+
+    def test_persist_task_run_result_syncs_current_slides_or_canvas_to_feishu(self) -> None:
+        workflow = _WorkflowForPersist()
+        service = WorkflowResultPersistence(workflow)
+
+        service.persist_task_run_result(
+            "run_sync",
+            message_text="更新演示稿",
+            session_id="session_1",
+            result={
+                "mode": "slides",
+                "reply_preview": "已更新演示稿",
+                "analysis": None,
+                "artifacts": [
+                    {
+                        "artifact_type": "slides_package",
+                        "title": "答辩 PPT",
+                        "preview": {"slides": [{"title": "封面", "bullets": []}]},
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual(workflow.requirement_service.updated, ["run_sync"])
+        self.assertEqual(len(workflow.feishu_artifact_integrator.synced), 1)
+        self.assertEqual(workflow.feishu_artifact_integrator.synced[0].task_run_id, "run_sync")
+
+    def test_persist_task_run_result_skips_feishu_sync_for_non_visual_artifacts(self) -> None:
+        workflow = _WorkflowForPersist()
+        service = WorkflowResultPersistence(workflow)
+
+        service.persist_task_run_result(
+            "run_doc",
+            message_text="更新摘要",
+            session_id="session_1",
+            result={
+                "mode": "analysis",
+                "reply_preview": "已整理摘要",
+                "analysis": None,
+                "artifacts": [
+                    {
+                        "artifact_type": "note",
+                        "title": "摘要",
+                        "preview": {"text": "done"},
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual(workflow.requirement_service.updated, ["run_doc"])
+        self.assertEqual(workflow.feishu_artifact_integrator.synced, [])
 
 
 if __name__ == "__main__":

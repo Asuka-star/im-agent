@@ -378,6 +378,18 @@ class TaskRunService:
         self._publish_task_run_event(task_run_id, event_type="task_run.confirmation_created")
         return confirmation
 
+    def get_artifact_task_run_id(self, artifact_id: str) -> str | None:
+        normalized = str(artifact_id or "").strip()
+        if not normalized:
+            return None
+        with SessionLocal() as session:
+            row = session.execute(
+                select(Artifact).where(Artifact.artifact_id == normalized)
+            ).scalar_one_or_none()
+            if row is None:
+                return None
+            return str(row.task_run_id or "").strip() or None
+
     def resolve_confirmation(
         self,
         task_run_id: str,

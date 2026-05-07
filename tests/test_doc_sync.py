@@ -1139,6 +1139,139 @@ class DocSyncTests(unittest.TestCase):
         self.assertEqual(current_doc["task_run_id"], "run_doc_tool")
         self.assertEqual(current_doc["section_snapshot"][0]["heading"], "讨论摘要")
 
+    def test_doc_tool_uploads_offline_images_before_replacing_existing_document(self) -> None:
+        session_document_service = SessionDocumentService(state_service=_MemoryStateService())
+        session_document_service.save_current_document(
+            "doc_image_replace_session",
+            document_id="doc_image_replace",
+            url="https://feishu.cn/docx/doc_image_replace",
+            title="图文文档",
+            version=1,
+            sync_mode="created",
+            section_snapshot=[{"heading": "璁ㄨ鎽樿", "paragraphs": ["旧摘要"]}],
+        )
+        doc_api = MagicMock()
+        doc_api.is_configured.return_value = True
+        doc_api.replace_document_sections.return_value = {
+            "document_id": "doc_image_replace",
+            "url": "https://feishu.cn/docx/doc_image_replace",
+            "title": "图文文档",
+            "replaced_block_count": 1,
+            "inserted_block_count": 2,
+            "patched_headings": ["璁ㄨ鎽樿"],
+            "section_block_index": [],
+        }
+        media_api = MagicMock()
+        media_api.upload_docx_image.return_value = {"token": "img_token_uploaded", "file_name": "diagram.png"}
+        doc_tool = DocTool(
+            doc_api=doc_api,
+            session_document_service=session_document_service,
+            media_api=media_api,
+        )
+
+        result = doc_tool.sync_package_to_session_doc(
+            {
+                "title": "图文文档",
+                "sections": [
+                    {
+                        "heading": "璁ㄨ鎽樿",
+                        "paragraphs": [
+                            "新摘要",
+                            {"type": "image", "asset_id": "img_1", "caption": "流程图"},
+                        ],
+                    }
+                ],
+                "assets": [
+                    {
+                        "asset_id": "img_1",
+                        "kind": "image",
+                        "file_name": "diagram.png",
+                        "local_path": "C:/temp/diagram.png",
+                    }
+                ],
+            },
+            session_id="doc_image_replace_session",
+            episode_id=None,
+            instruction="把线下修改合并进当前文档",
+        )
+
+        self.assertEqual(result.mode, "updated")
+        media_api.upload_docx_image.assert_called_once_with(
+            document_id="doc_image_replace",
+            file_path="C:/temp/diagram.png",
+            file_name="diagram.png",
+        )
+        replace_sections = doc_api.replace_document_sections.call_args.args[2]
+        image_block = replace_sections[0]["paragraphs"][1]
+        self.assertEqual(image_block["type"], "image")
+        self.assertEqual(image_block["token"], "img_token_uploaded")
+        self.assertNotIn("local_path", image_block)
+
+    def test_doc_tool_creates_empty_document_before_uploading_offline_images(self) -> None:
+        session_document_service = SessionDocumentService(state_service=_MemoryStateService())
+        doc_api = MagicMock()
+        doc_api.is_configured.return_value = True
+        doc_api.create_empty_document.return_value = {
+            "document_id": "doc_image_new",
+            "url": "https://feishu.cn/docx/doc_image_new",
+            "title": "离线图文",
+            "section_block_index": [],
+            "folder_scope": "none",
+            "folder_url": None,
+            "folder_note": None,
+        }
+        doc_api.append_sections_to_document.return_value = {
+            "document_id": "doc_image_new",
+            "url": "https://feishu.cn/docx/doc_image_new",
+            "title": "离线图文",
+            "appended_block_count": 3,
+            "section_block_index": [],
+        }
+        media_api = MagicMock()
+        media_api.upload_docx_image.return_value = {"token": "img_token_new", "file_name": "diagram.png"}
+        doc_tool = DocTool(
+            doc_api=doc_api,
+            session_document_service=session_document_service,
+            media_api=media_api,
+        )
+
+        result = doc_tool.sync_package_to_session_doc(
+            {
+                "title": "离线图文",
+                "sections": [
+                    {
+                        "heading": "璁ㄨ鎽樿",
+                        "paragraphs": [
+                            "新增了一张示意图",
+                            {"type": "image", "asset_id": "img_1", "caption": "示意图"},
+                        ],
+                    }
+                ],
+                "assets": [
+                    {
+                        "asset_id": "img_1",
+                        "kind": "image",
+                        "file_name": "diagram.png",
+                        "local_path": "C:/temp/diagram.png",
+                    }
+                ],
+            },
+            session_id="doc_image_new_session",
+            episode_id=None,
+            instruction="创建一份新的离线图文文档",
+        )
+
+        self.assertEqual(result.mode, "created")
+        doc_api.create_empty_document.assert_called_once_with("离线图文")
+        doc_api.create_document_from_sections.assert_not_called()
+        media_api.upload_docx_image.assert_called_once_with(
+            document_id="doc_image_new",
+            file_path="C:/temp/diagram.png",
+            file_name="diagram.png",
+        )
+        append_sections = doc_api.append_sections_to_document.call_args.args[2]
+        self.assertEqual(append_sections[0]["paragraphs"][1]["token"], "img_token_new")
+
     def test_doc_tool_replaces_changed_sections_in_existing_document(self) -> None:
         session_document_service = SessionDocumentService(state_service=_MemoryStateService())
         session_document_service.save_current_document(
@@ -3177,6 +3310,65 @@ class DocSyncTests(unittest.TestCase):
             risk_section["paragraphs"],
             ["接口联调时间紧", "第三方依赖待确认"],
         )
+
+    def test_normalize_doc_sections_preserves_structured_rich_blocks(self) -> None:
+        sections = [
+            {
+                "heading": "摘要",
+                "paragraphs": [
+                    "整体方案已对齐",
+                    {"type": "image", "token": "img_token_1", "caption": "流程图"},
+                    {"type": "table", "rows": [["模块", "状态"], ["Workbench", "开发中"]]},
+                    {"type": "image", "token": "img_token_1", "caption": "流程图"},
+                ],
+            }
+        ]
+
+        normalized = self.workflow.doc_execution.normalize_doc_sections(sections)
+
+        self.assertEqual(normalized[0]["heading"], "讨论摘要")
+        self.assertEqual(normalized[0]["paragraphs"][0], "整体方案已对齐")
+        self.assertEqual(normalized[0]["paragraphs"][1]["type"], "image")
+        self.assertEqual(normalized[0]["paragraphs"][2]["type"], "table")
+        self.assertEqual(len(normalized[0]["paragraphs"]), 3)
+
+    def test_merge_doc_section_snapshots_preserves_structured_rich_blocks(self) -> None:
+        merged = self.workflow.doc_execution.merge_doc_section_snapshots(
+            [{"heading": "讨论摘要", "paragraphs": ["旧摘要"]}],
+            [
+                {
+                    "heading": "讨论摘要",
+                    "paragraphs": [
+                        "新摘要",
+                        {"type": "callout", "text": "注意演示窗口", "kind": "warning"},
+                        {"type": "image", "token": "img_token_2", "caption": "业务流程"},
+                    ],
+                }
+            ],
+        )
+
+        self.assertEqual(merged[0]["paragraphs"][0], "新摘要")
+        self.assertEqual(merged[0]["paragraphs"][1]["type"], "callout")
+        self.assertEqual(merged[0]["paragraphs"][2]["type"], "image")
+
+    def test_session_document_snapshot_preserves_structured_rich_blocks(self) -> None:
+        service = SessionDocumentService(state_service=_MemoryStateService())
+        snapshot = service.build_section_snapshot(
+            [
+                {
+                    "heading": "讨论摘要",
+                    "paragraphs": [
+                        "已完成联调",
+                        {"type": "divider"},
+                        {"type": "table", "rows": [["模块", "状态"], ["DocTool", "Ready"]]},
+                    ],
+                }
+            ]
+        )
+
+        self.assertEqual(snapshot[0]["paragraphs"][0], "已完成联调")
+        self.assertEqual(snapshot[0]["paragraphs"][1]["type"], "divider")
+        self.assertEqual(snapshot[0]["paragraphs"][2]["type"], "table")
 
 if __name__ == "__main__":
     unittest.main()

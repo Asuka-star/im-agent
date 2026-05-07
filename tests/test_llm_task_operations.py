@@ -1800,6 +1800,71 @@ class LLMTaskOperationTests(unittest.TestCase):
         self.assertEqual(result["action"], "clarify")
         self.assertIsNone(result["document_id"])
 
+    def test_document_target_selection_does_not_use_local_fallback_without_llm(self) -> None:
+        message = SimpleNamespace(session_id="s1", text="please update the current document")
+        documents = [
+            {"document_id": "doc_1", "title": "Current Doc", "version": 1, "is_current": True},
+            {"document_id": "doc_2", "title": "Other Doc", "version": 1, "is_current": False},
+        ]
+        with patch.object(
+            self.service.session_document_service,
+            "list_documents",
+            return_value=documents,
+        ), patch.object(
+            self.service.llm_service,
+            "is_configured",
+            return_value=False,
+        ), patch.object(
+            self.service,
+            "_resolve_target_document_for_instruction",
+            return_value=documents[0],
+        ) as local_resolver:
+            target, clarification = self.service._resolve_document_target_for_route(
+                message,
+                RouteDecision(route="doc", source="rule", confidence=0.9),
+                task_run_id=None,
+                requirement_document=None,
+                workspace_context="[workspace]",
+            )
+
+        self.assertIsNone(target)
+        self.assertIsNotNone(clarification)
+        local_resolver.assert_not_called()
+
+    def test_document_target_selection_clarifies_when_llm_fails(self) -> None:
+        message = SimpleNamespace(session_id="s1", text="please update Release Review")
+        documents = [
+            {"document_id": "doc_1", "title": "Release Review", "version": 2, "is_current": False},
+        ]
+        with patch.object(
+            self.service.session_document_service,
+            "list_documents",
+            return_value=documents,
+        ), patch.object(
+            self.service.llm_service,
+            "is_configured",
+            return_value=True,
+        ), patch.object(
+            self.service.llm_service,
+            "resolve_document_target",
+            side_effect=RuntimeError("llm unavailable"),
+        ), patch.object(
+            self.service,
+            "_resolve_target_document_for_instruction",
+            return_value=documents[0],
+        ) as local_resolver:
+            target, clarification = self.service._resolve_document_target_for_route(
+                message,
+                RouteDecision(route="doc", source="rule", confidence=0.9),
+                task_run_id=None,
+                requirement_document=None,
+                workspace_context="[workspace]",
+            )
+
+        self.assertIsNone(target)
+        self.assertIsNotNone(clarification)
+        local_resolver.assert_not_called()
+
     def test_resolve_target_document_supports_relative_references(self) -> None:
         documents = [
             {"document_id": "doc_1", "title": "Project Weekly", "version": 3, "is_current": True},

@@ -1,5 +1,6 @@
 import type {
   NextActionBundle,
+  OfflineSyncRecord,
   RealtimeEvent,
   RequirementDetail,
   RequirementSummary,
@@ -85,6 +86,40 @@ export function createRequirement(payload: {
   });
 }
 
+export function updateRequirement(
+  requirementId: string,
+  payload: {
+    title?: string | null;
+    summary?: string | null;
+    status?: string | null;
+  },
+): Promise<RequirementDetail> {
+  return requestJson<RequirementDetail>(`/requirements/${encodeURIComponent(requirementId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function updateRequirementCurrentProducts(
+  requirementId: string,
+  payload: {
+    currentDocumentId?: string | null;
+    currentSlidesArtifactId?: string | null;
+    currentCanvasArtifactId?: string | null;
+    currentDeliveryArtifactId?: string | null;
+  },
+): Promise<RequirementDetail> {
+  return requestJson<RequirementDetail>(`/requirements/${encodeURIComponent(requirementId)}/current-products`, {
+    method: 'PATCH',
+    body: JSON.stringify({
+      current_document_id: payload.currentDocumentId,
+      current_slides_artifact_id: payload.currentSlidesArtifactId,
+      current_canvas_artifact_id: payload.currentCanvasArtifactId,
+      current_delivery_artifact_id: payload.currentDeliveryArtifactId,
+    }),
+  });
+}
+
 export function reassignTaskRunRequirement(requirementId: string, taskRunId: string): Promise<TaskRunSummary> {
   return requestJson<TaskRunSummary>(`/requirements/${encodeURIComponent(requirementId)}/task-runs/${encodeURIComponent(taskRunId)}/reassign`, {
     method: 'POST',
@@ -100,15 +135,40 @@ export function getRecommendations(taskRunId: string): Promise<NextActionBundle>
   return requestJson<NextActionBundle>(`/task-runs/${encodeURIComponent(taskRunId)}/recommendations`);
 }
 
-export function confirmTaskRun(taskRunId: string, confirmationId: string, answerValue: string): Promise<unknown> {
+export function confirmTaskRun(
+  taskRunId: string,
+  confirmationId: string,
+  answerValue: string,
+  overrideInstruction?: string | null,
+): Promise<unknown> {
   return requestJson(`/task-runs/${encodeURIComponent(taskRunId)}/confirm`, {
     method: 'POST',
     body: JSON.stringify({
       confirmation_id: confirmationId,
       answer_value: answerValue,
       answered_by: 'pilot_admin_web',
+      override_instruction: overrideInstruction?.trim() || null,
     }),
   });
+}
+
+export function confirmOfflineSync(
+  submissionId: string,
+  answerValue: string,
+  overrideInstruction?: string | null,
+): Promise<unknown> {
+  return requestJson(`/offline-syncs/${encodeURIComponent(submissionId)}/confirm`, {
+    method: 'POST',
+    body: JSON.stringify({
+      answer_value: answerValue,
+      answered_by: 'pilot_admin_web',
+      override_instruction: overrideInstruction?.trim() || null,
+    }),
+  });
+}
+
+export function getOfflineSync(submissionId: string): Promise<OfflineSyncRecord> {
+  return requestJson<OfflineSyncRecord>(`/offline-syncs/${encodeURIComponent(submissionId)}`);
 }
 
 export function reviseDocument(taskRunId: string, instruction: string, documentId?: string): Promise<TaskRunDetail> {
@@ -124,6 +184,17 @@ export function reviseDocument(taskRunId: string, instruction: string, documentI
 
 export function reviseSlides(taskRunId: string, instruction: string, artifactId?: string): Promise<TaskRunDetail> {
   return requestJson<TaskRunDetail>(`/task-runs/${encodeURIComponent(taskRunId)}/revise-slides`, {
+    method: 'POST',
+    body: JSON.stringify({
+      instruction,
+      requested_by: 'pilot_admin_web',
+      artifact_id: artifactId || null,
+    }),
+  });
+}
+
+export function reviseCanvas(taskRunId: string, instruction: string, artifactId?: string): Promise<TaskRunDetail> {
+  return requestJson<TaskRunDetail>(`/task-runs/${encodeURIComponent(taskRunId)}/revise-canvas`, {
     method: 'POST',
     body: JSON.stringify({
       instruction,

@@ -1,4 +1,6 @@
+import io
 import json
+import math
 import re
 import uuid
 from html import escape
@@ -7,6 +9,13 @@ from pathlib import Path
 from app.services.artifact_skills import CanvasSkill
 from app.services.artifact_title_service import ArtifactTitleService
 from app.utils.values import coerce_positive_int
+
+try:
+    from PIL import Image, ImageDraw, ImageFont
+except ImportError:  # pragma: no cover - pillow is expected in runtime, but keep graceful fallback
+    Image = None
+    ImageDraw = None
+    ImageFont = None
 
 
 class CanvasArtifactService:
@@ -35,19 +44,25 @@ class CanvasArtifactService:
         filename = self._canvas_filename(scene, task_run_id=task_run_id, session_id=session_id)
         svg_filename = self._svg_filename(filename)
         html_filename = self._html_filename(filename)
+        png_filename = self._png_filename(filename)
         scene["exports"] = {
             "json": f"/api/artifacts/canvas/{filename}",
             "svg": f"/api/artifacts/canvas/{svg_filename}",
             "html": f"/api/artifacts/canvas/{html_filename}",
+            "png": f"/api/artifacts/canvas/{png_filename}",
         }
         self.root_dir.mkdir(parents=True, exist_ok=True)
         path = self.root_dir / filename
         svg_path = self.root_dir / svg_filename
         html_path = self.root_dir / html_filename
+        png_path = self.root_dir / png_filename
         svg = self._build_svg(scene)
         path.write_text(json.dumps(scene, ensure_ascii=False, indent=2), encoding="utf-8")
         svg_path.write_text(svg, encoding="utf-8")
         html_path.write_text(self._build_html(scene, svg), encoding="utf-8")
+        png = self._build_png(scene)
+        if png is not None:
+            png_path.write_bytes(png)
         return {
             "artifact_type": "canvas",
             "provider": "local",
@@ -616,6 +631,10 @@ class CanvasArtifactService:
         stem = json_filename.rsplit(".", 1)[0]
         return f"{stem or 'canvas'}.html"
 
+    def _png_filename(self, json_filename: str) -> str:
+        stem = json_filename.rsplit(".", 1)[0]
+        return f"{stem or 'canvas'}.png"
+
     def _artifact_stem(self, title: str, *, suffix: str | None) -> str:
         title_stem = self._slugify_filename(title)
         suffix_stem = self._short_suffix(suffix)
@@ -752,6 +771,7 @@ class CanvasArtifactService:
         shape_count = len(scene.get("shapes") if isinstance(scene.get("shapes"), list) else [])
         json_url = escape(str(scene.get("exports", {}).get("json") or ""))
         svg_url = escape(str(scene.get("exports", {}).get("svg") or ""))
+        png_url = escape(str(scene.get("exports", {}).get("png") or ""))
         return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -778,11 +798,56 @@ class CanvasArtifactService:
     <nav class="links">
       <a href="{json_url}">JSON 场景</a>
       <a href="{svg_url}" download>SVG 导出</a>
+      <a href="{png_url}" download>PNG 预览</a>
     </nav>
   </main>
 </body>
 </html>
 """
+
+    def _build_png(self, scene: dict) -> bytes | None:
+        if Image is None or ImageDraw is None or ImageFont is None:
+            return None
+        shapes = scene.get("shapes") if isinstance(scene.get("shapes"), list) else []
+        nodes = [shape for shape in shapes if isinstance(shape, dict) and shape.get("type") != "arrow"]
+        arrows = [shape for shape in shapes if isinstance(shape, dict) and shape.get("type") == "arrow"]
+        bounds = self._svg_bounds(nodes)
+        width = max(int(bounds["width"]), 640)
+        height = max(int(bounds["height"]), 360)
+        offset_x = int(bounds["offset_x"])
+        offset_y = int(bounds["offset_y"])
+        node_by_id = {str(node.get("id") or ""): node for node in nodes}
+
+        image = Image.new("RGBA", (width, height), "#F8FBFC")
+        draw = ImageDraw.Draw(image)
+        title_font = self._font(size=14, bold=True)
+        text_font = self._font(size=15, bold=True)
+        group_font = self._font(size=11)
+        arrow_font = self._font(size=12)
+
+        for arrow in arrows:
+            self._draw_png_arrow(
+                draw,
+                arrow,
+                node_by_id,
+                offset_x=offset_x,
+                offset_y=offset_y,
+                font=arrow_font,
+            )
+        for node in nodes:
+            self._draw_png_node(
+                draw,
+                node,
+                offset_x=offset_x,
+                offset_y=offset_y,
+                title_font=title_font,
+                text_font=text_font,
+                group_font=group_font,
+            )
+
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG")
+        return buffer.getvalue()
 
     def _svg_bounds(self, nodes: list[dict]) -> dict[str, int]:
         if not nodes:
@@ -858,3 +923,117 @@ class CanvasArtifactService:
             f"{label_svg}"
             "</g>"
         )
+
+    def _draw_png_node(
+        self,
+        draw,
+        node: dict,
+        *,
+        offset_x: int,
+        offset_y: int,
+        title_font,
+        text_font,
+        group_font,
+    ) -> None:
+        x = self._int_value(node.get("x"), 80) + offset_x
+        y = self._int_value(node.get("y"), 140) + offset_y
+        width = self._int_value(node.get("w"), 168)
+        height = self._int_value(node.get("h"), 72)
+        fill = self._hex_color(node.get("color"), "#EAF5FF")
+        stroke = self._hex_color(node.get("stroke"), "#5A9FD6")
+        draw.rounded_rectangle((x, y, x + width, y + height), radius=10, fill=fill, outline=stroke, width=2)
+
+        group = str(node.get("group") or "").strip()
+        if group:
+            draw.text((x + 12, y + 12), group, fill="#60717B", font=group_font)
+        raw_text = str(node.get("text") or node.get("id") or "Node")
+        lines = self._wrap_text(raw_text, max_units=self._text_units_for_width(width))
+        text_y = y + (38 if group else 24)
+        for index, line in enumerate(lines):
+            font = title_font if index == 0 else text_font
+            draw.text((x + 12, text_y + index * 18), line, fill="#12313A", font=font)
+
+    def _draw_png_arrow(
+        self,
+        draw,
+        arrow: dict,
+        node_by_id: dict[str, dict],
+        *,
+        offset_x: int,
+        offset_y: int,
+        font,
+    ) -> None:
+        source = node_by_id.get(str(arrow.get("from") or ""))
+        target = node_by_id.get(str(arrow.get("to") or ""))
+        if not source or not target:
+            return
+        x1 = self._int_value(source.get("x"), 80) + self._int_value(source.get("w"), 168) + offset_x
+        y1 = self._int_value(source.get("y"), 140) + self._int_value(source.get("h"), 72) // 2 + offset_y
+        x2 = self._int_value(target.get("x"), 80) + offset_x
+        y2 = self._int_value(target.get("y"), 140) + self._int_value(target.get("h"), 72) // 2 + offset_y
+        color = self._hex_color(arrow.get("color"), "#2F7F8A")
+        draw.line((x1, y1, x2, y2), fill=color, width=3)
+        self._draw_png_arrowhead(draw, x1, y1, x2, y2, color=color)
+        label = str(arrow.get("label") or "").strip()
+        if label:
+            mid_x = (x1 + x2) // 2
+            mid_y = (y1 + y2) // 2
+            bbox = draw.textbbox((0, 0), label, font=font)
+            if bbox:
+                label_w = bbox[2] - bbox[0]
+                label_h = bbox[3] - bbox[1]
+                padding = 4
+                draw.rounded_rectangle(
+                    (
+                        mid_x - label_w // 2 - padding,
+                        mid_y - label_h - 10,
+                        mid_x + label_w // 2 + padding,
+                        mid_y - 6,
+                    ),
+                    radius=6,
+                    fill="#F8FBFC",
+                )
+            draw.text((mid_x, mid_y - 8), label, fill="#2F4D55", font=font, anchor="ms")
+
+    @staticmethod
+    def _draw_png_arrowhead(draw, x1: int, y1: int, x2: int, y2: int, *, color: str) -> None:
+        angle = math.atan2(y2 - y1, x2 - x1)
+        length = 12
+        spread = math.pi / 7
+        p1 = (x2, y2)
+        p2 = (
+            x2 - length * math.cos(angle - spread),
+            y2 - length * math.sin(angle - spread),
+        )
+        p3 = (
+            x2 - length * math.cos(angle + spread),
+            y2 - length * math.sin(angle + spread),
+        )
+        draw.polygon([p1, p2, p3], fill=color)
+
+    def _font(self, *, size: int, bold: bool = False):
+        if ImageFont is None:
+            return None
+        candidates = []
+        if bold:
+            candidates.extend(
+                [
+                    Path("C:/Windows/Fonts/msyhbd.ttc"),
+                    Path("C:/Windows/Fonts/simhei.ttf"),
+                    Path("C:/Windows/Fonts/arialbd.ttf"),
+                ]
+            )
+        candidates.extend(
+            [
+                Path("C:/Windows/Fonts/msyh.ttc"),
+                Path("C:/Windows/Fonts/simsun.ttc"),
+                Path("C:/Windows/Fonts/arial.ttf"),
+            ]
+        )
+        for path in candidates:
+            try:
+                if path.is_file():
+                    return ImageFont.truetype(str(path), size=size)
+            except OSError:
+                continue
+        return ImageFont.load_default()

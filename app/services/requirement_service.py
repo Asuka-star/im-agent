@@ -12,6 +12,7 @@ from app.db.database import SessionLocal
 from app.db.models import Artifact, Message, Requirement, RequirementSource, TaskRun, UserAlias
 from app.schemas.next_action import NextActionBundle
 from app.schemas.requirement import (
+    OfflineSyncRecord,
     RequirementDetail,
     RequirementSourceRecord,
     RequirementSummary,
@@ -26,6 +27,7 @@ from app.services.task_run_service import TaskRunService
 from app.utils.values import coerce_positive_int
 
 logger = logging.getLogger(__name__)
+_UNSET = object()
 
 
 class RequirementService:
@@ -38,11 +40,13 @@ class RequirementService:
         session_document_service: SessionDocumentService | None = None,
         next_action_service: ContextualNextActionService | None = None,
         session_display_service: SessionDisplayService | None = None,
+        current_artifact_syncer: Any | None = None,
     ) -> None:
         self.task_run_service = task_run_service or TaskRunService()
         self.session_document_service = session_document_service or SessionDocumentService()
         self.next_action_service = next_action_service or ContextualNextActionService()
         self.session_display_service = session_display_service or SessionDisplayService()
+        self.current_artifact_syncer = current_artifact_syncer
 
     def create_requirement(
         self,
@@ -164,17 +168,31 @@ class RequirementService:
             current_canvas = self._latest_artifact(artifact_records, {"canvas"}, row.current_canvas_artifact_id)
             current_delivery = self._latest_artifact(artifact_records, {"delivery_bundle"}, row.current_delivery_artifact_id)
             recommendations = self._recommendations_for_requirement(task_summaries)
+            offline_syncs = self._offline_syncs_for_task_runs(task_summaries)
             return RequirementDetail(
                 **summary.model_dump(),
                 sources=source_records,
                 task_runs=task_summaries,
                 timeline=self._timeline(task_summaries),
+                offline_syncs=offline_syncs,
                 current_document=current_document,
                 current_slides=current_slides,
                 current_canvas=current_canvas,
                 current_delivery=current_delivery,
                 recommendations=recommendations,
             )
+
+    def list_offline_syncs(self, requirement_id: str) -> list[OfflineSyncRecord]:
+        requirement = self.get_requirement(requirement_id)
+        if requirement is None:
+            return []
+        return requirement.offline_syncs
+
+    def get_offline_sync(self, submission_id: str) -> OfflineSyncRecord | None:
+        detail = self.task_run_service.get_task_run(submission_id)
+        if detail is None:
+            return None
+        return self._offline_sync_from_task_run_detail(detail)
 
     def bind_task_run(
         self,
@@ -245,6 +263,101 @@ class RequirementService:
         if requirement_summary is not None:
             self._publish_requirement_event(requirement_summary, event_type="requirement.updated")
         return requirement_summary
+
+    def update_requirement(
+        self,
+        requirement_id: str,
+        *,
+        title: str | None | object = _UNSET,
+        summary: str | None | object = _UNSET,
+        status: str | None | object = _UNSET,
+    ) -> RequirementDetail | None:
+        requirement_summary: RequirementSummary | None = None
+        with SessionLocal() as session:
+            requirement = session.execute(
+                select(Requirement).where(Requirement.requirement_id == requirement_id).with_for_update()
+            ).scalar_one_or_none()
+            if requirement is None:
+                return None
+            changed = False
+            if title is not _UNSET:
+                cleaned_title = _clean_title(str(title or "")) or "未命名需求"
+                if requirement.title != cleaned_title[:255]:
+                    requirement.title = cleaned_title[:255]
+                    changed = True
+            if summary is not _UNSET:
+                cleaned_summary = str(summary).strip() or None
+                if requirement.summary != cleaned_summary:
+                    requirement.summary = cleaned_summary
+                    changed = True
+            if status is not _UNSET:
+                cleaned_status = str(status).strip() or "active"
+                if requirement.status != cleaned_status[:64]:
+                    requirement.status = cleaned_status[:64]
+                    changed = True
+            if changed:
+                self._touch_requirement(requirement)
+                session.commit()
+                session.refresh(requirement)
+                requirement_summary = self._summary_from_row(requirement)
+        if requirement_summary is not None:
+            self._publish_requirement_event(requirement_summary, event_type="requirement.updated")
+        return self.get_requirement(requirement_id)
+
+    def update_current_products(
+        self,
+        requirement_id: str,
+        *,
+        updates: dict[str, Any],
+    ) -> RequirementDetail | None:
+        allowed_keys = {
+            "current_document_id",
+            "current_slides_artifact_id",
+            "current_canvas_artifact_id",
+            "current_delivery_artifact_id",
+        }
+        payload = {key: updates[key] for key in allowed_keys if key in updates}
+        if not payload:
+            return self.get_requirement(requirement_id)
+
+        requirement_summary: RequirementSummary | None = None
+        should_sync = False
+        with SessionLocal() as session:
+            requirement = session.execute(
+                select(Requirement).where(Requirement.requirement_id == requirement_id).with_for_update()
+            ).scalar_one_or_none()
+            if requirement is None:
+                return None
+            changed = False
+            for key, raw_value in payload.items():
+                normalized = str(raw_value or "").strip() or None
+                if key == "current_document_id" and normalized:
+                    if not self._document_belongs_to_requirement(session, requirement, normalized):
+                        raise ValueError(f"Document does not belong to requirement: {normalized}")
+                elif key == "current_slides_artifact_id" and normalized:
+                    if not self._artifact_belongs_to_requirement(session, requirement_id, normalized, {"slides", "slides_package"}):
+                        raise ValueError(f"Slides artifact does not belong to requirement: {normalized}")
+                elif key == "current_canvas_artifact_id" and normalized:
+                    if not self._artifact_belongs_to_requirement(session, requirement_id, normalized, {"canvas"}):
+                        raise ValueError(f"Canvas artifact does not belong to requirement: {normalized}")
+                elif key == "current_delivery_artifact_id" and normalized:
+                    if not self._artifact_belongs_to_requirement(session, requirement_id, normalized, {"delivery_bundle"}):
+                        raise ValueError(f"Delivery artifact does not belong to requirement: {normalized}")
+                if getattr(requirement, key) != normalized:
+                    setattr(requirement, key, normalized)
+                    changed = True
+            if changed:
+                self._touch_requirement(requirement)
+                session.commit()
+                session.refresh(requirement)
+                requirement_summary = self._summary_from_row(requirement)
+                should_sync = True
+        if requirement_summary is not None:
+            self._publish_requirement_event(requirement_summary, event_type="requirement.updated")
+        detail = self.get_requirement(requirement_id)
+        if should_sync and detail is not None:
+            self._sync_requirement_current_artifacts(detail)
+        return detail
 
     def update_current_artifacts_from_task_run(self, task_run_id: str) -> None:
         try:
@@ -338,6 +451,48 @@ class RequirementService:
         ).scalars().all()
         return self._apply_current_artifacts(requirement, artifacts)
 
+    def _document_belongs_to_requirement(self, session, requirement: Requirement, document_id: str) -> bool:
+        related_sources = session.execute(
+            select(RequirementSource).where(RequirementSource.requirement_id == requirement.requirement_id)
+        ).scalars().all()
+        related_task_runs = session.execute(
+            select(TaskRun).where(TaskRun.requirement_id == requirement.requirement_id)
+        ).scalars().all()
+        session_ids = self._document_session_ids(
+            requirement.primary_session_id,
+            related_sources,
+            related_task_runs,
+        )
+        for session_id in session_ids:
+            try:
+                documents = self.session_document_service.list_documents(session_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Failed to load session documents while validating requirement pointer: %s", exc)
+                continue
+            for document in documents:
+                if str(document.get("document_id") or "").strip() == document_id:
+                    return True
+        return requirement.current_document_id == document_id
+
+    @staticmethod
+    def _artifact_belongs_to_requirement(
+        session,
+        requirement_id: str,
+        artifact_id: str,
+        allowed_types: set[str],
+    ) -> bool:
+        artifact = session.execute(
+            select(Artifact)
+            .join(TaskRun, Artifact.task_run_id == TaskRun.task_run_id)
+            .where(
+                TaskRun.requirement_id == requirement_id,
+                Artifact.artifact_id == artifact_id,
+            )
+        ).scalar_one_or_none()
+        if artifact is None:
+            return False
+        return str(artifact.artifact_type or "") in allowed_types
+
     def _apply_current_artifacts(self, requirement: Requirement, artifacts: list[Artifact]) -> bool:
         changed = False
         for artifact in artifacts:
@@ -384,6 +539,7 @@ class RequirementService:
         return RequirementSummary(
             requirement_id=row.requirement_id,
             title=row.title,
+            status=row.status,
             summary=row.summary,
             primary_session_id=row.primary_session_id,
             primary_session_label=self.session_display_service.resolve_session_label(
@@ -646,6 +802,151 @@ class RequirementService:
                 continue
             return self.next_action_service.build_for_task_run(detail)
         return None
+
+    def _sync_requirement_current_artifacts(self, detail: RequirementDetail) -> None:
+        syncer = self.current_artifact_syncer
+        if syncer is None:
+            return
+        try:
+            if callable(syncer):
+                syncer(detail)
+                return
+            method = getattr(syncer, "sync_requirement_current_artifacts", None)
+            if callable(method):
+                method(detail)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Failed to sync requirement current products: requirement_id=%s error=%s",
+                detail.requirement_id,
+                exc,
+            )
+
+    def _offline_syncs_for_task_runs(self, task_runs: list[TaskRunSummary]) -> list[OfflineSyncRecord]:
+        records: list[OfflineSyncRecord] = []
+        for task_run in reversed(task_runs):
+            detail = self.task_run_service.get_task_run(task_run.task_run_id)
+            if detail is None:
+                continue
+            record = self._offline_sync_from_task_run_detail(detail)
+            if record is not None:
+                records.append(record)
+        records.sort(key=lambda item: item.updated_at or item.created_at or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+        return records
+
+    @staticmethod
+    def _offline_sync_from_task_run_detail(detail) -> OfflineSyncRecord | None:
+        metadata = _decode_json_object(getattr(detail, "metadata_json", None))
+        active_payload = metadata.get("offline_document_confirmation") if isinstance(metadata.get("offline_document_confirmation"), dict) else None
+        last_payload = metadata.get("offline_document_last_record") if isinstance(metadata.get("offline_document_last_record"), dict) else None
+        if active_payload is None and last_payload is None:
+            steps = list(getattr(detail, "steps", []) or [])
+            if not any(str(getattr(step, "step_key", "") or "").startswith("offline_document_") for step in steps):
+                return None
+
+        parsed_step = next((step for step in getattr(detail, "steps", []) or [] if getattr(step, "step_key", "") == "offline_document_parsed"), None)
+        confirmation_step = next((step for step in getattr(detail, "steps", []) or [] if getattr(step, "step_key", "") == "offline_document_confirmation"), None)
+        follow_up_step = next((step for step in getattr(detail, "steps", []) or [] if getattr(step, "step_key", "") == "offline_document_follow_up"), None)
+
+        parsed_payload = _decode_json_object(getattr(parsed_step, "output_json", None))
+        confirmation_payload = _decode_json_object(getattr(confirmation_step, "output_json", None))
+        follow_up_payload = _decode_json_object(getattr(follow_up_step, "output_json", None))
+
+        merge_plan = {}
+        if active_payload and isinstance(active_payload.get("merge_plan"), dict):
+            merge_plan = active_payload["merge_plan"]
+        elif last_payload and isinstance(last_payload.get("merge_plan"), dict):
+            merge_plan = last_payload["merge_plan"]
+        elif isinstance(confirmation_payload.get("merge_plan"), dict):
+            merge_plan = confirmation_payload["merge_plan"]
+
+        merge_summary = {}
+        if active_payload and isinstance(active_payload.get("merge_summary"), dict):
+            merge_summary = active_payload["merge_summary"]
+        elif last_payload and isinstance(last_payload.get("merge_summary"), dict):
+            merge_summary = last_payload["merge_summary"]
+        elif isinstance(confirmation_payload.get("merge_summary"), dict):
+            merge_summary = confirmation_payload["merge_summary"]
+
+        file_name = (
+            str((active_payload or {}).get("file_name") or "").strip()
+            or str((last_payload or {}).get("file_name") or "").strip()
+            or str(parsed_payload.get("file_name") or "").strip()
+            or None
+        )
+        file_extension = (
+            str((active_payload or {}).get("file_extension") or "").strip()
+            or str((last_payload or {}).get("file_extension") or "").strip()
+            or str(parsed_payload.get("file_extension") or "").strip()
+            or None
+        )
+        available_follow_up_targets = (
+            list((active_payload or {}).get("available_follow_up_targets") or [])
+            or list((last_payload or {}).get("available_follow_up_targets") or [])
+            or list(confirmation_payload.get("available_follow_up_targets") or [])
+        )
+        normalized_targets = [str(item).strip() for item in available_follow_up_targets if str(item).strip()]
+
+        confirmation = None
+        confirmations = list(getattr(detail, "confirmations", []) or [])
+        expected_confirmation_id = str((active_payload or {}).get("confirmation_id") or (last_payload or {}).get("confirmation_id") or "").strip()
+        if expected_confirmation_id:
+            confirmation = next((item for item in confirmations if str(getattr(item, "confirmation_id", "") or "").strip() == expected_confirmation_id), None)
+        if confirmation is None and confirmations:
+            confirmation = confirmations[-1]
+
+        status = "pending"
+        if confirmation is not None and str(getattr(confirmation, "status", "") or "").strip() == "answered":
+            status = str((last_payload or {}).get("status") or "").strip() or "merged"
+        elif str(getattr(detail, "status", "") or "").strip() == "waiting_confirmation":
+            status = "awaiting_confirmation"
+        elif str(getattr(detail, "status", "") or "").strip() == "failed" or str(getattr(detail, "stage", "") or "").strip() == "offline_document_failed":
+            status = "failed"
+        elif any(str(getattr(artifact, "provider", "") or "").strip() == "offline_upload" for artifact in getattr(detail, "artifacts", []) or []):
+            status = "archived_reference"
+        elif last_payload:
+            status = str(last_payload.get("status") or "").strip() or status
+
+        if status == "merged" and isinstance(follow_up_payload, dict):
+            if any(
+                isinstance(follow_up_payload.get(key), dict) and str(follow_up_payload.get(key, {}).get("status") or "").strip() == "failed"
+                for key in ("slides", "canvas")
+            ):
+                status = "merged_partial"
+
+        confirmation_options = []
+        if confirmation is not None:
+            try:
+                parsed = json.loads(getattr(confirmation, "options_json", None) or "[]")
+            except json.JSONDecodeError:
+                parsed = []
+            if isinstance(parsed, list):
+                confirmation_options = [str(item).strip() for item in parsed if str(item).strip()]
+
+        return OfflineSyncRecord(
+            submission_id=str(getattr(detail, "task_run_id", "") or "").strip(),
+            task_run_id=str(getattr(detail, "task_run_id", "") or "").strip(),
+            duplicate_of_submission_id=(
+                str((active_payload or {}).get("duplicate_of_submission_id") or "").strip()
+                or str((last_payload or {}).get("duplicate_of_submission_id") or "").strip()
+                or None
+            ),
+            requirement_id=str(getattr(detail, "requirement_id", "") or "").strip() or None,
+            title=str(getattr(detail, "title", "") or "").strip() or None,
+            file_name=file_name,
+            file_extension=file_extension,
+            status=status,
+            stage=str(getattr(detail, "stage", "") or "").strip() or None,
+            latest_summary=str(getattr(detail, "latest_summary", "") or "").strip() or None,
+            confirmation_id=str(getattr(confirmation, "confirmation_id", "") or "").strip() or None if confirmation is not None else None,
+            confirmation_status=str(getattr(confirmation, "status", "") or "").strip() or None if confirmation is not None else None,
+            confirmation_options=confirmation_options,
+            answer_value=str(getattr(confirmation, "answer_value", "") or "").strip() or str((last_payload or {}).get("answer_value") or "").strip() or None,
+            available_follow_up_targets=normalized_targets,
+            merge_summary=merge_summary,
+            merge_plan=merge_plan,
+            created_at=getattr(detail, "created_at", None),
+            updated_at=getattr(detail, "updated_at", None),
+        )
 
     @staticmethod
     def _timeline(task_runs: list[TaskRunSummary]) -> list[RequirementTimelineItem]:

@@ -66,6 +66,24 @@ class ArtifactEditPlanTests(unittest.TestCase):
         self.assertEqual(plan.operations[1].target["queries"], ["验收标准"])
         self.assertEqual(plan.operations[2].target["queries"], ["下一步建议"])
 
+    def test_planner_fallback_detects_media_table_and_layout_ops(self) -> None:
+        media_plan = ArtifactEditPlanner.from_instruction(
+            artifact_type="canvas",
+            instruction="在风险节点旁边新增一张示意图，并把风险节点移到右侧顶部对齐",
+            available_targets=["风险节点"],
+        )
+        self.assertEqual([operation.op_type for operation in media_plan.operations], ["add_media", "update_layout"])
+        self.assertEqual(media_plan.operations[0].payload["media_kind"], "image")
+        self.assertEqual(media_plan.operations[1].payload["position"], "right")
+        self.assertEqual(media_plan.operations[1].payload["align"], "top")
+
+        table_plan = ArtifactEditPlanner.from_instruction(
+            artifact_type="slides",
+            instruction="补充一个表格总结当前状态",
+            available_targets=["P1", "P2"],
+        )
+        self.assertEqual(table_plan.operations[0].op_type, "add_table")
+
     def test_doc_delete_after_keeps_anchor_range_semantics(self) -> None:
         plan = ArtifactEditPlanner.from_instruction(
             artifact_type="doc",
@@ -192,6 +210,49 @@ class ArtifactEditPlanTests(unittest.TestCase):
 
         self.assertFalse(tool.package_changed(package, revised))
 
+    def test_presentation_tool_supports_media_table_and_layout_ops(self) -> None:
+        tool = PresentationTool(artifact_service=PresentationArtifactService())
+        package = {
+            "theme": "Demo",
+            "slides": [
+                {"title": "Overview", "bullets": ["Keep"], "speaker_notes": "Intro"},
+            ],
+        }
+        edit_plan = tool.plan_revision(
+            package,
+            "Apply the rich media plan.",
+            {
+                "artifact_edit_plan": {
+                    "artifact_type": "slides",
+                    "mutation_required": True,
+                    "ops": [
+                        {
+                            "type": "add_media",
+                            "target": {"kind": "slide", "query": "Overview"},
+                            "payload": {"media_kind": "image", "caption": "业务流程图"},
+                        },
+                        {
+                            "type": "add_table",
+                            "target": {"kind": "slide", "query": "Overview"},
+                            "payload": {"title": "状态汇总", "rows": [["模块", "状态"], ["Workbench", "开发中"]]},
+                        },
+                        {
+                            "type": "update_layout",
+                            "target": {"kind": "slide", "query": "Overview"},
+                            "payload": {"position": "right", "align": "top", "instruction": "调整为左右布局"},
+                        },
+                    ],
+                }
+            },
+        )
+        revised = tool.revise_deterministic(package, "Apply the rich media plan.", edit_plan=edit_plan)
+
+        slide = revised["slides"][0]
+        self.assertIn("插图：业务流程图", slide["bullets"])
+        self.assertEqual(slide["table"][1][0], "Workbench")
+        self.assertEqual(slide["layout_hint"]["position"], "right")
+        self.assertEqual(slide["layout_hint"]["align"], "top")
+
     def test_canvas_tool_uses_edit_plan_for_visible_revision(self) -> None:
         tool = CanvasTool(artifact_service=CanvasArtifactService())
         scene = {
@@ -264,6 +325,48 @@ class ArtifactEditPlanTests(unittest.TestCase):
         revised = tool.revise_scene_deterministic(scene, "Apply the approved canvas plan.", edit_plan=edit_plan)
 
         self.assertEqual([shape["text"] for shape in revised["shapes"]], ["Entry", "Planner"])
+
+    def test_canvas_tool_supports_media_table_and_layout_ops(self) -> None:
+        tool = CanvasTool(artifact_service=CanvasArtifactService())
+        scene = {
+            "title": "Flow",
+            "shapes": [
+                {"id": "n1", "type": "node", "text": "Risk Panel", "x": 100, "y": 120},
+                {"id": "n2", "type": "node", "text": "Summary", "x": 320, "y": 220},
+            ],
+        }
+        edit_plan = tool.plan_revision(
+            scene,
+            "Apply the approved canvas media plan.",
+            {
+                "artifact_edit_plan": {
+                    "artifact_type": "canvas",
+                    "mutation_required": True,
+                    "ops": [
+                        {
+                            "type": "add_media",
+                            "payload": {"media_kind": "image", "caption": "流程示意图"},
+                        },
+                        {
+                            "type": "add_table",
+                            "payload": {"title": "状态矩阵", "rows": [["模块", "状态"], ["Canvas", "处理中"]]},
+                        },
+                        {
+                            "type": "update_layout",
+                            "target": {"kind": "node", "query": "Risk Panel"},
+                            "payload": {"position": "right", "align": "top", "instruction": "移到右侧顶部"},
+                        },
+                    ],
+                }
+            },
+        )
+        revised = tool.revise_scene_deterministic(scene, "Apply the approved canvas media plan.", edit_plan=edit_plan)
+
+        self.assertEqual(revised["shapes"][0]["layout_hint"]["position"], "right")
+        self.assertEqual(revised["shapes"][0]["layout_hint"]["align"], "top")
+        self.assertEqual(revised["shapes"][2]["group"], "Media")
+        self.assertEqual(revised["shapes"][3]["group"], "Table")
+        self.assertEqual(revised["shapes"][3]["table_rows"][1][0], "Canvas")
 
 
 if __name__ == "__main__":

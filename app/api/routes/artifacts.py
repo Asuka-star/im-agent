@@ -22,6 +22,7 @@ ARTIFACT_MEDIA_TYPES = {
     "canvas": {
         ".html": "text/html; charset=utf-8",
         ".json": "application/json",
+        ".png": "image/png",
         ".svg": "image/svg+xml",
     },
     "slides": {
@@ -131,6 +132,11 @@ def _canvas_preview_response(preview: dict, suffix: str, filename: str) -> Respo
     service = CanvasArtifactService()
     if suffix == ".json":
         return JSONResponse(preview)
+    if suffix == ".png":
+        png = service._build_png(preview)
+        if png is None:
+            return None
+        return Response(png, media_type="image/png")
     if suffix == ".svg":
         return Response(
             service._build_svg(preview),

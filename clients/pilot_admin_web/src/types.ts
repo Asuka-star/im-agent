@@ -133,9 +133,32 @@ export type RequirementTimelineItem = {
   metadata?: Record<string, unknown>;
 };
 
+export type OfflineSyncRecord = {
+  submission_id: string;
+  task_run_id: string;
+  duplicate_of_submission_id?: string | null;
+  requirement_id?: string | null;
+  title?: string | null;
+  file_name?: string | null;
+  file_extension?: string | null;
+  status: string;
+  stage?: string | null;
+  latest_summary?: string | null;
+  confirmation_id?: string | null;
+  confirmation_status?: string | null;
+  confirmation_options: string[];
+  answer_value?: string | null;
+  available_follow_up_targets: string[];
+  merge_summary: Record<string, unknown>;
+  merge_plan: Record<string, unknown>;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
 export type RequirementSummary = {
   requirement_id: string;
   title: string;
+  status: string;
   summary?: string | null;
   primary_session_id: string;
   primary_session_label?: string | null;
@@ -155,6 +178,7 @@ export type RequirementDetail = RequirementSummary & {
   sources: RequirementSourceRecord[];
   task_runs: TaskRunSummary[];
   timeline: RequirementTimelineItem[];
+  offline_syncs: OfflineSyncRecord[];
   current_document?: SessionDocumentRecord | null;
   current_slides?: ArtifactRecord | null;
   current_canvas?: ArtifactRecord | null;

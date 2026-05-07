@@ -93,6 +93,7 @@ class FeishuMessageContext(BaseModel):
     text: str
     raw_text: str
     file_key: str | None = None
+    file_name: str | None = None
     transcription_notice: str | None = None
     is_mentioned: bool = False
     mentioned_users: list[FeishuMentionedUser] = Field(default_factory=list)

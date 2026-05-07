@@ -42,6 +42,21 @@ class FeishuDocAPI:
         payload, _ = self._create_document_request(title)
         return payload
 
+    def create_empty_document(self, title: str) -> dict[str, Any]:
+        document_payload, folder_info = self._create_document_request(title)
+        document_id, document_url = self._extract_document_info(document_payload)
+        return {
+            "document_id": document_id,
+            "url": document_url,
+            "title": title,
+            "section_block_index": [],
+            "folder_token": folder_info.get("token"),
+            "folder_url": folder_info.get("url"),
+            "folder_scope": folder_info.get("scope"),
+            "folder_applied": bool(folder_info.get("applied")),
+            "folder_note": folder_info.get("note"),
+        }
+
     def _create_document_request(self, title: str) -> tuple[dict[str, Any], dict[str, Any]]:
         explicit_folder_token = (settings.feishu_doc_folder_token or "").strip()
         access_token = self.auth_service.get_tenant_access_token()
@@ -181,45 +196,46 @@ class FeishuDocAPI:
             },
         )
 
+    def replace_image_block(self, document_id: str, block_id: str, token: str) -> dict[str, Any]:
+        access_token = self.auth_service.get_tenant_access_token()
+        return self.client.patch_json(
+            f"/open-apis/docx/v1/documents/{document_id}/blocks/{block_id}",
+            headers={"Authorization": f"Bearer {access_token}"},
+            params={"client_token": str(uuid.uuid4())},
+            json={
+                "replace_image": {
+                    "token": token,
+                }
+            },
+        )
+
     def create_document_from_sections(self, title: str, sections: list[dict[str, Any]]) -> dict[str, Any]:
-        document_payload, folder_info = self._create_document_request(title)
-        document_id, document_url = self._extract_document_info(document_payload)
-        block_specs = self._build_block_specs(sections)
-        blocks = [spec["block"] for spec in block_specs]
-        section_block_index: list[dict[str, Any]] = []
-        if blocks:
-            appended = self.append_blocks(document_id, blocks)
-            created_blocks = self._extract_response_children(appended)
-            self._sync_created_child_blocks(document_id, block_specs, created_blocks)
-            section_block_index = self._section_block_index_from_created_blocks(sections, created_blocks)
-        return {
-            "document_id": document_id,
-            "url": document_url,
-            "title": title,
-            "section_block_index": section_block_index,
-            "folder_token": folder_info.get("token"),
-            "folder_url": folder_info.get("url"),
-            "folder_scope": folder_info.get("scope"),
-            "folder_applied": bool(folder_info.get("applied")),
-            "folder_note": folder_info.get("note"),
-        }
+        created = self.create_empty_document(title)
+        if not sections:
+            return created
+        appended = self.append_sections_to_document(str(created["document_id"]), title, sections)
+        return {**created, **appended}
 
     def append_sections_to_document(self, document_id: str, title: str, sections: list[dict[str, Any]]) -> dict[str, Any]:
         block_specs = self._build_block_specs(sections)
         blocks = [spec["block"] for spec in block_specs]
         appended_block_count = len(blocks)
+        section_block_index: list[dict[str, Any]] = []
         if blocks:
             appended = self.append_blocks(document_id, blocks)
+            created_blocks = self._extract_response_children(appended)
             appended_block_count += self._sync_created_child_blocks(
                 document_id,
                 block_specs,
-                self._extract_response_children(appended),
+                created_blocks,
             )
+            section_block_index = self._section_block_index_from_created_blocks(sections, created_blocks)
         return {
             "document_id": document_id,
             "url": self._document_url(document_id),
             "title": title,
             "appended_block_count": appended_block_count,
+            "section_block_index": section_block_index,
         }
 
     def replace_document_sections(
@@ -415,7 +431,7 @@ class FeishuDocAPI:
             "unmatched_rename_headings": unmatched_rename_headings,
             "unmatched_delete_ranges": unmatched_delete_ranges,
             "section_block_index": self._section_ranges_from_blocks(refreshed_children),
-            "section_snapshot": self._section_snapshot_from_blocks(refreshed_children),
+            "section_snapshot": self._section_snapshot_from_blocks(document_id, refreshed_children),
         }
 
     @staticmethod
@@ -706,7 +722,7 @@ class FeishuDocAPI:
             )
         return ranges
 
-    def _section_snapshot_from_blocks(self, blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _section_snapshot_from_blocks(self, document_id: str, blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
         snapshot: list[dict[str, Any]] = []
         ranges = self._section_ranges_from_blocks(blocks)
         for item in ranges:
@@ -718,15 +734,101 @@ class FeishuDocAPI:
                 continue
             if not heading or end_index < start_index:
                 continue
-            paragraphs: list[str] = []
+            paragraphs: list[Any] = []
             for block in blocks[start_index + 1 : end_index]:
                 if not isinstance(block, dict):
                     continue
-                text = self._block_text_content(block).strip()
-                if text:
-                    paragraphs.append(text)
+                paragraph = self._paragraph_snapshot_from_block(document_id, block)
+                if paragraph is not None:
+                    paragraphs.append(paragraph)
             snapshot.append({"heading": heading, "paragraphs": paragraphs})
         return snapshot
+
+    def _paragraph_snapshot_from_block(self, document_id: str, block: dict[str, Any]) -> Any | None:
+        block_type = int(block.get("block_type") or 0)
+        if block_type == 22:
+            return {"type": "divider"}
+        if block_type == 27:
+            image = block.get("image") if isinstance(block.get("image"), dict) else {}
+            paragraph: dict[str, Any] = {"type": "image"}
+            token = str(image.get("token") or "").strip()
+            if token:
+                paragraph["token"] = token
+            width = self._safe_positive_int(image.get("width"))
+            height = self._safe_positive_int(image.get("height"))
+            if width is not None:
+                paragraph["width"] = width
+            if height is not None:
+                paragraph["height"] = height
+            return paragraph
+        if block_type == 19:
+            block_id = str(block.get("block_id") or "").strip()
+            callout: dict[str, Any] = {"type": "callout"}
+            text = self._child_block_text(document_id, block_id)
+            if text:
+                callout["text"] = text
+            callout_data = block.get("callout") if isinstance(block.get("callout"), dict) else {}
+            emoji_id = str(callout_data.get("emoji_id") or "").strip()
+            if emoji_id:
+                callout["emoji_id"] = emoji_id
+            return callout
+        if block_type == 31:
+            rows = self._table_rows_from_block(document_id, block)
+            if rows:
+                return {"type": "table", "rows": rows}
+            table = block.get("table") if isinstance(block.get("table"), dict) else {}
+            props = table.get("property") if isinstance(table.get("property"), dict) else {}
+            row_size = self._safe_positive_int(props.get("row_size")) or 1
+            column_size = self._safe_positive_int(props.get("column_size")) or 1
+            return {"type": "table", "rows": [[""] * column_size for _ in range(row_size)]}
+        text = self._block_text_content(block).strip()
+        return text or None
+
+    def _child_block_text(self, document_id: str, block_id: str) -> str:
+        if not block_id:
+            return ""
+        try:
+            children = self.list_child_blocks(document_id, block_id)
+        except Exception:  # noqa: BLE001
+            return ""
+        chunks: list[str] = []
+        for child in children:
+            if not isinstance(child, dict):
+                continue
+            text = self._block_text_content(child).strip()
+            if text:
+                chunks.append(text)
+        return "\n".join(chunks).strip()
+
+    def _table_rows_from_block(self, document_id: str, block: dict[str, Any]) -> list[list[str]]:
+        block_id = str(block.get("block_id") or "").strip()
+        if not block_id:
+            return []
+        table = block.get("table") if isinstance(block.get("table"), dict) else {}
+        props = table.get("property") if isinstance(table.get("property"), dict) else {}
+        row_size = self._safe_positive_int(props.get("row_size")) or 0
+        column_size = self._safe_positive_int(props.get("column_size")) or 0
+        if row_size <= 0 or column_size <= 0:
+            return []
+        try:
+            cells = self.list_child_blocks(document_id, block_id)
+        except Exception:  # noqa: BLE001
+            return []
+        cell_texts: list[str] = []
+        for cell in cells:
+            if not isinstance(cell, dict) or int(cell.get("block_type") or 0) != 32:
+                continue
+            cell_id = str(cell.get("block_id") or "").strip()
+            cell_texts.append(self._child_block_text(document_id, cell_id))
+        rows: list[list[str]] = []
+        cursor = 0
+        for _ in range(row_size):
+            row: list[str] = []
+            for _ in range(column_size):
+                row.append(cell_texts[cursor] if cursor < len(cell_texts) else "")
+                cursor += 1
+            rows.append(row)
+        return rows
 
     def _extract_response_children(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
         data = payload.get("data", {}) if isinstance(payload, dict) else {}
@@ -741,6 +843,7 @@ class FeishuDocAPI:
     ) -> int:
         inserted_count = 0
         for spec, created in zip(block_specs, created_blocks):
+            self._sync_created_block_post_create(document_id, spec, created)
             children = spec.get("children")
             if not isinstance(children, list) or not children:
                 continue
@@ -760,11 +863,41 @@ class FeishuDocAPI:
             inserted_count += self._sync_created_child_blocks(document_id, children, created_children)
         return inserted_count
 
+    def _sync_created_block_post_create(
+        self,
+        document_id: str,
+        spec: dict[str, Any],
+        created: dict[str, Any],
+    ) -> None:
+        post_create = spec.get("post_create") if isinstance(spec.get("post_create"), dict) else {}
+        token = str(post_create.get("replace_image_token") or "").strip()
+        if not token:
+            return
+        block_id = str(created.get("block_id") or "").strip()
+        if not block_id:
+            return
+        try:
+            self.replace_image_block(document_id, block_id, token)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Failed to bind Feishu docx image token after block creation: document_id=%s block_id=%s error=%s",
+                document_id,
+                block_id,
+                exc,
+            )
+
     @staticmethod
-    def _block_spec(block: dict[str, Any], *, children: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    def _block_spec(
+        block: dict[str, Any],
+        *,
+        children: list[dict[str, Any]] | None = None,
+        post_create: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         spec = {"block": block}
         if children:
             spec["children"] = children
+        if post_create:
+            spec["post_create"] = post_create
         return spec
 
     def _block_text_content(self, block: dict[str, Any]) -> str:
@@ -857,13 +990,15 @@ class FeishuDocAPI:
             token = str(paragraph.get("token") or "").strip()
             if not token:
                 return []
+            bind_after_create = bool(paragraph.get("bind_after_create"))
             blocks = [
                 self._block_spec(
                     self._image_block(
-                        token,
+                        "" if bind_after_create else token,
                         width=self._safe_positive_int(paragraph.get("width")),
                         height=self._safe_positive_int(paragraph.get("height")),
-                    )
+                    ),
+                    post_create={"replace_image_token": token} if bind_after_create else None,
                 )
             ]
             caption = str(paragraph.get("caption") or paragraph.get("alt") or "").strip()
@@ -995,7 +1130,9 @@ class FeishuDocAPI:
 
     @staticmethod
     def _image_block(token: str, *, width: int | None = None, height: int | None = None) -> dict[str, Any]:
-        image: dict[str, Any] = {"token": token}
+        image: dict[str, Any] = {}
+        if token:
+            image["token"] = token
         if width is not None:
             image["width"] = width
         if height is not None:

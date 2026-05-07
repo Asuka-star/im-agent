@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.concurrency import run_in_threadpool
 
 from app.schemas.task_run import (
+    CanvasRevisionRequest,
     ConfirmationAnswerRequest,
     ConfirmationAnswerResponse,
     DeliveryBundleRequest,
@@ -76,6 +77,7 @@ async def confirm_task_run(task_run_id: str, payload: ConfirmationAnswerRequest)
             confirmation_id=payload.confirmation_id,
             answer_value=payload.answer_value,
             answered_by=payload.answered_by,
+            override_instruction=payload.override_instruction,
         )
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to resume task run after confirmation: %s", exc)
@@ -130,6 +132,26 @@ async def revise_task_run_slides(task_run_id: str, payload: SlidesRevisionReques
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to revise slides from task run: %s", exc)
         raise HTTPException(status_code=500, detail="Failed to revise slides") from exc
+    if record is None:
+        raise HTTPException(status_code=404, detail="Task run not found")
+    return record
+
+
+@router.post("/{task_run_id}/revise-canvas", response_model=TaskRunDetail)
+async def revise_task_run_canvas(task_run_id: str, payload: CanvasRevisionRequest) -> TaskRunDetail:
+    try:
+        record = await run_in_threadpool(
+            workflow_service.revise_canvas_from_task_run,
+            task_run_id,
+            instruction=payload.instruction,
+            requested_by=payload.requested_by,
+            artifact_id=payload.artifact_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to revise canvas from task run: %s", exc)
+        raise HTTPException(status_code=500, detail="Failed to revise canvas") from exc
     if record is None:
         raise HTTPException(status_code=404, detail="Task run not found")
     return record

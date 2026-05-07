@@ -196,6 +196,29 @@ class EventHandlerTests(unittest.TestCase):
         self.assertEqual(context.transcription_notice, "当前没有启用语音识别，请直接发送文本消息。")
         self.assertEqual(context.text, "")
 
+    def test_file_message_uses_file_name_when_no_caption_is_present(self) -> None:
+        payload = {
+            "header": {"event_type": "im.message.receive_v1", "event_id": "evt-file"},
+            "event": {
+                "sender": {"sender_id": {"user_id": "speaker-1"}},
+                "message": {
+                    "message_id": "msg-file",
+                    "chat_id": "chat-1",
+                    "chat_type": "p2p",
+                    "message_type": "file",
+                    "content": "{\"file_key\":\"file-doc-1\",\"file_name\":\"评审纪要.docx\"}",
+                },
+            },
+        }
+
+        context = self.handler.extract_message_context(self.handler.parse_event(payload))
+        assert context is not None
+        self.assertEqual(context.message_type, "file")
+        self.assertEqual(context.file_key, "file-doc-1")
+        self.assertEqual(context.file_name, "评审纪要.docx")
+        self.assertEqual(context.text, "评审纪要.docx")
+        self.assertEqual(context.raw_text, "评审纪要.docx")
+
     def test_recalled_message_event_extracts_lifecycle_context(self) -> None:
         payload = {
             "schema": "2.0",

@@ -75,6 +75,8 @@ class WorkflowResultPersistence:
             latest_reply_preview=result.get("reply_preview"),
             latest_error=result.get("reply_error"),
         )
+        if self._should_sync_current_artifacts(result.get("artifacts")):
+            self.sync_current_artifacts_to_feishu(task_run_id)
         self.store_next_action_recommendations(task_run_id)
 
     def store_next_action_recommendations(self, task_run_id: str) -> None:
@@ -159,3 +161,27 @@ class WorkflowResultPersistence:
             return max(int(value), 0)
         except (TypeError, ValueError):
             return 0
+
+    def sync_current_artifacts_to_feishu(self, task_run_id: str) -> None:
+        workflow = self.workflow
+        integrator = getattr(workflow, "feishu_artifact_integrator", None)
+        task_run_service = getattr(workflow, "task_run_service", None)
+        if integrator is None or task_run_service is None:
+            return
+        try:
+            detail = task_run_service.get_task_run(task_run_id)
+            if detail is None:
+                return
+            integrator.sync_current_task_run_artifacts(detail)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Skipped current artifact sync to Feishu: task_run_id=%s error=%s", task_run_id, exc)
+
+    @staticmethod
+    def _should_sync_current_artifacts(artifacts: list | None) -> bool:
+        for artifact in artifacts or []:
+            if not isinstance(artifact, dict):
+                continue
+            normalized = str(artifact.get("artifact_type") or "").strip()
+            if normalized in {"slides", "slides_package", "canvas"}:
+                return True
+        return False

@@ -6,7 +6,7 @@ from typing import Any
 
 from app.core.config import settings
 from app.schemas.feishu_event import FeishuMessageContext
-from app.schemas.requirement import RequirementResolveCandidate
+from app.schemas.requirement import RequirementResolveCandidate, RequirementResolveResult
 from app.services.requirement_resolver import RequirementResolveInput
 
 logger = logging.getLogger(__name__)
@@ -112,6 +112,7 @@ class WorkflowEntrypoint:
             return result
 
         requirement_resolution = workflow.requirement_resolver.resolve(message)
+        requirement_resolution = self._normalize_file_requirement_resolution(message, requirement_resolution)
         requirement_id = requirement_resolution.requirement_id if requirement_resolution.action in {"bind", "create"} else None
         requirement_metadata = {
             "requirement_resolution": requirement_resolution.model_dump(mode="json"),
@@ -201,6 +202,12 @@ class WorkflowEntrypoint:
             result["task_run_id"] = task_run.task_run_id
             return result
 
+        if str(getattr(message, "message_type", "") or "").strip().lower() == "file":
+            return workflow.offline_document_execution.prepare_offline_document_submission(
+                message,
+                task_run_id=task_run.task_run_id,
+            )
+
         try:
             result = workflow._handle_mentioned_request(message, task_run_id=task_run.task_run_id)
         except Exception as exc:  # noqa: BLE001
@@ -220,60 +227,17 @@ class WorkflowEntrypoint:
             )
             raise
 
-        if result["reply_preview"]:
-            workflow.memory_service.save_assistant_message(
-                session_id=message.session_id,
-                content=result["reply_preview"],
-                episode_id=result.get("episode_id"),
-                source_message_id=message.message_id,
-                embed=False,
-            )
-        workflow.result_persistence.persist_artifacts(task_run.task_run_id, result.get("artifacts", []))
-        summary_text = (
-            result["analysis"].summary
-            if result.get("analysis") is not None
-            else workflow._condense_text(result.get("reply_preview"))
-        )
-        response_step_status = str(result.get("response_step_status") or "done")
-        final_stage = str(result.get("task_run_stage") or "delivered")
-        final_status = str(result.get("task_run_status") or "completed")
-        workflow.task_run_service.upsert_step(
+        workflow.result_persistence.persist_task_run_result(
             task_run.task_run_id,
-            step_key="response_generated",
-            title="生成处理结果",
-            step_type="workflow",
-            status=response_step_status,
-            output_payload={
-                "mode": result["mode"],
-                "reply_preview": result["reply_preview"],
-                "artifact_count": len(result.get("artifacts", [])),
-            },
-        )
-        if result.get("artifacts"):
-            workflow.task_run_service.upsert_step(
-                task_run.task_run_id,
-                step_key="artifact_persisted",
-                title="记录协作产物",
-                step_type="artifact",
-                status="done",
-                output_payload={"artifact_count": len(result["artifacts"])},
-            )
-        workflow.task_run_service.update_task_run(
-            task_run.task_run_id,
-            intent=result["mode"],
-            title=workflow._task_run_title(message.text, result["mode"]),
-            stage=final_stage,
-            status=final_status,
-            latest_summary=summary_text,
-            latest_reply_preview=result.get("reply_preview"),
-            latest_error=result.get("reply_error"),
+            message_text=message.text,
+            result=result,
+            session_id=message.session_id,
+            source_message_id=message.message_id,
         )
         self._merge_task_run_metadata(
             task_run.task_run_id,
             workflow._task_run_lifecycle_metadata(result["mode"]),
         )
-        workflow.result_persistence.store_next_action_recommendations(task_run.task_run_id)
-        workflow.requirement_service.update_current_artifacts_from_task_run(task_run.task_run_id)
         result["task_run_id"] = task_run.task_run_id
         logger.info(
             "Workflow stage completed: message_id=%s stage=workflow_done total_elapsed_ms=%.1f",
@@ -380,6 +344,13 @@ class WorkflowEntrypoint:
             "active_episode_id": active_episode_id,
             "candidates": [item.model_dump(mode="json") for item in candidates],
             "new_option": "新建一个需求",
+            "message_type": message.message_type,
+            "raw_text": message.raw_text,
+            "file_key": message.file_key,
+            "file_name": message.file_name,
+            "chat_id": message.chat_id,
+            "chat_type": message.chat_type,
+            "is_mentioned": message.is_mentioned,
         }
         workflow.task_run_service.update_task_run(task_run_id, metadata=metadata)
         reply_preview = workflow.response_formatter.format_clarification_reply(
@@ -414,6 +385,69 @@ class WorkflowEntrypoint:
         result["task_run_status"] = "waiting_confirmation"
         result["task_run_stage"] = "requirement_clarification"
         return result
+
+    def _normalize_file_requirement_resolution(
+        self,
+        message: FeishuMessageContext,
+        requirement_resolution: Any,
+    ) -> Any:
+        if str(getattr(message, "message_type", "") or "").strip().lower() != "file":
+            return requirement_resolution
+
+        action = str(getattr(requirement_resolution, "action", "") or "").strip()
+        if action == "bind":
+            return requirement_resolution
+
+        session_requirements: list[Any] = []
+        try:
+            session_requirements = self.workflow.requirement_service.list_requirements(
+                session_id=message.session_id,
+                limit=5,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Failed to load session requirements for file upload resolution: session_id=%s error=%s",
+                message.session_id,
+                exc,
+            )
+        if len(session_requirements) == 1:
+            only = session_requirements[0]
+            return RequirementResolveResult(
+                action="bind",
+                requirement_id=only.requirement_id,
+                confidence=max(float(getattr(requirement_resolution, "confidence", 0.0) or 0.0), 0.78),
+                matched_by="single_session_requirement_file",
+                reason="当前会话只有一个相关需求，离线文档已自动归属到该需求。",
+                candidates=[
+                    RequirementResolveCandidate(
+                        requirement_id=only.requirement_id,
+                        title=only.title,
+                        summary=only.summary,
+                        score=0.78,
+                        reason="当前会话唯一相关需求。",
+                    )
+                ],
+            )
+
+        if action == "create":
+            return RequirementResolveResult(
+                action="clarify",
+                confidence=float(getattr(requirement_resolution, "confidence", 0.0) or 0.0),
+                matched_by="file_upload_requires_confirmation",
+                reason="离线文档需要先确认归属，暂不根据文件名直接新建需求。",
+                candidates=list(getattr(requirement_resolution, "candidates", []) or []),
+            )
+
+        if action != "clarify":
+            return RequirementResolveResult(
+                action="clarify",
+                confidence=float(getattr(requirement_resolution, "confidence", 0.0) or 0.0),
+                matched_by="file_upload_requires_confirmation",
+                reason=getattr(requirement_resolution, "reason", "") or "我需要先确认这份离线文档属于哪个需求工作区。",
+                candidates=list(getattr(requirement_resolution, "candidates", []) or []),
+            )
+
+        return requirement_resolution
 
     def _recent_requirement_candidates(
         self,

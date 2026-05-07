@@ -10,6 +10,7 @@ from app.feishu.doc_api import FeishuDocAPI
 from app.feishu.import_api import FeishuImportAPI
 from app.feishu.media_api import FeishuMediaAPI
 from app.feishu.message_api import FeishuMessageAPI
+from app.feishu.message_resource_api import FeishuMessageResourceAPI
 from app.feishu.user_api import FeishuUserAPI
 from app.schemas.analyze import AgentTrace, AnalyzeResponse
 from app.schemas.feishu_event import FeishuMessageContext, FeishuMessageLifecycleContext
@@ -27,6 +28,8 @@ from app.services.execution_planner import ExecutionPlanner, RequestProtocol
 from app.services.llm import LLMService
 from app.services.memory_service import MemoryService
 from app.services.next_action_service import ContextualNextActionService
+from app.services.offline_document_merge import OfflineDocumentMergeService
+from app.services.offline_document_parser import OfflineDocumentParser
 from app.services.office_artifact_service import OfficeArtifactService
 from app.services.presentation_artifact_service import PresentationArtifactService
 from app.services.tools.presentation_tool import PresentationTool
@@ -53,6 +56,7 @@ from app.services.workflow.replies import WorkflowReplySender
 from app.services.workflow.revisions import WorkbenchRevisionWorkflow
 from app.services.workflow.analysis_execution import WorkflowAnalysisExecution
 from app.services.workflow.canvas_execution import WorkflowCanvasExecution
+from app.services.workflow.offline_document_execution import WorkflowOfflineDocumentExecution
 from app.services.workflow.slides_execution import WorkflowSlidesExecution
 from app.services.workflow.status_execution import WorkflowStatusExecution
 from app.services.workflow.task_intent_execution import WorkflowTaskIntentExecution
@@ -74,6 +78,7 @@ class FeishuWorkflowService:
     def __init__(self) -> None:
         self.orchestrator = AgentOrchestrator()
         self.message_api = FeishuMessageAPI()
+        self.message_resource_api = FeishuMessageResourceAPI()
         self.canvas_artifact_service = CanvasArtifactService()
         self.canvas_tool = CanvasTool(artifact_service=self.canvas_artifact_service)
         self.delivery_artifact_service = DeliveryArtifactService()
@@ -83,6 +88,7 @@ class FeishuWorkflowService:
         self.media_api = FeishuMediaAPI()
         self.user_api = FeishuUserAPI()
         self.memory_service = MemoryService()
+        self.offline_document_parser = OfflineDocumentParser()
         self.office_artifact_service = OfficeArtifactService()
         self.presentation_artifact_service = PresentationArtifactService()
         self.presentation_tool = PresentationTool(artifact_service=self.presentation_artifact_service)
@@ -91,6 +97,7 @@ class FeishuWorkflowService:
         self.interaction_service = InteractionService()
         self.llm_service = LLMService()
         self.next_action_service = ContextualNextActionService(llm_service=self.llm_service, enable_llm=False)
+        self.offline_document_merge_service = OfflineDocumentMergeService()
         self.requirement_service = RequirementService(
             task_run_service=self.task_run_service,
             session_document_service=self.session_document_service,
@@ -120,6 +127,7 @@ class FeishuWorkflowService:
         self.graph_runner = GraphRunner(self)
         self.analysis_execution = WorkflowAnalysisExecution(self)
         self.canvas_execution = WorkflowCanvasExecution(self)
+        self.offline_document_execution = WorkflowOfflineDocumentExecution(self)
         self.slides_execution = WorkflowSlidesExecution(self)
         self.status_execution = WorkflowStatusExecution(self)
         self.task_intent_execution = WorkflowTaskIntentExecution(self)
@@ -135,6 +143,7 @@ class FeishuWorkflowService:
         return DocTool(
             doc_api=self.doc_api,
             session_document_service=self.session_document_service,
+            media_api=self.media_api,
         )
 
     def handle_message(self, message: FeishuMessageContext) -> dict:
@@ -725,44 +734,47 @@ class FeishuWorkflowService:
             requirement_document=requirement_document,
             requirement_id=requirement_id,
         )
-        if candidates and self.llm_service.is_configured():
-            try:
-                selection = self.llm_service.resolve_document_target(
-                    {
-                        "instruction": message.text,
-                        "requirement_id": requirement_id or None,
-                        "route": route_decision.route,
-                        "route_reason": route_decision.reason,
-                        "workspace_context": self._compact_document_target_context(workspace_context),
-                        "current_requirement_document_id": (
-                            str((requirement_document or {}).get("document_id") or "").strip() or None
-                        )
-                        if isinstance(requirement_document, dict)
-                        else None,
-                        "candidates": [item["llm"] for item in candidates],
-                    }
-                )
-                target_document, clarification = self._apply_document_target_selection(
-                    selection,
-                    candidates,
-                    requirement_id=requirement_id,
-                )
-                if target_document is not None or clarification is not None:
-                    return target_document, clarification
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("LLM document target resolution failed, using safe fallback: %s", exc)
+        if candidates:
+            if self.llm_service.is_configured():
+                try:
+                    selection = self.llm_service.resolve_document_target(
+                        {
+                            "instruction": message.text,
+                            "requirement_id": requirement_id or None,
+                            "route": route_decision.route,
+                            "route_reason": route_decision.reason,
+                            "workspace_context": self._compact_document_target_context(workspace_context),
+                            "current_requirement_document_id": (
+                                str((requirement_document or {}).get("document_id") or "").strip() or None
+                            )
+                            if isinstance(requirement_document, dict)
+                            else None,
+                            "candidates": [item["llm"] for item in candidates],
+                        }
+                    )
+                    target_document, clarification = self._apply_document_target_selection(
+                        selection,
+                        candidates,
+                        requirement_id=requirement_id,
+                    )
+                    if target_document is not None or clarification is not None:
+                        return target_document, clarification
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("LLM document target resolution failed, asking user to clarify: %s", exc)
 
-        fallback_document = self._fallback_document_target_for_route(
-            message,
-            requirement_document=requirement_document,
-            requirement_id=requirement_id,
-        )
-        clarification = self._build_document_selection_clarification(
-            message,
-            route_decision,
-            target_document=fallback_document,
-        )
-        return fallback_document, clarification
+            return None, self._document_target_clarification(
+                {
+                    "action": "clarify",
+                    "reason": "LLM did not provide a safe document target.",
+                    "clarification": {
+                        "question": "这次要更新哪一份需求文档？",
+                        "options": [],
+                    },
+                },
+                candidates,
+            )
+
+        return {}, None
 
     def _document_target_candidates(
         self,
@@ -874,23 +886,6 @@ class FeishuWorkflowService:
             "options": option_texts[:5],
             "blocking": True,
         }
-
-    def _fallback_document_target_for_route(
-        self,
-        message: FeishuMessageContext,
-        *,
-        requirement_document: dict | None,
-        requirement_id: str,
-    ) -> dict | None:
-        if isinstance(requirement_document, dict):
-            return requirement_document
-        explicit_document = self._resolve_target_document_for_instruction(message.session_id, message.text)
-        if explicit_document is not None and self._document_target_allowed_for_requirement(
-            explicit_document,
-            requirement_id,
-        ):
-            return explicit_document
-        return requirement_document
 
     @staticmethod
     def _graph_primary_supports_route(route_decision: RouteDecision) -> bool:
@@ -1772,6 +1767,7 @@ class FeishuWorkflowService:
         confirmation_id: str,
         answer_value: str,
         answered_by: str = "user",
+        override_instruction: str | None = None,
     ) -> dict | None:
         if self._should_run_graph_primary():
             graph_result = self.graph_runner.resume_after_confirmation(
@@ -1787,6 +1783,7 @@ class FeishuWorkflowService:
             confirmation_id=confirmation_id,
             answer_value=answer_value,
             answered_by=answered_by,
+            override_instruction=override_instruction,
         )
 
     def revise_document_from_task_run(
@@ -1836,6 +1833,21 @@ class FeishuWorkflowService:
         artifact_id: str | None = None,
     ):
         return self.revision_workflow.revise_slides_from_task_run(
+            source_task_run_id,
+            instruction=instruction,
+            requested_by=requested_by,
+            artifact_id=artifact_id,
+        )
+
+    def revise_canvas_from_task_run(
+        self,
+        source_task_run_id: str,
+        *,
+        instruction: str,
+        requested_by: str = "pilot_workbench",
+        artifact_id: str | None = None,
+    ):
+        return self.revision_workflow.revise_canvas_from_task_run(
             source_task_run_id,
             instruction=instruction,
             requested_by=requested_by,

@@ -10,6 +10,7 @@ class FakeDocAPI:
         self.configured = configured
         self.created: list[dict] = []
         self.appended: list[dict] = []
+        self.replaced: list[dict] = []
 
     def is_configured(self) -> bool:
         return self.configured
@@ -29,6 +30,36 @@ class FakeDocAPI:
             "document_id": document_id,
             "url": f"https://feishu.example/{document_id}",
             "title": title,
+        }
+
+    def replace_document_sections(
+        self,
+        document_id: str,
+        title: str,
+        sections: list[dict],
+        *,
+        target_headings: list[str] | None = None,
+        append_headings: list[str] | None = None,
+        **_: dict,
+    ) -> dict:
+        self.replaced.append(
+            {
+                "document_id": document_id,
+                "title": title,
+                "sections": sections,
+                "target_headings": list(target_headings or []),
+                "append_headings": list(append_headings or []),
+            }
+        )
+        return {
+            "document_id": document_id,
+            "url": f"https://feishu.example/{document_id}",
+            "title": title,
+            "section_snapshot": sections,
+            "section_block_index": [
+                {"heading": str(section.get("heading") or ""), "block_ids": [f"block_{index}"]}
+                for index, section in enumerate(sections, start=1)
+            ],
         }
 
 
@@ -279,8 +310,10 @@ class FeishuArtifactIntegratorTests(unittest.TestCase):
     def test_sync_delivery_manifest_uploads_canvas_image_when_enabled(self) -> None:
         settings.feishu_artifact_canvas_image_enabled = True
         svg_path = Path("data") / "artifacts" / "canvas" / "run_1.svg"
+        png_path = Path("data") / "artifacts" / "canvas" / "run_1.png"
         svg_path.parent.mkdir(parents=True, exist_ok=True)
         svg_path.write_text("<svg></svg>", encoding="utf-8")
+        png_path.write_bytes(b"png")
         doc_api = FakeDocAPI()
         media_api = FakeMediaAPI()
         try:
@@ -301,6 +334,7 @@ class FeishuArtifactIntegratorTests(unittest.TestCase):
             result = integrator.sync_delivery_manifest(detail, _manifest())
         finally:
             svg_path.unlink(missing_ok=True)
+            png_path.unlink(missing_ok=True)
 
         self.assertEqual(result["status"], "ready")
         self.assertEqual(result["media_items"][0]["kind"], "canvas_image")
@@ -308,6 +342,7 @@ class FeishuArtifactIntegratorTests(unittest.TestCase):
         self.assertEqual(result["canvas_sync"]["status"], "ready")
         self.assertEqual(result["canvas_sync"]["media_items"][0]["file_token"], "img_token_1")
         self.assertEqual(media_api.uploads[0]["document_id"], "doc_created")
+        self.assertEqual(media_api.uploads[0]["file_name"], "run_1.png")
         image_append = doc_api.appended[-1]["sections"][0]["paragraphs"][0]
         self.assertEqual(image_append["type"], "image")
         self.assertEqual(image_append["token"], "img_token_1")
@@ -317,8 +352,10 @@ class FeishuArtifactIntegratorTests(unittest.TestCase):
     def test_sync_delivery_manifest_keeps_doc_ready_when_canvas_image_upload_fails(self) -> None:
         settings.feishu_artifact_canvas_image_enabled = True
         svg_path = Path("data") / "artifacts" / "canvas" / "run_1.svg"
+        png_path = Path("data") / "artifacts" / "canvas" / "run_1.png"
         svg_path.parent.mkdir(parents=True, exist_ok=True)
         svg_path.write_text("<svg></svg>", encoding="utf-8")
+        png_path.write_bytes(b"png")
         try:
             integrator = FeishuArtifactIntegrator(
                 doc_api=FakeDocAPI(),
@@ -339,10 +376,45 @@ class FeishuArtifactIntegratorTests(unittest.TestCase):
             )
         finally:
             svg_path.unlink(missing_ok=True)
+            png_path.unlink(missing_ok=True)
 
         self.assertEqual(result["status"], "partial")
         self.assertEqual(result["document_id"], "doc_created")
         self.assertTrue(result["warnings"])
+        self.assertTrue(any(item["kind"] == "canvas_link" for item in result["canvas_sync"]["items"]))
+
+    def test_sync_delivery_manifest_falls_back_to_canvas_links_when_png_is_missing(self) -> None:
+        settings.feishu_artifact_canvas_image_enabled = True
+        svg_path = Path("data") / "artifacts" / "canvas" / "run_1.svg"
+        svg_path.parent.mkdir(parents=True, exist_ok=True)
+        svg_path.write_text("<svg></svg>", encoding="utf-8")
+        doc_api = FakeDocAPI()
+        media_api = FakeMediaAPI()
+        try:
+            integrator = FeishuArtifactIntegrator(
+                doc_api=doc_api,
+                media_api=media_api,
+                session_document_service=FakeSessionDocumentService(),
+                requirement_service=FakeRequirementService(),
+            )
+
+            result = integrator.sync_delivery_manifest(
+                SimpleNamespace(
+                    task_run_id="run_1",
+                    session_id="session_1",
+                    requirement_id="req_1",
+                    title="评审交付",
+                    session_documents=[],
+                ),
+                _manifest(),
+            )
+        finally:
+            svg_path.unlink(missing_ok=True)
+
+        self.assertEqual(result["status"], "partial")
+        self.assertFalse(media_api.uploads)
+        self.assertTrue(any(item["kind"] == "canvas_link" for item in result["canvas_sync"]["items"]))
+        self.assertEqual(doc_api.appended[-1]["sections"][0]["heading"], "Canvas 预览链接")
 
     def test_sync_delivery_manifest_uploads_slides_pptx_when_enabled(self) -> None:
         settings.feishu_artifact_slides_upload_enabled = True
@@ -561,6 +633,201 @@ class FeishuArtifactIntegratorTests(unittest.TestCase):
         self.assertEqual(result["status"], "partial")
         self.assertFalse(media_api.file_uploads)
         self.assertIn("slides_pptx_file_not_found", result["warnings"])
+
+    def test_sync_current_task_run_artifacts_replaces_stable_sections(self) -> None:
+        doc_api = FakeDocAPI()
+        session_documents = FakeSessionDocumentService()
+        integrator = FeishuArtifactIntegrator(
+            doc_api=doc_api,
+            session_document_service=session_documents,
+            requirement_service=FakeRequirementService(
+                current_document={
+                    "document_id": "doc_existing",
+                    "url": "https://feishu.example/doc_existing",
+                    "title": "当前协作文档",
+                    "version": 5,
+                    "section_snapshot": [{"heading": "保留区域", "paragraphs": ["保留内容"]}],
+                    "section_block_index": [{"heading": "保留区域", "block_ids": ["old_block"]}],
+                }
+            ),
+        )
+
+        result = integrator.sync_current_task_run_artifacts(
+            SimpleNamespace(
+                task_run_id="run_1",
+                session_id="session_1",
+                requirement_id="req_1",
+                title="工作台修订",
+                artifacts=[
+                    {
+                        "artifact_id": "artifact_slides_1",
+                        "artifact_type": "slides_package",
+                        "title": "答辩 PPT",
+                        "status": "ready",
+                        "url": "/api/artifacts/slides/run_1.html",
+                        "preview_json": '{"exports":{"html":"/api/artifacts/slides/run_1.html","pptx":"/api/artifacts/slides/run_1.pptx","pdf":"/api/artifacts/slides/run_1.pdf"}}',
+                    },
+                    {
+                        "artifact_id": "artifact_canvas_1",
+                        "artifact_type": "canvas",
+                        "title": "流程画布",
+                        "status": "ready",
+                        "url": "/api/artifacts/canvas/run_1.html",
+                        "preview_json": '{"exports":{"html":"/api/artifacts/canvas/run_1.html","svg":"/api/artifacts/canvas/run_1.svg","json":"/api/artifacts/canvas/run_1.json"}}',
+                    },
+                ],
+            )
+        )
+
+        self.assertEqual(result["status"], "ready")
+        self.assertEqual(result["document_id"], "doc_existing")
+        self.assertEqual(len(doc_api.replaced), 1)
+        self.assertFalse(doc_api.appended)
+        self.assertEqual(doc_api.replaced[0]["target_headings"], ["当前 PPT", "当前 Canvas"])
+        section_text = "\n".join(
+            str(paragraph)
+            for section in doc_api.replaced[0]["sections"]
+            for paragraph in section.get("paragraphs", [])
+        )
+        self.assertIn("https://public.example/api/artifacts/slides/run_1.pptx", section_text)
+        self.assertIn("https://public.example/api/artifacts/canvas/run_1.html", section_text)
+        self.assertEqual(session_documents.saved[0]["sync_mode"], "current_artifacts_updated")
+        self.assertEqual(session_documents.saved[0]["version"], 6)
+        self.assertEqual(result["slides_sync"]["sync_mode"], "current_artifacts_updated")
+        self.assertEqual(result["canvas_sync"]["sync_mode"], "current_artifacts_updated")
+
+    def test_sync_current_task_run_artifacts_skips_without_target_document(self) -> None:
+        integrator = FeishuArtifactIntegrator(
+            doc_api=FakeDocAPI(),
+            session_document_service=FakeSessionDocumentService(),
+            requirement_service=FakeRequirementService(current_document=None),
+        )
+
+        result = integrator.sync_current_task_run_artifacts(
+            SimpleNamespace(
+                task_run_id="run_1",
+                session_id="session_1",
+                requirement_id="req_1",
+                title="工作台修订",
+                artifacts=[
+                    {
+                        "artifact_id": "artifact_canvas_1",
+                        "artifact_type": "canvas",
+                        "title": "流程画布",
+                        "status": "ready",
+                        "url": "/api/artifacts/canvas/run_1.html",
+                        "preview_json": '{"exports":{"html":"/api/artifacts/canvas/run_1.html","svg":"/api/artifacts/canvas/run_1.svg","json":"/api/artifacts/canvas/run_1.json"}}',
+                    }
+                ],
+            )
+        )
+
+        self.assertEqual(result["status"], "skipped")
+        self.assertEqual(result["reason"], "current_document_missing")
+
+    def test_sync_current_task_run_artifacts_embeds_canvas_image_into_current_section(self) -> None:
+        settings.feishu_artifact_canvas_image_enabled = True
+        svg_path = Path("data") / "artifacts" / "canvas" / "run_1.svg"
+        png_path = Path("data") / "artifacts" / "canvas" / "run_1.png"
+        svg_path.parent.mkdir(parents=True, exist_ok=True)
+        svg_path.write_text("<svg></svg>", encoding="utf-8")
+        png_path.write_bytes(b"png")
+        doc_api = FakeDocAPI()
+        media_api = FakeMediaAPI()
+        try:
+            integrator = FeishuArtifactIntegrator(
+                doc_api=doc_api,
+                media_api=media_api,
+                session_document_service=FakeSessionDocumentService(),
+                requirement_service=FakeRequirementService(
+                    current_document={
+                        "document_id": "doc_existing",
+                        "url": "https://feishu.example/doc_existing",
+                        "title": "当前协作文档",
+                        "version": 2,
+                    }
+                ),
+            )
+
+            result = integrator.sync_current_task_run_artifacts(
+                SimpleNamespace(
+                    task_run_id="run_1",
+                    session_id="session_1",
+                    requirement_id="req_1",
+                    title="画布修订",
+                    artifacts=[
+                        {
+                            "artifact_id": "artifact_canvas_1",
+                            "artifact_type": "canvas",
+                            "title": "流程画布",
+                            "status": "ready",
+                            "url": "/api/artifacts/canvas/run_1.html",
+                            "preview_json": '{"exports":{"html":"/api/artifacts/canvas/run_1.html","svg":"/api/artifacts/canvas/run_1.svg","json":"/api/artifacts/canvas/run_1.json"}}',
+                        }
+                    ],
+                )
+            )
+        finally:
+            svg_path.unlink(missing_ok=True)
+            png_path.unlink(missing_ok=True)
+
+        self.assertEqual(result["status"], "ready")
+        self.assertEqual(media_api.uploads[0]["file_name"], "run_1.png")
+        canvas_section = doc_api.replaced[0]["sections"][0]
+        image_block = next(item for item in canvas_section["paragraphs"] if isinstance(item, dict))
+        self.assertEqual(image_block["type"], "image")
+        self.assertEqual(image_block["token"], "img_token_1")
+
+    def test_sync_requirement_current_artifacts_uses_requirement_pointers(self) -> None:
+        doc_api = FakeDocAPI()
+        session_documents = FakeSessionDocumentService()
+        integrator = FeishuArtifactIntegrator(
+            doc_api=doc_api,
+            session_document_service=session_documents,
+            requirement_service=FakeRequirementService(),
+        )
+
+        result = integrator.sync_requirement_current_artifacts(
+            SimpleNamespace(
+                requirement_id="req_1",
+                primary_session_id="session_1",
+                title="Current Requirement",
+                current_document={
+                    "session_id": "session_1",
+                    "document_id": "doc_manual",
+                    "url": "https://feishu.example/doc_manual",
+                    "title": "Manual Target Doc",
+                    "version": 4,
+                    "section_snapshot": [{"heading": "Keep", "paragraphs": ["Existing content"]}],
+                    "section_block_index": [{"heading": "Keep", "block_ids": ["keep_1"]}],
+                },
+                current_slides={
+                    "artifact_id": "artifact_slides_manual",
+                    "artifact_type": "slides_package",
+                    "title": "Manual Slides",
+                    "status": "ready",
+                    "url": "/api/artifacts/slides/run_1.html",
+                    "preview_json": '{"exports":{"html":"/api/artifacts/slides/run_1.html","pptx":"/api/artifacts/slides/run_1.pptx"}}',
+                },
+                current_canvas={
+                    "artifact_id": "artifact_canvas_manual",
+                    "artifact_type": "canvas",
+                    "title": "Manual Canvas",
+                    "status": "ready",
+                    "url": "/api/artifacts/canvas/run_1.html",
+                    "preview_json": '{"exports":{"html":"/api/artifacts/canvas/run_1.html","svg":"/api/artifacts/canvas/run_1.svg","json":"/api/artifacts/canvas/run_1.json"}}',
+                },
+            )
+        )
+
+        self.assertEqual(result["status"], "ready")
+        self.assertEqual(result["document_id"], "doc_manual")
+        self.assertEqual(len(doc_api.replaced), 1)
+        self.assertEqual(doc_api.replaced[0]["target_headings"], ["当前 PPT", "当前 Canvas"])
+        self.assertEqual(session_documents.saved[0]["session_id"], "session_1")
+        self.assertEqual(session_documents.saved[0]["version"], 5)
+        self.assertEqual(result["slides_sync"]["sync_mode"], "current_artifacts_updated")
+        self.assertEqual(result["canvas_sync"]["sync_mode"], "current_artifacts_updated")
 
 
 def _manifest() -> dict:

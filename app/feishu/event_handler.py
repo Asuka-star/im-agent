@@ -64,11 +64,11 @@ class FeishuEventHandler:
             return None
 
         parsed_content = self._parse_message_content(message.content)
-        raw_text, file_key, transcription_notice = self._extract_message_text(
+        raw_text, file_key, file_name, transcription_notice = self._extract_message_text(
             message=message,
             parsed_content=parsed_content,
         )
-        if not raw_text and not transcription_notice:
+        if not raw_text and not transcription_notice and not file_key:
             return None
 
         parsed_mentions = self._parse_mentions(message.mentions or [])
@@ -115,6 +115,7 @@ class FeishuEventHandler:
             text=text,
             raw_text=raw_text,
             file_key=file_key,
+            file_name=file_name,
             transcription_notice=transcription_notice,
             is_mentioned=any(user.is_bot for user in parsed_mentions) or voice_mention or text_prefix_mention,
             mentioned_users=parsed_mentions,
@@ -172,31 +173,34 @@ class FeishuEventHandler:
         *,
         message: FeishuMessage,
         parsed_content: dict,
-    ) -> tuple[str, str | None, str | None]:
+    ) -> tuple[str, str | None, str | None, str | None]:
         message_type = (message.message_type or "text").strip().lower()
         if message_type in {"", "text", "post"}:
-            return str(parsed_content.get("text") or "").strip(), None, None
+            return str(parsed_content.get("text") or "").strip(), None, None, None
 
         if message_type == "audio":
             return self._extract_audio_text(
                 message=message, parsed_content=parsed_content
             )
 
-        return "", None, None
+        if message_type == "file":
+            return self._extract_file_text(parsed_content=parsed_content)
+
+        return "", None, None, None
 
     def _extract_audio_text(
         self,
         *,
         message: FeishuMessage,
         parsed_content: dict,
-    ) -> tuple[str, str | None, str | None]:
+    ) -> tuple[str, str | None, str | None, str | None]:
         file_key = str(parsed_content.get("file_key") or "").strip()
         if not file_key:
             logger.info(
                 "Ignoring audio message without file_key: message_id=%s",
                 message.message_id,
             )
-            return "", None, None
+            return "", None, None, None
 
         if not self.speech_to_text_service.is_configured():
             notice = self.speech_to_text_service.unavailable_notice()
@@ -205,13 +209,13 @@ class FeishuEventHandler:
                 message.message_id,
                 notice,
             )
-            return "", file_key, notice
+            return "", file_key, None, notice
 
         if not message.message_id:
             logger.warning(
                 "Ignoring audio message without message_id: file_key=%s", file_key
             )
-            return "", file_key, self.speech_to_text_service.failure_notice()
+            return "", file_key, None, self.speech_to_text_service.failure_notice()
 
         try:
             audio_bytes, content_type = (
@@ -225,14 +229,31 @@ class FeishuEventHandler:
                 content=audio_bytes,
                 content_type=content_type,
             )
-            return transcript.strip(), file_key, None
+            return transcript.strip(), file_key, None, None
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "Audio transcription failed: message_id=%s error=%s",
                 message.message_id,
                 exc,
             )
-            return "", file_key, self.speech_to_text_service.failure_notice()
+            return "", file_key, None, self.speech_to_text_service.failure_notice()
+
+    def _extract_file_text(
+        self,
+        *,
+        parsed_content: dict,
+    ) -> tuple[str, str | None, str | None, str | None]:
+        file_key = str(parsed_content.get("file_key") or "").strip()
+        file_name = str(
+            parsed_content.get("file_name")
+            or parsed_content.get("name")
+            or parsed_content.get("title")
+            or ""
+        ).strip()
+        text = str(parsed_content.get("text") or "").strip() or file_name
+        if not file_key:
+            return "", None, file_name or None, None
+        return text, file_key, file_name or None, None
 
     def _parse_mentions(
         self, mentions: list[FeishuMention]

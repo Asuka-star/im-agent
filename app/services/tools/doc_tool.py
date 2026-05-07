@@ -2,10 +2,18 @@ from __future__ import annotations
 
 import logging
 import re
+from copy import deepcopy
 from dataclasses import dataclass, field
 
 from app.feishu.doc_api import FeishuDocAPI
+from app.feishu.media_api import FeishuMediaAPI
 from app.services.artifact_edit_plan import ArtifactEditPlanner
+from app.services.document_section_utils import (
+    normalize_section_paragraphs,
+    paragraph_signature,
+    paragraph_preview_text,
+    section_snapshot_map,
+)
 from app.services.session_document_service import SessionDocumentService
 from app.utils.values import coerce_positive_int
 
@@ -38,9 +46,11 @@ class DocTool:
         *,
         doc_api: FeishuDocAPI,
         session_document_service: SessionDocumentService,
+        media_api: FeishuMediaAPI | None = None,
     ) -> None:
         self.doc_api = doc_api
         self.session_document_service = session_document_service
+        self.media_api = media_api
 
     def sync_package_to_session_doc(
         self,
@@ -66,6 +76,12 @@ class DocTool:
         current_doc = target_document if isinstance(target_document, dict) else self.session_document_service.get_current_document(session_id)
         current_snapshot = current_doc.get("section_snapshot") if isinstance(current_doc, dict) else None
         if current_doc and current_doc.get("document_id"):
+            sections = self.prepare_sections_for_document(
+                sections,
+                document_id=str(current_doc["document_id"]),
+                package=package,
+            )
+            package["sections"] = sections
             try:
                 change_plan = self.plan_doc_section_changes(
                     sections,
@@ -215,12 +231,61 @@ class DocTool:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Feishu doc section replacement failed, recreating document: %s", exc)
 
-        try:
-            created = self.doc_api.create_document_from_sections(title, sections)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Feishu doc sync failed: %s", exc)
-            lines = [f"- Document sync failed: {exc}"]
-            return DocumentSyncResult(mode="sync_failed", status="sync_failed", summary_lines=lines, error=str(exc))
+        sections = self.prepare_sections_for_document(
+            sections,
+            document_id=None,
+            package=package,
+            preserve_unresolved_uploads=True,
+        )
+        package["sections"] = sections
+        if self.has_pending_image_uploads(sections):
+            if self.media_api is not None:
+                try:
+                    created = self.doc_api.create_empty_document(title)
+                    sections = self.prepare_sections_for_document(
+                        sections,
+                        document_id=str(created["document_id"]),
+                        package=package,
+                    )
+                    package["sections"] = sections
+                    appended = self.doc_api.append_sections_to_document(
+                        str(created["document_id"]),
+                        title,
+                        sections,
+                    )
+                    created = {**created, **appended}
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Feishu doc sync failed: %s", exc)
+                    lines = [f"- Document sync failed: {exc}"]
+                    return DocumentSyncResult(mode="sync_failed", status="sync_failed", summary_lines=lines, error=str(exc))
+            else:
+                sections = self.prepare_sections_for_document(
+                    sections,
+                    document_id=None,
+                    package=package,
+                    preserve_unresolved_uploads=False,
+                )
+                package["sections"] = sections
+                try:
+                    created = self.doc_api.create_document_from_sections(title, sections)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Feishu doc sync failed: %s", exc)
+                    lines = [f"- Document sync failed: {exc}"]
+                    return DocumentSyncResult(mode="sync_failed", status="sync_failed", summary_lines=lines, error=str(exc))
+        else:
+            sections = self.prepare_sections_for_document(
+                sections,
+                document_id=None,
+                package=package,
+                preserve_unresolved_uploads=False,
+            )
+            package["sections"] = sections
+            try:
+                created = self.doc_api.create_document_from_sections(title, sections)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Feishu doc sync failed: %s", exc)
+                lines = [f"- Document sync failed: {exc}"]
+                return DocumentSyncResult(mode="sync_failed", status="sync_failed", summary_lines=lines, error=str(exc))
 
         remembered = self.session_document_service.save_current_document(
             session_id,
@@ -249,6 +314,143 @@ class DocTool:
             summary_lines=lines,
             document_info=remembered,
         )
+
+    def prepare_sections_for_document(
+        self,
+        sections: list[dict],
+        *,
+        document_id: str | None,
+        package: dict,
+        preserve_unresolved_uploads: bool = False,
+    ) -> list[dict]:
+        prepared = deepcopy(sections)
+        asset_map = self.offline_assets_by_id(package)
+        normalized_document_id = str(document_id or "").strip()
+        for section in prepared:
+            if not isinstance(section, dict):
+                continue
+            paragraphs = section.get("paragraphs") if isinstance(section.get("paragraphs"), list) else []
+            resolved: list[object] = []
+            for paragraph in paragraphs:
+                resolved.append(
+                    self.resolve_paragraph_for_document(
+                        paragraph,
+                        document_id=normalized_document_id or None,
+                        asset_map=asset_map,
+                        preserve_unresolved_uploads=preserve_unresolved_uploads,
+                    )
+                )
+            section["paragraphs"] = normalize_section_paragraphs(resolved)
+        return prepared
+
+    def resolve_paragraph_for_document(
+        self,
+        paragraph: object,
+        *,
+        document_id: str | None,
+        asset_map: dict[str, dict],
+        preserve_unresolved_uploads: bool,
+    ) -> object:
+        if not isinstance(paragraph, dict) or str(paragraph.get("type") or "").strip().lower() != "image":
+            return paragraph
+        token = str(paragraph.get("token") or "").strip()
+        if token:
+            return self._finalize_image_paragraph(paragraph, token=token)
+
+        asset_id = str(paragraph.get("asset_id") or "").strip()
+        asset = asset_map.get(asset_id) if asset_id else None
+        local_path = str(paragraph.get("local_path") or (asset or {}).get("local_path") or "").strip()
+        file_name = str(paragraph.get("file_name") or (asset or {}).get("file_name") or "").strip()
+        if document_id and local_path and self.media_api is not None:
+            try:
+                uploaded = self.media_api.upload_docx_image(
+                    document_id=document_id,
+                    file_path=local_path,
+                    file_name=file_name or None,
+                )
+                return self._finalize_image_paragraph(
+                    paragraph,
+                    token=str(uploaded.get("token") or "").strip(),
+                    file_name=file_name or str(uploaded.get("file_name") or "").strip(),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Offline image upload failed for document %s: %s", document_id, exc)
+                return self.image_upload_fallback(paragraph, detail=str(exc))
+        if preserve_unresolved_uploads and local_path:
+            preserved = dict(paragraph)
+            preserved["local_path"] = local_path
+            if file_name:
+                preserved["file_name"] = file_name
+            if asset_id:
+                preserved["asset_id"] = asset_id
+            return preserved
+        return self.image_upload_fallback(paragraph)
+
+    def has_pending_image_uploads(self, sections: list[dict]) -> bool:
+        for section in sections:
+            if not isinstance(section, dict):
+                continue
+            paragraphs = section.get("paragraphs") if isinstance(section.get("paragraphs"), list) else []
+            for paragraph in paragraphs:
+                if not isinstance(paragraph, dict):
+                    continue
+                if str(paragraph.get("type") or "").strip().lower() != "image":
+                    continue
+                if str(paragraph.get("token") or "").strip():
+                    continue
+                if str(paragraph.get("local_path") or "").strip():
+                    return True
+        return False
+
+    @staticmethod
+    def offline_assets_by_id(package: dict) -> dict[str, dict]:
+        assets = package.get("assets") if isinstance(package.get("assets"), list) else []
+        result: dict[str, dict] = {}
+        for asset in assets:
+            if not isinstance(asset, dict):
+                continue
+            asset_id = str(asset.get("asset_id") or "").strip()
+            if asset_id:
+                result[asset_id] = asset
+        return result
+
+    @staticmethod
+    def _finalize_image_paragraph(paragraph: dict, *, token: str, file_name: str | None = None) -> dict:
+        finalized = {
+            "type": "image",
+            "token": token,
+        }
+        for key in ("caption", "alt", "asset_id"):
+            value = str(paragraph.get(key) or "").strip()
+            if value:
+                finalized[key] = value
+        if file_name:
+            finalized["file_name"] = file_name
+        width = DocTool._safe_positive_int(paragraph.get("width"))
+        height = DocTool._safe_positive_int(paragraph.get("height"))
+        if width is not None:
+            finalized["width"] = width
+        if height is not None:
+            finalized["height"] = height
+        return finalized
+
+    @staticmethod
+    def image_upload_fallback(paragraph: dict, *, detail: str | None = None) -> dict:
+        caption = str(paragraph.get("caption") or paragraph.get("alt") or paragraph.get("file_name") or "").strip()
+        text = "离线图片未能同步到飞书文档"
+        if caption:
+            text += f"：{caption}"
+        if detail:
+            text += f"（{detail}）"
+        return {"type": "callout", "kind": "warning", "text": text}
+
+    @staticmethod
+    def _safe_positive_int(value: object) -> int | None:
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            return None
+        return number if number > 0 else None
 
     @staticmethod
     def clean_sync_labels(value: object) -> list[str]:
@@ -316,27 +518,28 @@ class DocTool:
             "演示重点",
             "建议补充素材",
         ]
-        grouped: dict[str, list[str]] = {}
+        grouped: dict[str, list[object]] = {}
         appearance_order: list[str] = []
         for section in sections:
             if not isinstance(section, dict):
                 continue
             raw_heading = str(section.get("heading") or "").strip()
             canonical_heading = canonical_aliases.get(raw_heading, raw_heading or "未命名章节")
-            paragraphs = section.get("paragraphs") if isinstance(section.get("paragraphs"), list) else []
-            cleaned: list[str] = []
-            for item in paragraphs:
-                text = str(item).strip()
-                if text and text not in cleaned:
-                    cleaned.append(text)
+            cleaned = normalize_section_paragraphs(
+                section.get("paragraphs") if isinstance(section.get("paragraphs"), list) else [],
+            )
             if not raw_heading and not cleaned:
                 continue
             if canonical_heading not in grouped:
                 grouped[canonical_heading] = []
                 appearance_order.append(canonical_heading)
-            for text in cleaned:
-                if text not in grouped[canonical_heading]:
-                    grouped[canonical_heading].append(text)
+            existing = grouped[canonical_heading]
+            existing_signatures = {paragraph_signature(item) for item in existing}
+            for item in cleaned:
+                signature = paragraph_signature(item)
+                if signature not in existing_signatures:
+                    existing.append(item)
+                    existing_signatures.add(signature)
 
         ordered_headings = [heading for heading in preferred_order if heading in grouped]
         ordered_headings.extend(heading for heading in appearance_order if heading not in ordered_headings)
@@ -373,8 +576,9 @@ class DocTool:
             heading = str(section.get("heading") or "supplement").strip() or "supplement"
             if targeted_headings and heading not in targeted_headings:
                 continue
-            paragraphs = section.get("paragraphs") if isinstance(section.get("paragraphs"), list) else []
-            cleaned = [str(item).strip() for item in paragraphs if str(item).strip()]
+            cleaned = normalize_section_paragraphs(
+                section.get("paragraphs") if isinstance(section.get("paragraphs"), list) else [],
+            )
             if not cleaned:
                 continue
             if previous_map.get(heading) == cleaned:
@@ -924,7 +1128,7 @@ class DocTool:
                 paragraphs = section.get("paragraphs") if isinstance(section.get("paragraphs"), list) else []
                 lines.append(f"- {heading}")
                 for paragraph in paragraphs[:4]:
-                    text = str(paragraph).strip()
+                    text = paragraph_preview_text(paragraph)
                     if text:
                         lines.append(f"  - {text}")
         return "\n".join(lines)
@@ -1005,16 +1209,8 @@ class DocTool:
         return re.sub(r"[\s\W_]+", "", str(value or "").lower(), flags=re.UNICODE)
 
     @staticmethod
-    def section_snapshot_map(snapshot: list[dict]) -> dict[str, list[str]]:
-        result: dict[str, list[str]] = {}
-        for section in snapshot:
-            if not isinstance(section, dict):
-                continue
-            heading = str(section.get("heading") or "").strip()
-            paragraphs = section.get("paragraphs") if isinstance(section.get("paragraphs"), list) else []
-            cleaned = [str(item).strip() for item in paragraphs if str(item).strip()]
-            result[heading] = cleaned
-        return result
+    def section_snapshot_map(snapshot: list[dict]) -> dict[str, list[object]]:
+        return section_snapshot_map(snapshot)
 
     @staticmethod
     def sections_for_written_headings(sections: list[dict], written_headings: list[str]) -> list[dict]:
@@ -1036,11 +1232,11 @@ class DocTool:
         deleted_headings: list[str] | None = None,
         delete_ranges: list[dict[str, object]] | None = None,
         rename_map: dict[str, str] | None = None,
-    ) -> list[dict[str, list[str]]]:
+    ) -> list[dict[str, list[object]]]:
         deleted = {heading for heading in (deleted_headings or []) if heading}
         rename_map = {str(old).strip(): str(new).strip() for old, new in (rename_map or {}).items() if str(old).strip() and str(new).strip()}
         range_delete_map = DocTool.snapshot_delete_map(previous_snapshot, delete_ranges or [])
-        merged: dict[str, list[str]] = {}
+        merged: dict[str, list[object]] = {}
         order: list[str] = []
         empty_allowed: set[str] = set()
 
@@ -1049,8 +1245,9 @@ class DocTool:
                 continue
             heading = str(section.get("heading") or "").strip()
             heading = rename_map.get(heading, heading)
-            paragraphs = section.get("paragraphs") if isinstance(section.get("paragraphs"), list) else []
-            cleaned = [str(item).strip() for item in paragraphs if str(item).strip()]
+            cleaned = normalize_section_paragraphs(
+                section.get("paragraphs") if isinstance(section.get("paragraphs"), list) else [],
+            )
             if range_delete_map.get(index) == "drop":
                 continue
             if range_delete_map.get(index) == "clear_body":
@@ -1067,8 +1264,9 @@ class DocTool:
             if not isinstance(section, dict):
                 continue
             heading = str(section.get("heading") or "").strip()
-            paragraphs = section.get("paragraphs") if isinstance(section.get("paragraphs"), list) else []
-            cleaned = [str(item).strip() for item in paragraphs if str(item).strip()]
+            cleaned = normalize_section_paragraphs(
+                section.get("paragraphs") if isinstance(section.get("paragraphs"), list) else [],
+            )
             if (not heading and not cleaned) or heading in deleted:
                 continue
             if heading not in merged:
@@ -1080,6 +1278,7 @@ class DocTool:
             for heading in order
             if merged.get(heading) or heading in empty_allowed
         ]
+
 
     @staticmethod
     def snapshot_delete_map(snapshot: list[dict], delete_ranges: list[dict[str, object]]) -> dict[int, str]:

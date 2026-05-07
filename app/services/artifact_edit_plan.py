@@ -84,6 +84,29 @@ class ArtifactEditPlanner:
     DELETE_MARKERS = ("删除", "删掉", "清空", "清除", "移除", "去掉", "去除", "不要保留", "delete", "remove", "drop", "clear")
     ADD_MARKERS = ("新增", "添加", "追加", "补充", "加一页", "加一张", "加一个", "add", "append", "insert")
     RENAME_MARKERS = ("重命名", "改名", "更名", "改成", "改为", "rename")
+    MEDIA_MARKERS = ("图片", "配图", "插图", "示意图", "截图", "image", "mockup", "diagram", "illustration")
+    TABLE_MARKERS = ("表格", "表", "table", "matrix")
+    LAYOUT_MARKERS = (
+        "布局",
+        "排版",
+        "左侧",
+        "右侧",
+        "左边",
+        "右边",
+        "居中",
+        "顶部",
+        "底部",
+        "上方",
+        "下方",
+        "对齐",
+        "left",
+        "right",
+        "center",
+        "top",
+        "bottom",
+        "align",
+        "layout",
+    )
     FORMAT_MARKERS = (
         "整理",
         "规范",
@@ -147,6 +170,7 @@ class ArtifactEditPlanner:
         has_compress = any(marker in text or marker in lower for marker in cls.COMPRESS_MARKERS)
         has_reorder = any(marker in text or marker in lower for marker in cls.REORDER_MARKERS)
         has_format = any(marker in text or marker in lower for marker in cls.FORMAT_MARKERS)
+        has_layout = any(marker in text or marker in lower for marker in cls.LAYOUT_MARKERS)
         explicit_targets: list[str] = []
 
         if has_delete:
@@ -165,14 +189,34 @@ class ArtifactEditPlanner:
         if has_add:
             clause = cls.operation_clause(text, cls.ADD_MARKERS)
             explicit_targets = cls.resolve_target_mentions(clause, targets)
-            operations.append(
-                ArtifactEditOperation(
-                    op_type="append",
-                    target=cls._target_payload(explicit_targets, clause),
-                    payload={"text": clause or text},
-                    reason="用户要求补充产物内容",
+            target_payload = cls._target_payload(explicit_targets, clause)
+            if cls._looks_like_media_add(clause):
+                operations.append(
+                    ArtifactEditOperation(
+                        op_type="add_media",
+                        target=target_payload,
+                        payload=cls._media_payload(clause or text),
+                        reason="用户要求补充图片或示意图内容",
+                    )
                 )
-            )
+            elif cls._looks_like_table_add(clause):
+                operations.append(
+                    ArtifactEditOperation(
+                        op_type="add_table",
+                        target=target_payload,
+                        payload=cls._table_payload(clause or text),
+                        reason="用户要求补充表格内容",
+                    )
+                )
+            else:
+                operations.append(
+                    ArtifactEditOperation(
+                        op_type="append",
+                        target=target_payload,
+                        payload={"text": clause or text},
+                        reason="用户要求补充产物内容",
+                    )
+                )
         if has_rename:
             clause = cls.operation_clause(text, cls.RENAME_MARKERS)
             explicit_targets = cls.resolve_target_mentions(clause, targets)
@@ -202,6 +246,17 @@ class ArtifactEditPlanner:
                     op_type="reorder",
                     target=cls._target_payload(explicit_targets, clause),
                     reason="用户要求调整产物顺序",
+                )
+            )
+        if has_layout:
+            clause = cls.operation_clause(text, cls.LAYOUT_MARKERS)
+            explicit_targets = cls.resolve_target_mentions(clause, targets)
+            operations.append(
+                ArtifactEditOperation(
+                    op_type="update_layout",
+                    target=cls._target_payload(explicit_targets, clause, default_scope="all"),
+                    payload=cls._layout_payload(clause or text),
+                    reason="用户要求调整产物布局或对齐方式",
                 )
             )
         if has_format:
@@ -486,3 +541,84 @@ class ArtifactEditPlanner:
                 if value and value not in targets:
                     targets.append(value)
         return targets
+
+    @classmethod
+    def _looks_like_media_add(cls, clause: str) -> bool:
+        lower = clause.lower()
+        return any(marker in clause or marker in lower for marker in cls.MEDIA_MARKERS)
+
+    @classmethod
+    def _looks_like_table_add(cls, clause: str) -> bool:
+        lower = clause.lower()
+        return any(marker in clause or marker in lower for marker in cls.TABLE_MARKERS)
+
+    @classmethod
+    def _media_payload(cls, clause: str) -> dict[str, Any]:
+        caption = cls._strip_action_prefix(clause)
+        return {
+            "media_kind": "image",
+            "source": "instruction",
+            "caption": caption or "补充图片说明",
+        }
+
+    @classmethod
+    def _table_payload(cls, clause: str) -> dict[str, Any]:
+        title = cls._strip_action_prefix(clause)
+        return {
+            "title": title or "表格型汇总",
+            "rows": [],
+        }
+
+    @staticmethod
+    def _layout_payload(clause: str) -> dict[str, Any]:
+        lower = clause.lower()
+        payload: dict[str, Any] = {"instruction": clause}
+        position_map = {
+            "左侧": "left",
+            "左边": "left",
+            "left": "left",
+            "右侧": "right",
+            "右边": "right",
+            "right": "right",
+            "上方": "top",
+            "顶部": "top",
+            "top": "top",
+            "下方": "bottom",
+            "底部": "bottom",
+            "bottom": "bottom",
+            "居中": "center",
+            "center": "center",
+        }
+        align_map = {
+            "顶部对齐": "top",
+            "顶对齐": "top",
+            "top align": "top",
+            "底部对齐": "bottom",
+            "bottom align": "bottom",
+            "左对齐": "left",
+            "left align": "left",
+            "右对齐": "right",
+            "right align": "right",
+            "居中对齐": "center",
+            "center align": "center",
+        }
+        for marker, value in position_map.items():
+            if marker in clause or marker in lower:
+                payload["position"] = value
+                break
+        for marker, value in align_map.items():
+            if marker in clause or marker in lower:
+                payload["align"] = value
+                break
+        return payload
+
+    @staticmethod
+    def _strip_action_prefix(text: str) -> str:
+        value = str(text or "").strip()
+        value = re.sub(
+            r"^(?:请|帮我|请帮我|新增|添加|追加|补充|插入|insert|add|append)\s*",
+            "",
+            value,
+            flags=re.IGNORECASE,
+        )
+        return value.strip("：:，,；;。 ")

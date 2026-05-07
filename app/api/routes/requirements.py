@@ -3,18 +3,23 @@ import logging
 from fastapi import APIRouter, HTTPException, Query
 
 from app.schemas.requirement import (
+    OfflineSyncRecord,
     RequirementCreateRequest,
+    RequirementCurrentProductsRequest,
     RequirementDetail,
     RequirementReassignRequest,
     RequirementSummary,
+    RequirementUpdateRequest,
 )
 from app.schemas.task_run import TaskRunSummary
+from app.services.feishu_workflow import FeishuWorkflowService
 from app.services.requirement_service import RequirementService
 
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
-requirement_service = RequirementService()
+workflow_service = FeishuWorkflowService()
+requirement_service = RequirementService(current_artifact_syncer=workflow_service.feishu_artifact_integrator)
 
 
 @router.get("/", response_model=list[RequirementSummary])
@@ -44,6 +49,40 @@ async def create_requirement(payload: RequirementCreateRequest) -> RequirementSu
 @router.get("/{requirement_id}", response_model=RequirementDetail)
 async def get_requirement(requirement_id: str) -> RequirementDetail:
     record = requirement_service.get_requirement(requirement_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Requirement not found")
+    return record
+
+
+@router.get("/{requirement_id}/offline-syncs", response_model=list[OfflineSyncRecord])
+async def list_requirement_offline_syncs(requirement_id: str) -> list[OfflineSyncRecord]:
+    record = requirement_service.get_requirement(requirement_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Requirement not found")
+    return requirement_service.list_offline_syncs(requirement_id)
+
+
+@router.patch("/{requirement_id}", response_model=RequirementDetail)
+async def update_requirement(requirement_id: str, payload: RequirementUpdateRequest) -> RequirementDetail:
+    updates = payload.model_dump(exclude_unset=True)
+    record = requirement_service.update_requirement(requirement_id, **updates)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Requirement not found")
+    return record
+
+
+@router.patch("/{requirement_id}/current-products", response_model=RequirementDetail)
+async def update_requirement_current_products(
+    requirement_id: str,
+    payload: RequirementCurrentProductsRequest,
+) -> RequirementDetail:
+    try:
+        record = requirement_service.update_current_products(
+            requirement_id,
+            updates=payload.model_dump(exclude_unset=True),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if record is None:
         raise HTTPException(status_code=404, detail="Requirement not found")
     return record

@@ -10,6 +10,7 @@ from sqlalchemy.exc import IntegrityError
 from app.db.database import SessionLocal
 from app.db.models import AppSetting, Session as SessionModel
 from app.services.app_state import AppStateService
+from app.services.document_section_utils import build_section_snapshot
 from app.utils.values import coerce_positive_int
 
 
@@ -214,22 +215,7 @@ class SessionDocumentService:
         self._mutate_document_state(session_id, lambda _current, list_items: (None, list_items, None))
 
     def build_section_snapshot(self, sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        snapshot: list[dict[str, Any]] = []
-        for section in sections:
-            if not isinstance(section, dict):
-                continue
-            heading = str(section.get("heading") or "").strip()
-            paragraphs = section.get("paragraphs") if isinstance(section.get("paragraphs"), list) else []
-            cleaned = [str(item).strip() for item in paragraphs if str(item).strip()]
-            if not heading and not cleaned:
-                continue
-            snapshot.append(
-                {
-                    "heading": heading,
-                    "paragraphs": cleaned,
-                }
-            )
-        return snapshot
+        return build_section_snapshot(sections)
 
     def build_section_block_index(self, block_index: list[dict[str, Any]]) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []

@@ -160,6 +160,15 @@ class PresentationTool:
                     if 0 <= index < len(slides):
                         del slides[index]
                 continue
+            if operation.op_type == "add_media":
+                self._add_media_to_slides(slides, target_indices, operation.target, operation.payload, instruction)
+                continue
+            if operation.op_type == "replace_media":
+                self._replace_media_in_slides(slides, target_indices, operation.target, operation.payload, instruction)
+                continue
+            if operation.op_type == "add_table":
+                self._add_table_to_slides(slides, target_indices, operation.target, operation.payload, instruction)
+                continue
             if operation.op_type == "append":
                 text = str(operation.payload.get("text") or instruction).strip() or instruction
                 slides.append(
@@ -175,6 +184,11 @@ class PresentationTool:
                 max_count = operation.payload.get("max_count") or ArtifactEditPlanner.extract_requested_count(instruction)
                 if max_count and len(slides) > int(max_count):
                     del slides[int(max_count) :]
+                continue
+            if operation.op_type == "update_layout":
+                if not target_indices and self._target_is_specific(operation.target):
+                    continue
+                self._apply_layout_to_slides(slides, target_indices or list(range(len(slides))), operation.payload)
                 continue
             if operation.op_type in {"rewrite", "update", "rename", "reorder"}:
                 if not target_indices and self._target_is_specific(operation.target):
@@ -278,3 +292,105 @@ class PresentationTool:
         if index < 0 or index >= total:
             return None
         return index
+
+    def _add_media_to_slides(
+        self,
+        slides: list,
+        target_indices: list[int],
+        target: dict,
+        payload: dict,
+        instruction: str,
+    ) -> None:
+        caption = str(payload.get("caption") or instruction).strip() or "补充图片说明"
+        targets = target_indices or ([] if self._target_is_specific(target) else [len(slides) - 1] if slides else [])
+        if not targets:
+            slides.append(
+                {
+                    "title": "配图说明",
+                    "bullets": [f"插图：{caption}"],
+                    "speaker_notes": f"新增配图说明：{caption}",
+                    "duration_sec": 45,
+                    "media": [{"kind": str(payload.get('media_kind') or 'image'), "caption": caption}],
+                }
+            )
+            return
+        for index in targets:
+            if not (0 <= index < len(slides)) or not isinstance(slides[index], dict):
+                continue
+            slide = slides[index]
+            bullets = slide.get("bullets") if isinstance(slide.get("bullets"), list) else []
+            slide["bullets"] = [*bullets[:4], f"插图：{caption}"]
+            media = slide.get("media") if isinstance(slide.get("media"), list) else []
+            media.append({"kind": str(payload.get("media_kind") or "image"), "caption": caption})
+            slide["media"] = media
+
+    def _replace_media_in_slides(
+        self,
+        slides: list,
+        target_indices: list[int],
+        target: dict,
+        payload: dict,
+        instruction: str,
+    ) -> None:
+        caption = str(payload.get("caption") or instruction).strip() or "更新素材说明"
+        targets = target_indices or ([] if self._target_is_specific(target) else list(range(len(slides))))
+        for index in targets:
+            if not (0 <= index < len(slides)) or not isinstance(slides[index], dict):
+                continue
+            slide = slides[index]
+            slide["media"] = [{"kind": str(payload.get("media_kind") or "image"), "caption": caption}]
+            slide["speaker_notes"] = f"{str(slide.get('speaker_notes') or '').strip()}\n替换素材：{caption}".strip()
+
+    def _add_table_to_slides(
+        self,
+        slides: list,
+        target_indices: list[int],
+        target: dict,
+        payload: dict,
+        instruction: str,
+    ) -> None:
+        rows = payload.get("rows") if isinstance(payload.get("rows"), list) and payload.get("rows") else [
+            ["字段", "内容"],
+            ["待补充", str(payload.get("title") or instruction).strip() or "表格型汇总"],
+        ]
+        title = str(payload.get("title") or "表格型汇总").strip() or "表格型汇总"
+        targets = target_indices or ([] if self._target_is_specific(target) else [])
+        if not targets:
+            slides.append(
+                {
+                    "title": title,
+                    "bullets": ["表格已补充到本页"],
+                    "speaker_notes": f"新增表格：{title}",
+                    "duration_sec": 60,
+                    "table": rows,
+                    "layout_hint": {"type": "table"},
+                }
+            )
+            return
+        for index in targets:
+            if not (0 <= index < len(slides)) or not isinstance(slides[index], dict):
+                continue
+            slide = slides[index]
+            slide["table"] = rows
+            bullets = slide.get("bullets") if isinstance(slide.get("bullets"), list) else []
+            slide["bullets"] = [*bullets[:4], f"表格更新：{title}"]
+
+    @staticmethod
+    def _apply_layout_to_slides(slides: list, target_indices: list[int], payload: dict) -> None:
+        position = str(payload.get("position") or "").strip().lower()
+        align = str(payload.get("align") or "").strip().lower()
+        instruction = str(payload.get("instruction") or "").strip()
+        for index in target_indices:
+            if not (0 <= index < len(slides)) or not isinstance(slides[index], dict):
+                continue
+            slide = slides[index]
+            current = slide.get("layout_hint") if isinstance(slide.get("layout_hint"), dict) else {}
+            slide["layout_hint"] = {
+                **current,
+                "position": position or current.get("position"),
+                "align": align or current.get("align"),
+                "instruction": instruction or current.get("instruction"),
+            }
+            note = str(slide.get("speaker_notes") or "").strip()
+            extra = f"布局调整：{instruction or position or align}".strip()
+            slide["speaker_notes"] = f"{note}\n{extra}".strip()

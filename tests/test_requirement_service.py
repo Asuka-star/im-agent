@@ -10,6 +10,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.db.models import Artifact, ConfirmationRequest, Message, Requirement, RequirementSource, TaskRun, TaskRunStep, UserAlias
 from app.schemas.feishu_event import FeishuMessageContext
+from app.schemas.requirement import RequirementResolveResult
 from app.services.requirement_resolver import RequirementResolver
 from app.services.requirement_service import RequirementService
 from app.services.task_run_service import TaskRunService
@@ -61,6 +62,40 @@ class _StubRequirementLLMService:
     def resolve_requirement_workspace(self, context: dict) -> dict:
         self.calls.append(context)
         return self.result
+
+
+class _StubCurrentArtifactSyncer:
+    def __init__(self) -> None:
+        self.synced: list[object] = []
+
+    def sync_requirement_current_artifacts(self, record: object) -> dict:
+        self.synced.append(record)
+        return {"status": "ready"}
+
+
+class _StubReplySender:
+    def deliver_reply(self, message, mode, reply_preview, **kwargs):
+        return {
+            "session_id": message.session_id,
+            "mode": mode,
+            "reply_preview": reply_preview,
+            "reply_sent": False,
+            "reply_error": None,
+            "artifacts": kwargs.get("artifacts", []) or [],
+        }
+
+
+class _StubResponseFormatter:
+    def format_clarification_reply(self, *, intent: str, clarification: dict) -> str:
+        return f"{intent}|{clarification['question']}|{clarification['reason']}"
+
+
+class _StubResultPersistence:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def persist_task_run_result(self, task_run_id: str, **kwargs) -> None:
+        self.calls.append({"task_run_id": task_run_id, **kwargs})
 
 
 class RequirementServiceTests(unittest.TestCase):
@@ -390,6 +425,277 @@ class RequirementServiceTests(unittest.TestCase):
         self.assertIsNotNone(detail.updated_at)
         assert detail.updated_at is not None
         self.assertGreater(detail.updated_at.replace(tzinfo=timezone.utc), datetime(2024, 1, 1, tzinfo=timezone.utc))
+
+    def test_update_requirement_updates_title_summary_and_status(self) -> None:
+        requirement = self.service.create_requirement(
+            title="原始需求名称",
+            primary_session_id="oc_edit",
+            summary="原始摘要",
+        )
+
+        detail = self.service.update_requirement(
+            requirement.requirement_id,
+            title="更新后的需求名称",
+            summary="新的摘要说明",
+            status="paused",
+        )
+
+        self.assertIsNotNone(detail)
+        assert detail is not None
+        self.assertEqual(detail.title, "更新后的需求名称")
+        self.assertEqual(detail.summary, "新的摘要说明")
+        self.assertEqual(detail.status, "paused")
+
+    def test_update_current_products_accepts_requirement_owned_artifacts_and_document(self) -> None:
+        requirement = self.service.create_requirement(
+            title="切换当前产物",
+            primary_session_id="oc_products",
+            summary="验证手工切换当前产物指针。",
+        )
+        self.service.session_document_service = _MappedSessionDocumentService(
+            {
+                "oc_products": [
+                    {
+                        "session_id": "oc_products",
+                        "document_id": "doc_manual",
+                        "title": "手工指定文档",
+                        "version": 3,
+                        "sync_mode": "manual",
+                        "is_current": True,
+                    }
+                ]
+            }
+        )
+        with patch("app.services.task_run_service.realtime_hub.emit_room"):
+            task_run = self.task_run_service.create_task_run(
+                session_id="oc_products",
+                title="生成当前产物",
+                source_type="group",
+                requirement_id=requirement.requirement_id,
+            )
+        slides = self.task_run_service.create_artifact(
+            task_run.task_run_id,
+            artifact_type="slides_package",
+            title="当前 PPT",
+            provider="local",
+            preview={"slides": []},
+        )
+        canvas = self.task_run_service.create_artifact(
+            task_run.task_run_id,
+            artifact_type="canvas",
+            title="当前画布",
+            provider="local",
+            preview={"shapes": [{"id": "n1", "type": "node", "text": "开始"}]},
+        )
+
+        detail = self.service.update_current_products(
+            requirement.requirement_id,
+            updates={
+                "current_document_id": "doc_manual",
+                "current_slides_artifact_id": slides.artifact_id,
+                "current_canvas_artifact_id": canvas.artifact_id,
+            },
+        )
+
+        self.assertIsNotNone(detail)
+        assert detail is not None
+        self.assertEqual(detail.current_document_id, "doc_manual")
+        self.assertEqual(detail.current_slides_artifact_id, slides.artifact_id)
+        self.assertEqual(detail.current_canvas_artifact_id, canvas.artifact_id)
+
+    def test_update_current_products_triggers_current_artifact_sync(self) -> None:
+        syncer = _StubCurrentArtifactSyncer()
+        self.service.current_artifact_syncer = syncer
+        requirement = self.service.create_requirement(
+            title="同步当前产物",
+            primary_session_id="oc_products_sync",
+            summary="切换当前产物后同步飞书主文档固定区块。",
+        )
+        self.service.session_document_service = _MappedSessionDocumentService(
+            {
+                "oc_products_sync": [
+                    {
+                        "session_id": "oc_products_sync",
+                        "document_id": "doc_manual_sync",
+                        "title": "手工指定文档",
+                        "version": 5,
+                        "sync_mode": "manual",
+                        "is_current": True,
+                    }
+                ]
+            }
+        )
+        with patch("app.services.task_run_service.realtime_hub.emit_room"):
+            task_run = self.task_run_service.create_task_run(
+                session_id="oc_products_sync",
+                title="生成当前 PPT",
+                source_type="group",
+                requirement_id=requirement.requirement_id,
+            )
+        slides = self.task_run_service.create_artifact(
+            task_run.task_run_id,
+            artifact_type="slides_package",
+            title="当前 PPT",
+            provider="local",
+            preview={"slides": []},
+        )
+
+        detail = self.service.update_current_products(
+            requirement.requirement_id,
+            updates={
+                "current_document_id": "doc_manual_sync",
+                "current_slides_artifact_id": slides.artifact_id,
+            },
+        )
+
+        self.assertIsNotNone(detail)
+        assert detail is not None
+        self.assertEqual(len(syncer.synced), 1)
+        self.assertEqual(syncer.synced[0].requirement_id, requirement.requirement_id)
+        self.assertEqual(syncer.synced[0].current_document_id, "doc_manual_sync")
+        self.assertEqual(syncer.synced[0].current_slides_artifact_id, slides.artifact_id)
+
+    def test_update_current_products_rejects_artifacts_outside_requirement(self) -> None:
+        requirement = self.service.create_requirement(
+            title="需求 A",
+            primary_session_id="oc_a",
+        )
+        other_requirement = self.service.create_requirement(
+            title="需求 B",
+            primary_session_id="oc_b",
+        )
+        with patch("app.services.task_run_service.realtime_hub.emit_room"):
+            task_run = self.task_run_service.create_task_run(
+                session_id="oc_b",
+                title="生成别的需求 PPT",
+                source_type="group",
+                requirement_id=other_requirement.requirement_id,
+            )
+        foreign_slides = self.task_run_service.create_artifact(
+            task_run.task_run_id,
+            artifact_type="slides_package",
+            title="外部 PPT",
+            provider="local",
+            preview={"slides": []},
+        )
+
+        with self.assertRaises(ValueError):
+            self.service.update_current_products(
+                requirement.requirement_id,
+                updates={"current_slides_artifact_id": foreign_slides.artifact_id},
+            )
+
+    def test_requirement_detail_includes_offline_sync_queue(self) -> None:
+        requirement = self.service.create_requirement(
+            title="Offline Sync Requirement",
+            primary_session_id="oc_offline_sync",
+            summary="Collect offline document return records.",
+        )
+        with patch("app.services.task_run_service.realtime_hub.emit_room"):
+            task_run = self.task_run_service.create_task_run(
+                session_id="oc_offline_sync",
+                title="Import offline meeting notes",
+                source_type="file",
+                requirement_id=requirement.requirement_id,
+            )
+        confirmation = self.task_run_service.create_confirmation(
+            task_run.task_run_id,
+            prompt="Choose how to process the offline document",
+            options=["仅更新当前文档", "更新文档 + 当前 PPT", "仅作为参考材料暂存"],
+        )
+        self.task_run_service.upsert_step(
+            task_run.task_run_id,
+            step_key="offline_document_parsed",
+            title="Parsed offline document",
+            step_type="offline_document",
+            status="done",
+            output_payload={"file_name": "meeting.docx", "file_extension": ".docx"},
+        )
+        self.task_run_service.upsert_step(
+            task_run.task_run_id,
+            step_key="offline_document_confirmation",
+            title="Await offline confirmation",
+            step_type="confirmation",
+            status="pending",
+            output_payload={
+                "available_follow_up_targets": ["slides"],
+                "merge_summary": {"summary_lines": ["拟更新章节 2 个"]},
+                "merge_plan": {"warning_flags": ["contains_rich_media"]},
+            },
+        )
+        self.task_run_service.update_task_run(
+            task_run.task_run_id,
+            stage="offline_document_confirmation",
+            status="waiting_confirmation",
+            metadata={
+                "offline_document_confirmation": {
+                    "confirmation_id": confirmation.confirmation_id,
+                    "file_name": "meeting.docx",
+                    "file_extension": ".docx",
+                    "available_follow_up_targets": ["slides"],
+                    "merge_summary": {"summary_lines": ["拟更新章节 2 个"]},
+                    "merge_plan": {"warning_flags": ["contains_rich_media"]},
+                }
+            },
+        )
+
+        detail = self.service.get_requirement(requirement.requirement_id)
+
+        self.assertIsNotNone(detail)
+        assert detail is not None
+        self.assertEqual(len(detail.offline_syncs), 1)
+        record = detail.offline_syncs[0]
+        self.assertEqual(record.task_run_id, task_run.task_run_id)
+        self.assertEqual(record.file_name, "meeting.docx")
+        self.assertEqual(record.status, "awaiting_confirmation")
+        self.assertEqual(record.confirmation_id, confirmation.confirmation_id)
+        self.assertEqual(record.available_follow_up_targets, ["slides"])
+        self.assertEqual(record.confirmation_options[0], "仅更新当前文档")
+
+    def test_requirement_detail_marks_ignored_duplicate_offline_sync(self) -> None:
+        requirement = self.service.create_requirement(
+            title="Offline Duplicate Requirement",
+            primary_session_id="oc_offline_duplicate",
+            summary="Track ignored duplicate offline uploads.",
+        )
+        with patch("app.services.task_run_service.realtime_hub.emit_room"):
+            task_run = self.task_run_service.create_task_run(
+                session_id="oc_offline_duplicate",
+                title="Import duplicate offline meeting notes",
+                source_type="file",
+                requirement_id=requirement.requirement_id,
+            )
+        self.task_run_service.upsert_step(
+            task_run.task_run_id,
+            step_key="offline_document_duplicate",
+            title="Ignored duplicate upload",
+            step_type="offline_document",
+            status="done",
+            output_payload={"duplicate_of_submission_id": "run_previous"},
+        )
+        self.task_run_service.update_task_run(
+            task_run.task_run_id,
+            stage="offline_document_duplicate",
+            status="completed",
+            metadata={
+                "offline_document_last_record": {
+                    "submission_id": task_run.task_run_id,
+                    "task_run_id": task_run.task_run_id,
+                    "file_name": "meeting.docx",
+                    "file_extension": ".docx",
+                    "status": "ignored_duplicate",
+                    "duplicate_of_submission_id": "run_previous",
+                }
+            },
+        )
+
+        detail = self.service.get_requirement(requirement.requirement_id)
+
+        self.assertIsNotNone(detail)
+        assert detail is not None
+        record = detail.offline_syncs[0]
+        self.assertEqual(record.status, "ignored_duplicate")
+        self.assertEqual(record.duplicate_of_submission_id, "run_previous")
 
     def test_resolver_creates_requirement_when_no_active_lifecycle_exists(self) -> None:
         resolver = RequirementResolver(self.service)
@@ -794,6 +1100,202 @@ class RequirementServiceTests(unittest.TestCase):
                 for source in detail.sources
             )
         )
+
+    def test_file_message_auto_binds_single_session_requirement_and_continues_offline_flow(self) -> None:
+        requirement = self.service.create_requirement(
+            title="校园活动报名系统",
+            primary_session_id="oc_file_requirement",
+            summary="承接离线评审纪要。",
+        )
+        offline_result = {
+            "session_id": "oc_file_requirement",
+            "mode": "offline_document",
+            "reply_preview": "已收到离线文档",
+            "reply_sent": False,
+            "reply_error": None,
+            "artifacts": [],
+        }
+        workflow = SimpleNamespace(
+            memory_service=Mock(),
+            task_run_service=self.task_run_service,
+            requirement_service=self.service,
+            requirement_resolver=SimpleNamespace(
+                resolve=Mock(return_value=RequirementResolveResult(
+                    action="skip",
+                    reason="文件名本身不足以自动归属，需要用户确认。",
+                ))
+            ),
+            response_formatter=_StubResponseFormatter(),
+            reply_sender=_StubReplySender(),
+            offline_document_execution=SimpleNamespace(
+                prepare_offline_document_submission=Mock(return_value=offline_result),
+            ),
+            _task_run_title=Mock(side_effect=lambda text, mode=None: text or "协作运行"),
+            _task_run_lifecycle_metadata=Mock(return_value={}),
+            _team_id_for_message=Mock(return_value="default"),
+            _ensure_sender_alias=Mock(return_value=None),
+        )
+        workflow.memory_service.get_message_lifecycle_info.return_value = {}
+        workflow.memory_service.get_user_message_content.return_value = None
+        workflow.memory_service.ensure_active_episode.return_value = SimpleNamespace(id=20)
+        entrypoint = WorkflowEntrypoint(workflow)
+
+        result = entrypoint.handle_message(
+            FeishuMessageContext(
+                event_id="evt_file_req",
+                message_id="msg_file_req",
+                chat_id="oc_file_requirement",
+                chat_type="p2p",
+                message_type="file",
+                session_id="oc_file_requirement",
+                sender_id="user_file",
+                text="评审纪要.docx",
+                raw_text="评审纪要.docx",
+                file_key="file_docx_1",
+                file_name="评审纪要.docx",
+                is_mentioned=False,
+            )
+        )
+
+        self.assertEqual(result["mode"], "offline_document")
+        workflow.offline_document_execution.prepare_offline_document_submission.assert_called_once()
+        task_runs = self.task_run_service.list_task_runs(session_id="oc_file_requirement", limit=10)
+        self.assertEqual(len(task_runs), 1)
+        detail = self.task_run_service.get_task_run(task_runs[0].task_run_id)
+        self.assertEqual(detail.requirement_id, requirement.requirement_id)
+        metadata = self.task_run_service.get_task_run_metadata(detail.task_run_id)
+        self.assertEqual(metadata["requirement_resolution"]["action"], "bind")
+        self.assertEqual(metadata["requirement_resolution"]["matched_by"], "single_session_requirement_file")
+
+    def test_file_message_does_not_auto_create_requirement_from_filename(self) -> None:
+        existing_count = len(self.service.list_requirements(session_id="oc_file_create", limit=10))
+        workflow = SimpleNamespace(
+            memory_service=Mock(),
+            task_run_service=self.task_run_service,
+            requirement_service=self.service,
+            requirement_resolver=SimpleNamespace(
+                resolve=Mock(return_value=RequirementResolveResult(
+                    action="create",
+                    requirement_id="req_from_filename",
+                    confidence=0.81,
+                    matched_by="filename_lifecycle_marker",
+                    reason="文件名像一个需求文档，准备自动新建需求。",
+                ))
+            ),
+            response_formatter=_StubResponseFormatter(),
+            reply_sender=_StubReplySender(),
+            offline_document_execution=SimpleNamespace(
+                prepare_offline_document_submission=Mock(),
+            ),
+            _task_run_title=Mock(side_effect=lambda text, mode=None: text or "协作运行"),
+            _task_run_lifecycle_metadata=Mock(return_value={}),
+            _team_id_for_message=Mock(return_value="default"),
+            _ensure_sender_alias=Mock(return_value=None),
+        )
+        workflow.memory_service.get_message_lifecycle_info.return_value = {}
+        workflow.memory_service.get_user_message_content.return_value = None
+        workflow.memory_service.ensure_active_episode.return_value = SimpleNamespace(id=21)
+        entrypoint = WorkflowEntrypoint(workflow)
+
+        result = entrypoint.handle_message(
+            FeishuMessageContext(
+                event_id="evt_file_create",
+                message_id="msg_file_create",
+                chat_id="oc_file_create",
+                chat_type="p2p",
+                message_type="file",
+                session_id="oc_file_create",
+                sender_id="user_file",
+                text="评审纪要.docx",
+                raw_text="评审纪要.docx",
+                file_key="file_docx_create",
+                file_name="评审纪要.docx",
+                is_mentioned=False,
+            )
+        )
+
+        self.assertTrue(result["pending_confirmation"])
+        self.assertEqual(result["task_run_stage"], "requirement_clarification")
+        self.assertIn("需求归属", result["reply_preview"])
+        workflow.offline_document_execution.prepare_offline_document_submission.assert_not_called()
+        task_runs = self.task_run_service.list_task_runs(session_id="oc_file_create", limit=10)
+        self.assertEqual(len(task_runs), 1)
+        detail = self.task_run_service.get_task_run(task_runs[0].task_run_id)
+        self.assertFalse(detail.requirement_id)
+        metadata = self.task_run_service.get_task_run_metadata(detail.task_run_id)
+        self.assertEqual(metadata["requirement_resolution"]["action"], "clarify")
+        self.assertEqual(metadata["requirement_resolution"]["matched_by"], "file_upload_requires_confirmation")
+        self.assertEqual(len(self.service.list_requirements(session_id="oc_file_create", limit=10)), existing_count)
+
+    def test_mentioned_canvas_request_uses_unified_result_persistence(self) -> None:
+        requirement = self.service.create_requirement(
+            title="校园活动报名系统",
+            primary_session_id="oc_canvas_sync",
+            summary="需要生成画布流程图并同步当前产物。",
+        )
+        persisted = _StubResultPersistence()
+        workflow = SimpleNamespace(
+            memory_service=Mock(),
+            task_run_service=self.task_run_service,
+            requirement_service=self.service,
+            requirement_resolver=SimpleNamespace(
+                resolve=Mock(return_value=RequirementResolveResult(
+                    action="bind",
+                    requirement_id=requirement.requirement_id,
+                    confidence=0.92,
+                    matched_by="semantic",
+                    reason="当前消息明确指向已有需求。",
+                ))
+            ),
+            result_persistence=persisted,
+            _handle_mentioned_request=Mock(return_value={
+                "session_id": "oc_canvas_sync",
+                "mode": "canvas",
+                "reply_preview": "已生成流程图",
+                "reply_sent": True,
+                "reply_error": None,
+                "analysis": None,
+                "artifacts": [
+                    {
+                        "artifact_type": "canvas",
+                        "title": "报名审核流程图",
+                        "preview": {"shapes": [{"id": "shape_1"}]},
+                    }
+                ],
+            }),
+            _task_run_title=Mock(side_effect=lambda text, mode=None: f"{mode or 'task'}:{text or ''}"),
+            _task_run_lifecycle_metadata=Mock(return_value={}),
+            _team_id_for_message=Mock(return_value="default"),
+            _ensure_sender_alias=Mock(return_value=None),
+        )
+        workflow.memory_service.get_message_lifecycle_info.return_value = {}
+        workflow.memory_service.get_user_message_content.return_value = None
+        workflow.memory_service.ensure_active_episode.return_value = SimpleNamespace(id=22)
+        entrypoint = WorkflowEntrypoint(workflow)
+
+        result = entrypoint.handle_message(
+            FeishuMessageContext(
+                event_id="evt_canvas_sync",
+                message_id="msg_canvas_sync",
+                chat_id="oc_canvas_sync",
+                chat_type="p2p",
+                message_type="text",
+                session_id="oc_canvas_sync",
+                sender_id="user_canvas",
+                text="帮我生成一下流程图",
+                raw_text="帮我生成一下流程图",
+                is_mentioned=True,
+            )
+        )
+
+        self.assertEqual(result["mode"], "canvas")
+        self.assertEqual(len(persisted.calls), 1)
+        call = persisted.calls[0]
+        self.assertEqual(call["task_run_id"], result["task_run_id"])
+        self.assertEqual(call["message_text"], "帮我生成一下流程图")
+        self.assertEqual(call["session_id"], "oc_canvas_sync")
+        self.assertEqual(call["source_message_id"], "msg_canvas_sync")
+        self.assertEqual(call["result"]["artifacts"][0]["artifact_type"], "canvas")
 
     def test_resolver_creates_requirement_for_new_session_when_other_active_exists(self) -> None:
         self.service.create_requirement(
