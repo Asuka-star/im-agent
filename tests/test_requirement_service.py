@@ -1227,6 +1227,61 @@ class RequirementServiceTests(unittest.TestCase):
         self.assertEqual(metadata["requirement_resolution"]["matched_by"], "file_upload_requires_confirmation")
         self.assertEqual(len(self.service.list_requirements(session_id="oc_file_create", limit=10)), existing_count)
 
+    def test_p2p_requirement_inventory_query_lists_existing_requirements_without_resolver(self) -> None:
+        current = self.service.create_requirement(
+            title="校园活动报名与审核系统",
+            primary_session_id="oc_p2p_inventory",
+            summary="学生报名、负责人审核、老师看统计。",
+        )
+        global_item = self.service.create_requirement(
+            title="社团纳新管理系统",
+            primary_session_id="oc_other_inventory",
+            summary="社团发布纳新计划并收集报名表。",
+        )
+        workflow = SimpleNamespace(
+            memory_service=Mock(),
+            task_run_service=self.task_run_service,
+            requirement_service=self.service,
+            requirement_resolver=SimpleNamespace(
+                resolve=Mock(side_effect=AssertionError("inventory query should not enter requirement resolver")),
+            ),
+            reply_sender=_StubReplySender(),
+            _task_run_title=Mock(side_effect=lambda text, mode=None: f"{mode or 'task'}:{text or ''}"),
+            _task_run_lifecycle_metadata=Mock(return_value={}),
+            _condense_text=Mock(side_effect=lambda text: " ".join(str(text or "").split())[:500]),
+            _team_id_for_message=Mock(return_value="default"),
+            _ensure_sender_alias=Mock(return_value=None),
+        )
+        workflow.memory_service.get_message_lifecycle_info.return_value = {}
+        workflow.memory_service.get_user_message_content.return_value = None
+        entrypoint = WorkflowEntrypoint(workflow)
+
+        result = entrypoint.handle_message(
+            FeishuMessageContext(
+                event_id="evt_inventory",
+                message_id="msg_inventory",
+                chat_id="oc_p2p_inventory",
+                chat_type="p2p",
+                message_type="text",
+                session_id="oc_p2p_inventory",
+                sender_id="user_inventory",
+                text="现在都有什么需求？",
+                raw_text="现在都有什么需求？",
+                is_mentioned=False,
+            )
+        )
+
+        self.assertEqual(result["mode"], "requirements")
+        self.assertEqual(result["requirement_count"], 2)
+        self.assertIn(current.title, result["reply_preview"])
+        self.assertIn(global_item.title, result["reply_preview"])
+        workflow.requirement_resolver.resolve.assert_not_called()
+        task_runs = self.task_run_service.list_task_runs(session_id="oc_p2p_inventory", limit=10)
+        self.assertEqual(len(task_runs), 1)
+        detail = self.task_run_service.get_task_run(task_runs[0].task_run_id)
+        self.assertEqual(detail.intent, "requirements")
+        self.assertEqual(detail.status, "completed")
+
     def test_mentioned_canvas_request_uses_unified_result_persistence(self) -> None:
         requirement = self.service.create_requirement(
             title="校园活动报名系统",

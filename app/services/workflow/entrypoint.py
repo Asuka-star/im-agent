@@ -36,6 +36,169 @@ class WorkflowEntrypoint:
         except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to merge task run metadata: task_run_id=%s error=%s", task_run_id, exc)
 
+    @staticmethod
+    def _is_requirement_inventory_query(text: str | None) -> bool:
+        normalized = "".join(str(text or "").lower().split())
+        if not normalized:
+            return False
+        query_markers = (
+            "需求列表",
+            "当前需求",
+            "已有需求",
+            "现有需求",
+            "全部需求",
+            "所有需求",
+            "有哪些需求",
+            "有什么需求",
+            "都有什么需求",
+            "查看需求工作区",
+            "列出需求工作区",
+            "列一下需求",
+            "查看需求",
+        )
+        action_markers = (
+            "生成需求",
+            "整理需求",
+            "新建需求",
+            "创建需求",
+            "修改需求",
+            "更新需求",
+            "需求文档",
+            "需求方案",
+        )
+        return any(marker in normalized for marker in query_markers) and not any(
+            marker in normalized for marker in action_markers
+        )
+
+    def _load_requirement_inventory(self, session_id: str, *, limit: int = 10) -> list[Any]:
+        workflow = self.workflow
+        merged: list[Any] = []
+        seen: set[str] = set()
+        for loader in (
+            lambda: workflow.requirement_service.list_requirements(session_id=session_id, limit=limit),
+            lambda: workflow.requirement_service.list_requirements(limit=limit),
+        ):
+            try:
+                items = loader()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to load requirement inventory: session_id=%s error=%s", session_id, exc)
+                continue
+            for item in items:
+                requirement_id = str(getattr(item, "requirement_id", "") or "").strip()
+                if not requirement_id or requirement_id in seen:
+                    continue
+                seen.add(requirement_id)
+                merged.append(item)
+                if len(merged) >= limit:
+                    return merged
+        return merged
+
+    @staticmethod
+    def _format_requirement_inventory_reply(requirements: list[Any], *, session_id: str) -> str:
+        if not requirements:
+            return "当前还没有可见的需求工作区。你可以先在群聊里沉淀需求，或直接告诉我“新建一个……需求”。"
+
+        lines = [f"当前我能看到 {len(requirements)} 个需求工作区："]
+        for index, item in enumerate(requirements, start=1):
+            title = str(getattr(item, "title", "") or "未命名需求").strip()
+            requirement_id = str(getattr(item, "requirement_id", "") or "").strip()
+            status = str(getattr(item, "status", "") or "active").strip()
+            source_count = int(getattr(item, "source_count", 0) or 0)
+            task_run_count = int(getattr(item, "task_run_count", 0) or 0)
+            relation = "当前会话相关" if str(getattr(item, "primary_session_id", "") or "") == session_id else "全局最近"
+            lines.append(
+                f"{index}. {title}（{relation}，状态：{status}，任务：{task_run_count}，来源：{source_count}）"
+            )
+            if requirement_id:
+                lines.append(f"   requirement_id: {requirement_id}")
+            summary = str(getattr(item, "summary", "") or "").strip()
+            if summary:
+                lines.append(f"   摘要：{summary[:120]}")
+        lines.append("如果要继续某一个需求，可以直接说“基于第 1 个需求生成文档 / PPT / 流程图”。")
+        return "\n".join(lines)
+
+    def _handle_requirement_inventory_query(self, message: FeishuMessageContext, *, started_at: float) -> dict:
+        workflow = self.workflow
+        requirements = self._load_requirement_inventory(message.session_id, limit=10)
+        lifecycle_metadata_factory = getattr(workflow, "_task_run_lifecycle_metadata", None)
+        lifecycle_metadata = lifecycle_metadata_factory("requirements") if callable(lifecycle_metadata_factory) else {}
+        task_run = workflow.task_run_service.create_task_run(
+            session_id=message.session_id,
+            title=workflow._task_run_title(message.text, "requirements"),
+            source_type=message.chat_type or "unknown",
+            source_ref=message.chat_id,
+            trigger_message_id=message.message_id,
+            created_by=message.sender_id,
+            intent="requirements",
+            metadata={
+                "event_id": message.event_id,
+                "chat_id": message.chat_id,
+                "is_mentioned": message.is_mentioned,
+                "requirement_inventory_query": True,
+                "requirement_count": len(requirements),
+                **lifecycle_metadata,
+            },
+        )
+        workflow.task_run_service.upsert_step(
+            task_run.task_run_id,
+            step_key="request_received",
+            title="接收用户请求",
+            step_type="input",
+            status="done",
+            input_payload={
+                "message_id": message.message_id,
+                "text": message.text,
+                "chat_type": message.chat_type,
+            },
+        )
+        reply_preview = self._format_requirement_inventory_reply(requirements, session_id=message.session_id)
+        result = workflow.reply_sender.deliver_reply(
+            message,
+            "requirements",
+            reply_preview,
+            analysis=None,
+            artifacts=[],
+            append_next_actions=False,
+            task_run_id=task_run.task_run_id,
+        )
+        workflow.task_run_service.upsert_step(
+            task_run.task_run_id,
+            step_key="response_generated",
+            title="生成处理结果",
+            step_type="workflow",
+            status="done",
+            output_payload={
+                "mode": result["mode"],
+                "reply_preview": result["reply_preview"],
+                "requirement_count": len(requirements),
+                "artifact_count": 0,
+            },
+        )
+        condense_text = getattr(workflow, "_condense_text", None)
+        latest_summary = (
+            condense_text(result.get("reply_preview"))
+            if callable(condense_text)
+            else " ".join(str(result.get("reply_preview") or "").split())[:500]
+        )
+        workflow.task_run_service.update_task_run(
+            task_run.task_run_id,
+            intent="requirements",
+            title=workflow._task_run_title(message.text, result["mode"]),
+            stage="delivered",
+            status="completed",
+            latest_summary=latest_summary,
+            latest_reply_preview=result.get("reply_preview"),
+            latest_error=result.get("reply_error"),
+        )
+        result["task_run_id"] = task_run.task_run_id
+        result["requirement_count"] = len(requirements)
+        logger.info(
+            "Workflow stage completed: message_id=%s stage=requirement_inventory total_elapsed_ms=%.1f",
+            message.message_id,
+            (time.perf_counter() - started_at) * 1000,
+        )
+        return result
+
     def handle_message(self, message: FeishuMessageContext) -> dict:
         workflow = self.workflow
         started_at = time.perf_counter()
@@ -110,6 +273,9 @@ class WorkflowEntrypoint:
             if requirement_resolution is not None:
                 result["requirement_resolution"] = requirement_resolution.model_dump(mode="json")
             return result
+
+        if self._is_requirement_inventory_query(message.text or message.raw_text):
+            return self._handle_requirement_inventory_query(message, started_at=started_at)
 
         requirement_resolution = workflow.requirement_resolver.resolve(message)
         requirement_resolution = self._normalize_file_requirement_resolution(message, requirement_resolution)
